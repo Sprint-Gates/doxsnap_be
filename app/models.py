@@ -11,9 +11,10 @@ class User(Base):
     user_email = Column(String, unique=True, nullable=False)
     user_name = Column(String)
     user_avatar = Column(String)
+    is_verified = Column(Integer, default=0)  # 0 = False, 1 = True
 
     auth = relationship("Auth", back_populates="user", uselist=False)
-    user = relationship("User", back_populates="refresh_tokens")
+    refresh_tokens = relationship("RefreshToken", back_populates="user")
 
 class Auth(Base):
     __tablename__ = "authentication"
@@ -34,4 +35,4 @@ class RefreshToken(Base):
     reftok_revoked_at = Column(DateTime, nullable=True)
     reftok_issued_from_ip = Column(String(45))
 
-    refresh_tokens = relationship("RefreshToken", back_populates="user")
+    user = relationship("User", back_populates="refresh_tokens")
