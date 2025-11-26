@@ -10,7 +10,7 @@ from fastapi import HTTPException, status
 
 from app.models import User, RefreshToken, Auth
 from app.login.schema import LoginRequest
-from app.auth_utils import verify_password, create_access_token, create_refresh_token
+from app.utils.auth_utils import verify_password, create_access_token, create_refresh_token
 
 # Configure logger
 
@@ -54,13 +54,23 @@ def login_user(db: Session, data: LoginRequest, ip_address: str) -> Dict[str, st
     Raises:
         HTTPException: For invalid credentials or locked accounts
     """
-    logger.info(f"Login attempt for email '{data.email}'", extra={"action": ACTION_LOGIN})
+    logger.info(f"Login attempt for email '{data.user_email}'", extra={"action": ACTION_LOGIN})
 
     # Retrieve user
-    user: Optional[User] = db.query(User).filter(User.user_email == data.email).first()
+    user: Optional[User] = db.query(User).filter(User.user_email == data.user_email).first()
     if not user:
-        logger.warning(f"Login failed: user not found ({data.email})", extra={"action": ACTION_LOGIN})
+        logger.warning(f"Login failed: user not found ({data.user_email})", extra={"action": ACTION_LOGIN})
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+    
+    if not user.user_is_verified:
+        logger.warning(
+            f"Login failed: email not verified for user {user.user_email}",
+            extra={"action": ACTION_LOGIN},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Email not verified. Please verify your email before logging in."
+        )
 
     # Retrieve authentication record
     auth: Optional[Auth] = db.query(Auth).filter(Auth.auth_user_id == user.user_id).first()
@@ -79,9 +89,9 @@ def login_user(db: Session, data: LoginRequest, ip_address: str) -> Dict[str, st
         )
 
     # Verify password
-    if not verify_password(data.password, auth.auth_password_hash):
+    if not verify_password(data.user_password, auth.auth_password_hash):
         handle_failed_login(auth, user.user_id, db)
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect password")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
 
     # Successful login
     auth.auth_failed_login_attempts = 0
@@ -94,10 +104,10 @@ def login_user(db: Session, data: LoginRequest, ip_address: str) -> Dict[str, st
 
     # Store refresh token in DB
     refresh_token = RefreshToken(
-        reftok_user_id=user.user_id,
-        reftok_token=refresh_token_str,
-        reftok_expires_at=now + timedelta(days=7),
-        reftok_issued_from_ip=ip_address
+        rftk_user_id=user.user_id,
+        rftk_token=refresh_token_str,
+        rftk_expires_at=now + timedelta(days=7),
+        rftk_issued_from_ip=ip_address
     )
     db.add(refresh_token)
     db.commit()

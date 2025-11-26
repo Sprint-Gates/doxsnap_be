@@ -6,8 +6,8 @@ from pydantic import BaseModel, EmailStr, Field
 
 class LoginRequest(BaseModel):
     """ Schema for user login request """
-    email: EmailStr = Field(..., description="User email address")
-    password: str = Field(..., description="User password")
+    user_email: EmailStr = Field(..., description="User email address")
+    user_password: str = Field(..., description="User password")
 
 class Config:
     from_attributes = True

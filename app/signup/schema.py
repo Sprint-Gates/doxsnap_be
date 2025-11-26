@@ -2,13 +2,13 @@
 Schema definitions for authentication (signup)
 """
 
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, Field
 
 class SignupRequest(BaseModel):
     """Schema for user signup request"""
 
-    email: EmailStr = Field(..., description="User email address")
-    password: str = Field(..., min_length=8, description="User password, minimum 8 characters")
+    user_email: str = Field(..., description="User email address")
+    user_password: str = Field(..., min_length=8, description="User password, minimum 8 characters")
     user_name: str = Field(..., min_length=1, description="Username for the account")
     user_avatar: str = Field(None, description="URL or path to user avatar")
 

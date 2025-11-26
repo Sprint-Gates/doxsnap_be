@@ -1,4 +1,5 @@
 import re
+import dns.resolver
 from datetime import datetime, timedelta
 from passlib.context import CryptContext
 import secrets
@@ -12,6 +13,7 @@ pwd_context = CryptContext(schemes=["argon2"], deprecated="auto")
 JWT_SECRET = os.getenv("JWT_SECRET", "mysecretkey")
 JWT_ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 15
+VERIFICATION_TOKEN_EXPIRE_MINUTES = 30
 
 # Password
 def get_password_hash(password):
@@ -29,6 +31,13 @@ def validate_password_complexity(password: str):
         return False
     return True
 
+EMAIL_REGEX = re.compile(
+    r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
+)
+
+def validate_email_format(email: str) -> bool:
+    return bool(EMAIL_REGEX.match(email))
+
 # JWT
 def create_access_token(data: dict, expires_minutes=ACCESS_TOKEN_EXPIRE_MINUTES):
     to_encode = data.copy()
@@ -40,3 +49,4 @@ def create_access_token(data: dict, expires_minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
 # Refresh Token
 def create_refresh_token():
     return secrets.token_urlsafe(64)
+
