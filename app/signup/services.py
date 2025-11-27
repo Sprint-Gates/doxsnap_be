@@ -79,13 +79,14 @@ def signup_user(db: Session, data: SignupRequest, ip_address: str) -> JSONRespon
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Password should caintain at least 8 characters, 1 Upper character, and 1 Special characters",
         )
-
+    
     # Create user
     user = User(
         user_email=data.user_email,
         user_name=data.user_name,
         user_avatar=data.user_avatar,
         user_is_verified=0,
+        user_role="CLIENT_USER",
     )
     db.add(user)
     db.commit()

@@ -40,7 +40,7 @@ def validate_email_format(email: str) -> bool:
 
 # JWT
 def create_access_token(data: dict, expires_minutes=ACCESS_TOKEN_EXPIRE_MINUTES):
-    to_encode = data.copy()
+    to_encode = data
     expire = datetime.utcnow() + timedelta(minutes=expires_minutes)
     to_encode.update({"exp": expire})
     encoded_jwt = jwt.encode(to_encode, JWT_SECRET, algorithm=JWT_ALGORITHM)

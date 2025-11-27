@@ -26,13 +26,6 @@ class User(Base):
     email_verifications = relationship("EmailVerification", back_populates="user")
     company = relationship("Company", back_populates="users")
 
-class Company(Base):
-    __tablename__ = "companies"
-    company_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    company_name = Column(String)
-
-    users = relationship("User", back_populates="company")
-
 class Auth(Base):
     __tablename__ = "authentication"
     auth_user_id = Column(UUID(as_uuid=True), ForeignKey("users.user_id"), primary_key=True)
@@ -63,3 +56,45 @@ class EmailVerification(Base):
     emvr_expires_at = Column(DateTime, nullable=False, default=lambda: datetime.utcnow() + timedelta(hours=24))
 
     user = relationship("User", back_populates="email_verifications")
+
+class Company(Base):
+    __tablename__ = "companies"
+    company_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    company_name = Column(String, unique=True, nullable=False)
+
+
+    users = relationship("User", back_populates="company")
+    branches = relationship("Branch", back_populates="company")
+    vendors = relationship("Vendor", back_populates="company")
+
+class Branch(Base):
+    __tablename__ = "branches"
+    branch_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    branch_name = Column(String, nullable=False)
+    branch_code = Column(String, unique=True, nullable=False)
+    branch_address_country = Column(String, nullable=True)
+    branch_address_city = Column(String, nullable=True)
+    branch_address_street = Column(String, nullable=True)
+    branch_accounting_number = Column(String, nullable=False)
+    branch_is_active = Column(Boolean, default=True) 
+    branch_company_id = Column(UUID(as_uuid=True), ForeignKey("companies.company_id", ondelete="CASCADE"), nullable=False)
+
+    company = relationship("Company", back_populates="branches")
+
+class Vendor(Base):
+    __tablename__ = "vendors"
+    vendor_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    vendor_name = Column(String, nullable=False)
+    vendor_accounting_number = Column(String, nullable=False)
+    vendor_code = Column(String, unique=True, nullable=False)
+    vendor_vat_number = Column(String, nullable=True)
+    vendor_payable_account = Column(Boolean, nullable=True)
+    vendor_receivable_account = Column(Boolean, nullable=True)
+    vendor_tax_rate = Column(Integer, nullable=True) 
+    vendor_address_country = Column(String, nullable=True)
+    vendor_address_city = Column(String, nullable=True)
+    vendor_address_street = Column(String, nullable=True)
+    vendor_is_active = Column(Boolean, default=True)
+    vendor_company_id = Column(UUID(as_uuid=True), ForeignKey("companies.company_id", ondelete="CASCADE"), nullable=False)
+
+    company = relationship("Company", back_populates="vendors")
