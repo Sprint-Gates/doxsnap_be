@@ -25,6 +25,8 @@ class User(Base):
     refresh_tokens = relationship("RefreshToken", back_populates="user")
     email_verifications = relationship("EmailVerification", back_populates="user")
     company = relationship("Company", back_populates="users")
+    user_branch_links = relationship("UserBranchAssignment", back_populates="user")
+
 
 class Auth(Base):
     __tablename__ = "authentication"
@@ -66,20 +68,19 @@ class Company(Base):
     users = relationship("User", back_populates="company")
     branches = relationship("Branch", back_populates="company")
     vendors = relationship("Vendor", back_populates="company")
+    udc_items = relationship("UDC", back_populates="company")
 
 class Branch(Base):
     __tablename__ = "branches"
     branch_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     branch_name = Column(String, nullable=False)
     branch_code = Column(String, unique=True, nullable=False)
-    branch_address_country = Column(String, nullable=True)
-    branch_address_city = Column(String, nullable=True)
-    branch_address_street = Column(String, nullable=True)
     branch_accounting_number = Column(String, nullable=False)
     branch_is_active = Column(Boolean, default=True) 
     branch_company_id = Column(UUID(as_uuid=True), ForeignKey("companies.company_id", ondelete="CASCADE"), nullable=False)
 
     company = relationship("Company", back_populates="branches")
+    user_branch_links = relationship("UserBranchAssignment", back_populates="branch")
 
 class Vendor(Base):
     __tablename__ = "vendors"
@@ -91,10 +92,43 @@ class Vendor(Base):
     vendor_payable_account = Column(Boolean, nullable=True)
     vendor_receivable_account = Column(Boolean, nullable=True)
     vendor_tax_rate = Column(Integer, nullable=True) 
-    vendor_address_country = Column(String, nullable=True)
-    vendor_address_city = Column(String, nullable=True)
-    vendor_address_street = Column(String, nullable=True)
     vendor_is_active = Column(Boolean, default=True)
     vendor_company_id = Column(UUID(as_uuid=True), ForeignKey("companies.company_id", ondelete="CASCADE"), nullable=False)
 
     company = relationship("Company", back_populates="vendors")
+
+class UDC(Base):
+    __tablename__ = "udc"
+
+    udc_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    udc_country = Column(String, nullable=False)
+    udc_city = Column(String, nullable=False)
+    udc_state = Column(String, nullable=False)
+    udc_company_id = Column(UUID(as_uuid=True),
+                            ForeignKey("companies.company_id", ondelete="CASCADE"),
+                            nullable=False)
+
+    company = relationship("Company", back_populates="udc_items")
+
+class UserBranchAssignment(Base):
+    __tablename__ = "user_branch_assignments"
+
+    uba_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+
+    uba_user_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("users.user_id", ondelete="CASCADE"),
+        nullable=False
+    )
+
+    uba_branch_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("branches.branch_id", ondelete="CASCADE"),
+        nullable=False
+    )
+
+    uba_is_active = Column(Boolean, default=True, nullable=False)
+
+    # Relationships
+    user = relationship("User", back_populates="user_branch_links")
+    branch = relationship("Branch", back_populates="user_branch_links")
