@@ -446,7 +446,15 @@ async def bulk_import_vendors(
     """
     Bulk import vendors from misc/vendors-mmg.xlsx file.
     Skips vendors that already exist (by name).
+    Restricted to specific user only.
     """
+    # Restrict to specific user
+    if current_user.email != "flahham@mmg-holdings.com":
+        raise HTTPException(
+            status_code=403,
+            detail="This endpoint is restricted"
+        )
+
     try:
         import pandas as pd
     except ImportError:
