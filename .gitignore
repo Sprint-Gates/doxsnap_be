@@ -76,6 +76,7 @@ pip-log.txt
 # MISC
 misc/*
 !misc/SFG20.xml
+!misc/vendors-mmg.xlsx
 mock_emails/*
 templates/*
 sandbox/*

@@ -8,6 +8,10 @@ from app.database import get_db
 from app.models import Vendor, User, ProcessedImage, Project, Branch, Client
 from app.api.auth import get_current_user
 import json
+import os
+import logging
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 security = HTTPBearer()
@@ -431,4 +435,100 @@ async def get_vendor_invoices(
         },
         "total_invoices": len(result),
         "invoices": result
+    }
+
+
+@router.post("/bulk-import")
+async def bulk_import_vendors(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Bulk import vendors from misc/vendors-mmg.xlsx file.
+    Skips vendors that already exist (by name).
+    """
+    try:
+        import pandas as pd
+    except ImportError:
+        raise HTTPException(
+            status_code=500,
+            detail="pandas not installed on server"
+        )
+
+    # Find the Excel file
+    backend_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    excel_path = os.path.join(backend_dir, 'misc', 'vendors-mmg.xlsx')
+
+    if not os.path.exists(excel_path):
+        raise HTTPException(
+            status_code=404,
+            detail=f"Vendor file not found at {excel_path}"
+        )
+
+    # Read Excel file
+    df = pd.read_excel(excel_path)
+
+    created = 0
+    skipped = 0
+    errors = []
+
+    # Get existing vendor names for this company
+    existing_names = set(
+        v.name.lower() for v in db.query(Vendor.name).filter(
+            Vendor.company_id == current_user.company_id
+        ).all()
+    )
+
+    for _, row in df.iterrows():
+        try:
+            name = str(row['Alpha Name']).strip() if pd.notna(row['Alpha Name']) else None
+            if not name or name == 'nan' or name.lower() in existing_names:
+                skipped += 1
+                continue
+
+            # Extract tax number
+            tax_number = None
+            if pd.notna(row['Tax ID']):
+                tax_str = str(row['Tax ID']).strip()
+                if tax_str and tax_str != 'nan':
+                    tax_number = tax_str
+
+            # Extract registration number
+            reg_number = None
+            if pd.notna(row['Address Number']):
+                reg_number = str(row['Address Number']).strip()
+
+            # Extract notes
+            notes = None
+            if pd.notna(row['Description Compressed']):
+                notes_str = str(row['Description Compressed']).strip()
+                if notes_str and notes_str != 'nan':
+                    notes = notes_str
+
+            vendor = Vendor(
+                company_id=current_user.company_id,
+                name=name,
+                display_name=name,
+                tax_number=tax_number,
+                registration_number=reg_number,
+                notes=notes,
+                is_active=True
+            )
+            db.add(vendor)
+            existing_names.add(name.lower())
+            created += 1
+
+        except Exception as e:
+            errors.append({"row": _, "error": str(e)})
+
+    db.commit()
+
+    logger.info(f"Bulk vendor import: created={created}, skipped={skipped}, errors={len(errors)}")
+
+    return {
+        "success": True,
+        "created": created,
+        "skipped": skipped,
+        "errors": len(errors),
+        "error_details": errors[:10] if errors else []
     }
