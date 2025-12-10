@@ -2390,3 +2390,167 @@ async def get_unlinked_invoice_items(
         }
         for item in unlinked_items
     ]
+
+
+# ============ Bulk Import ============
+
+@router.post("/bulk-import")
+async def bulk_import_items(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Bulk import items from misc/item-master-mmg.xls file.
+    Skips items that already exist (by item_number).
+    Restricted to specific user only.
+    """
+    # Restrict to specific user
+    if user.email != "flahham@mmg-holdings.com":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This endpoint is restricted"
+        )
+
+    try:
+        from lxml import etree
+    except ImportError:
+        raise HTTPException(
+            status_code=500,
+            detail="lxml not installed on server"
+        )
+
+    import os
+
+    # Find the Excel file
+    backend_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    excel_path = os.path.join(backend_dir, 'misc', 'item-master-mmg.xls')
+
+    if not os.path.exists(excel_path):
+        raise HTTPException(
+            status_code=404,
+            detail=f"Item master file not found at {excel_path}"
+        )
+
+    # Parse XML spreadsheet with recovery mode
+    parser = etree.XMLParser(recover=True)
+    tree = etree.parse(excel_path, parser)
+    root = tree.getroot()
+
+    # Find worksheet and rows
+    ns = '{urn:schemas-microsoft-com:office:spreadsheet}'
+    worksheets = root.findall(f'.//{ns}Worksheet')
+    if not worksheets:
+        raise HTTPException(status_code=500, detail="No worksheet found in file")
+
+    table = worksheets[0].find(f'{ns}Table')
+    rows = table.findall(f'{ns}Row')
+
+    if len(rows) < 2:
+        raise HTTPException(status_code=500, detail="File has no data rows")
+
+    # Get headers from first row
+    header_row = rows[0]
+    headers = []
+    for cell in header_row.findall(f'{ns}Cell'):
+        data = cell.find(f'{ns}Data')
+        headers.append(data.text if data is not None else '')
+
+    # Create column index map
+    col_map = {h: i for i, h in enumerate(headers)}
+
+    # Get existing item numbers for this company
+    existing_items = set(
+        item.item_number.lower() for item in db.query(ItemMaster.item_number).filter(
+            ItemMaster.company_id == user.company_id
+        ).all()
+    )
+
+    created = 0
+    skipped = 0
+    errors = []
+
+    # Process data rows
+    for row_idx, row in enumerate(rows[1:], start=2):
+        try:
+            # Extract cell values
+            cells = row.findall(f'{ns}Cell')
+            values = [''] * len(headers)
+
+            cell_idx = 0
+            for cell in cells:
+                # Handle ss:Index attribute for sparse rows
+                index_attr = cell.get(f'{ns}Index')
+                if index_attr:
+                    cell_idx = int(index_attr) - 1
+
+                data = cell.find(f'{ns}Data')
+                if data is not None and data.text:
+                    if cell_idx < len(values):
+                        values[cell_idx] = data.text.strip()
+                cell_idx += 1
+
+            # Get item number
+            item_number = values[col_map.get('Item Number', 2)] if 'Item Number' in col_map else ''
+            if not item_number or item_number.lower() in existing_items:
+                skipped += 1
+                continue
+
+            # Get description (concat Description + Description 2)
+            desc1 = values[col_map.get('Description', 3)] if 'Description' in col_map else ''
+            desc2 = values[col_map.get('Description 2', 4)] if 'Description 2' in col_map else ''
+            description = f"{desc1} {desc2}".strip() if desc2 else desc1
+
+            if not description:
+                description = item_number  # Fallback
+
+            # Get short item number
+            short_item_str = values[col_map.get('Short Item No', 0)] if 'Short Item No' in col_map else ''
+            short_item_no = None
+            if short_item_str:
+                try:
+                    short_item_no = int(float(short_item_str))
+                except:
+                    pass
+
+            # Get search text
+            search_text = values[col_map.get('Search Text', 5)] if 'Search Text' in col_map else None
+
+            # Get stocking type and line type
+            stocking_type = values[col_map.get('Stocking Type', 7)] if 'Stocking Type' in col_map else 'S'
+            line_type = values[col_map.get('Line Type', 6)] if 'Line Type' in col_map else 'S'
+
+            item = ItemMaster(
+                company_id=user.company_id,
+                item_number=item_number,
+                short_item_no=short_item_no,
+                description=description[:500],
+                search_text=search_text[:500] if search_text else None,
+                stocking_type=stocking_type[:10] if stocking_type else 'S',
+                line_type=line_type[:10] if line_type else 'S',
+                is_active=True,
+                created_by=user.id
+            )
+            db.add(item)
+            existing_items.add(item_number.lower())
+            created += 1
+
+            # Commit in batches of 1000
+            if created % 1000 == 0:
+                db.flush()
+                logger.info(f"Item import progress: {created} items created")
+
+        except Exception as e:
+            errors.append({"row": row_idx, "error": str(e)})
+            if len(errors) > 100:
+                break  # Stop if too many errors
+
+    db.commit()
+    logger.info(f"Bulk item import: created={created}, skipped={skipped}, errors={len(errors)}")
+
+    return {
+        "success": True,
+        "created": created,
+        "skipped": skipped,
+        "errors": len(errors),
+        "error_details": errors[:10] if errors else []
+    }
