@@ -6,10 +6,11 @@ from sqlalchemy.orm import Session
 import os
 
 from app.database import get_db
-from app.schemas import UserCreate, UserLogin, Token, User as UserSchema, PasswordReset, UserUpdate
+from app.schemas import UserCreate, UserLogin, Token, User as UserSchema, PasswordReset, PasswordResetConfirm, UserUpdate
 from app.services.auth import create_user, authenticate_user, get_user_by_email, get_user_by_id, update_user_profile
-from app.utils.security import create_access_token, verify_token
+from app.utils.security import create_access_token, verify_token, get_password_hash
 from app.config import settings
+from app.services.otp import OTPService
 
 router = APIRouter()
 security = HTTPBearer()
@@ -139,13 +140,79 @@ async def update_profile(
         )
 
 
+@router.post("/forgot-password")
+async def forgot_password(password_reset: PasswordReset, db: Session = Depends(get_db)):
+    """
+    Request a password reset OTP.
+    Sends an OTP code to the user's email if it exists.
+    """
+    user = get_user_by_email(db, password_reset.email)
+
+    # Always return success message to prevent email enumeration
+    if not user:
+        return {
+            "success": True,
+            "message": "If the email exists, a password reset code has been sent"
+        }
+
+    # Create OTP and send email
+    otp_service = OTPService()
+    otp_record = otp_service.create_otp(db, password_reset.email, purpose="password_reset")
+
+    # Send OTP email
+    email_sent = otp_service.send_otp_email(
+        email=password_reset.email,
+        otp_code=otp_record.otp_code,
+        purpose="password_reset"
+    )
+
+    if not email_sent:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to send password reset email"
+        )
+
+    return {
+        "success": True,
+        "message": "If the email exists, a password reset code has been sent",
+        "expires_in_minutes": 10
+    }
+
+
 @router.post("/reset-password")
-async def reset_password(password_reset: PasswordReset, db: Session = Depends(get_db)):
+async def reset_password(password_reset: PasswordResetConfirm, db: Session = Depends(get_db)):
+    """
+    Reset password using OTP code.
+    Verifies the OTP and updates the user's password.
+    """
+    # Verify the OTP first
+    otp_service = OTPService()
+    verification_result = otp_service.verify_otp(
+        db=db,
+        email=password_reset.email,
+        otp_code=password_reset.otp_code,
+        purpose="password_reset"
+    )
+
+    if not verification_result["success"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=verification_result["message"]
+        )
+
+    # Get user and update password
     user = get_user_by_email(db, password_reset.email)
     if not user:
-        # Don't reveal whether the email exists or not for security
-        return {"message": "If the email exists, a reset link has been sent"}
-    
-    # TODO: Implement email sending logic
-    # For now, just return success message
-    return {"message": "If the email exists, a reset link has been sent"}
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+
+    # Update password
+    user.hashed_password = get_password_hash(password_reset.new_password)
+    db.commit()
+
+    return {
+        "success": True,
+        "message": "Password has been reset successfully"
+    }

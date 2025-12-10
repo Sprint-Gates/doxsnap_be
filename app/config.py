@@ -17,6 +17,13 @@ class Settings(BaseSettings):
     algorithm: str = "HS256"
     access_token_expire_minutes: Optional[int] = 30
 
+    @field_validator('algorithm', mode='before')
+    @classmethod
+    def parse_algorithm(cls, v):
+        if v is None or v == '':
+            return "HS256"
+        return v
+
     @field_validator('access_token_expire_minutes', mode='before')
     @classmethod
     def parse_token_expire(cls, v):

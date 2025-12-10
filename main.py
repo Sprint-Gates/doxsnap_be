@@ -43,7 +43,7 @@ app = FastAPI(title="Image Processor API", version="1.0.0")
 # CORS middleware - must be added after all other middlewares
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:4200", "http://127.0.0.1:4200", "http://localhost:8100", "http://127.0.0.1:8100"],
+    allow_origins=["http://localhost:4200","http://localhost:4201", "http://127.0.0.1:4200", "http://localhost:8100", "http://127.0.0.1:8100"],
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
     allow_headers=["*"],

@@ -22,6 +22,12 @@ class PasswordReset(BaseModel):
     email: EmailStr
 
 
+class PasswordResetConfirm(BaseModel):
+    email: EmailStr
+    otp_code: str
+    new_password: str
+
+
 class UserUpdate(BaseModel):
     name: Optional[str] = None
     email: Optional[EmailStr] = None
