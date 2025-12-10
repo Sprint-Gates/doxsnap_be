@@ -5,7 +5,7 @@ import os
 import logging
 import google.generativeai as genai
 
-from app.api import auth, images, otp, admin, document_types, vendors, plans, companies, clients, branches, projects, operators, technicians, handheld_devices, assets, attendance, work_orders, warehouses, pm_checklists, pm_work_orders, dashboard, item_master, cycle_count
+from app.api import auth, images, otp, admin, document_types, vendors, plans, companies, clients, branches, projects, operators, technicians, handheld_devices, assets, attendance, work_orders, warehouses, pm_checklists, pm_work_orders, dashboard, item_master, cycle_count, dummy
 from app.database import engine
 from app.models import Base, User, ProcessedImage, DocumentType, Vendor, Warehouse, Plan, Company, Client, Branch, Project, Technician, HandHeldDevice, Floor, Room, Equipment, SubEquipment, TechnicianAttendance, SparePart, WorkOrder, WorkOrderSparePart, WorkOrderTimeEntry, PMSchedule, ItemCategory, ItemMaster, ItemStock, ItemLedger, ItemTransfer, ItemTransferLine, InvoiceItem, CycleCount, CycleCountItem
 from app.config import settings
@@ -78,6 +78,7 @@ app.include_router(pm_work_orders.router, prefix="/api", tags=["PM Work Orders"]
 app.include_router(dashboard.router, prefix="/api", tags=["Dashboard"])
 app.include_router(item_master.router, prefix="/api", tags=["Item Master"])
 app.include_router(cycle_count.router, prefix="/api", tags=["Cycle Count"])
+app.include_router(dummy.router, prefix="/api", tags=["dummy"])
 
 @app.get("/")
 async def root():
