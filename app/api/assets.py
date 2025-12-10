@@ -35,7 +35,7 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
         )
 
     return user
-
+print("test")
 
 def require_admin(user: User = Depends(get_current_user)):
     """Require admin role"""
