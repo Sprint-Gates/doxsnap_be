@@ -30,10 +30,10 @@ jobs:
       COMPANY_SUPPORT_EMAIL: ${{ secrets.COMPANY_SUPPORT_EMAIL }}
 
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
       - run: docker image prune --all --force
-      - run: docker builder prune
-      - run: docker rm -f doxsnap_be
-      - run: docker build ./backend -t doxsnap_be_img
+      - run: docker builder prune --force
+      - run: docker rm -f doxsnap_be || true
+      - run: docker build . -t doxsnap_be_img
       - name: "Running Docker Container"
         run: docker run --restart always -it -d -p 8000:8000 --hostname doxsnap_be --name doxsnap_be -e SECRET_KEY=${{ env.SECRET_KEY }} -e ALGORITHM=${{ env.ALGORITHM }} -e ACCESS_TOKEN_EXPIRE_MINUTES=${{ env.ACCESS_TOKEN_EXPIRE_MINUTES }} -e DATABASE_URL=${{ env.DATABASE_URL }} -e DB_USERNAME=${{ env.DB_USERNAME }} -e DB_PASSWORD=${{ env.DB_PASSWORD }} -e DB_HOST=${{ env.DB_HOST }} -e DB_PORT=${{ env.DB_PORT }} -e DB_NAME=${{ env.DB_NAME }} -e GOOGLE_API_KEY=${{ env.GOOGLE_API_KEY }} -e AWS_ACCESS_KEY_ID=${{ env.AWS_ACCESS_KEY_ID }} -e AWS_SECRET_ACCESS_KEY=${{ env.AWS_SECRET_ACCESS_KEY }} -e AWS_REGION=${{ env.AWS_REGION }} -e S3_BUCKET=${{ env.S3_BUCKET }} -e SMTP_SERVER=${{ env.SMTP_SERVER }} -e SMTP_PORT=${{ env.SMTP_PORT }} -e SMTP_USERNAME=${{ env.SMTP_USERNAME }} -e SMTP_PASSWORD=${{ env.SMTP_PASSWORD }} -e COMPANY_SUPPORT_EMAIL=${{ env.COMPANY_SUPPORT_EMAIL }} doxsnap_be_img
