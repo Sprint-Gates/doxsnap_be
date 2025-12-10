@@ -78,6 +78,8 @@ misc/*
 !misc/SFG20.xml
 !misc/vendors-mmg.xlsx
 !misc/item-master-mmg.xls
+!misc/assets-mmg.xlsx
+!misc/client-branch-mmg.xlsx
 mock_emails/*
 templates/*
 sandbox/*

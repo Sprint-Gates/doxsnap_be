@@ -6,6 +6,7 @@ from typing import Optional, List
 from datetime import date
 from app.database import get_db
 from app.models import User, Branch, Client, Floor, Room, Equipment, SubEquipment
+import os
 from app.utils.security import verify_token
 import logging
 
@@ -905,3 +906,305 @@ async def delete_sub_equipment(
 
     logger.info(f"Sub-equipment '{sub.name}' deactivated by '{user.email}'")
     return {"success": True, "message": f"Sub-equipment '{sub.name}' has been deactivated"}
+
+
+# ============================================================================
+# Bulk Import
+# ============================================================================
+
+@router.post("/bulk-import")
+async def bulk_import_assets(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Bulk import assets from misc/assets-mmg.xlsx and misc/client-branch-mmg.xlsx.
+    Creates clients, branches, floors, rooms, and equipment.
+    Restricted to specific user only.
+    """
+    # Restrict to specific user
+    if user.email != "flahham@mmg-holdings.com":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This endpoint is restricted"
+        )
+
+    try:
+        import pandas as pd
+    except ImportError:
+        raise HTTPException(status_code=500, detail="pandas not installed")
+
+    backend_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    assets_path = os.path.join(backend_dir, 'misc', 'assets-mmg.xlsx')
+    branches_path = os.path.join(backend_dir, 'misc', 'client-branch-mmg.xlsx')
+
+    if not os.path.exists(assets_path):
+        raise HTTPException(status_code=404, detail=f"Assets file not found: {assets_path}")
+    if not os.path.exists(branches_path):
+        raise HTTPException(status_code=404, detail=f"Branches file not found: {branches_path}")
+
+    # Read files
+    branches_df = pd.read_excel(branches_path)
+    assets_df = pd.read_excel(assets_path)
+
+    stats = {
+        "clients_created": 0,
+        "branches_created": 0,
+        "floors_created": 0,
+        "rooms_created": 0,
+        "equipment_created": 0,
+        "equipment_skipped": 0,
+        "errors": []
+    }
+
+    # Step 1: Create clients and branches from client-branch file
+    # Group by Client Code to get unique clients
+    client_map = {}  # client_code -> Client
+    branch_map = {}  # address_number -> (Branch, Room)
+
+    # Get existing clients for this company
+    existing_clients = {c.code: c for c in db.query(Client).filter(Client.company_id == user.company_id).all()}
+
+    # Process client-branch data
+    for _, row in branches_df.iterrows():
+        try:
+            client_code = str(int(row['Client Code'])) if pd.notna(row['Client Code']) else None
+            client_name = str(row['Client Name']).strip() if pd.notna(row['Client Name']) else None
+            address_number = str(int(row['Address Number'])) if pd.notna(row['Address Number']) else None
+            branch_name = str(row['Alpha Name']).strip() if pd.notna(row['Alpha Name']) else None
+
+            if not client_code or not address_number:
+                continue
+
+            # Create/get client
+            if client_code not in client_map:
+                if client_code in existing_clients:
+                    client_map[client_code] = existing_clients[client_code]
+                else:
+                    client = Client(
+                        company_id=user.company_id,
+                        name=client_name or f"Client {client_code}",
+                        code=client_code,
+                        is_active=True
+                    )
+                    db.add(client)
+                    db.flush()
+                    client_map[client_code] = client
+                    existing_clients[client_code] = client
+                    stats["clients_created"] += 1
+
+            client = client_map[client_code]
+
+            # Check if branch exists
+            existing_branch = db.query(Branch).filter(
+                Branch.client_id == client.id,
+                Branch.code == address_number
+            ).first()
+
+            if existing_branch:
+                # Get or create default room
+                floor = db.query(Floor).filter(Floor.branch_id == existing_branch.id).first()
+                if floor:
+                    room = db.query(Room).filter(Room.floor_id == floor.id).first()
+                    if room:
+                        branch_map[address_number] = (existing_branch, room)
+                        continue
+
+            # Create branch
+            branch = Branch(
+                client_id=client.id,
+                name=branch_name or f"Branch {address_number}",
+                code=address_number,
+                is_active=True
+            )
+            db.add(branch)
+            db.flush()
+            stats["branches_created"] += 1
+
+            # Create default floor
+            floor = Floor(
+                branch_id=branch.id,
+                name="Default Floor",
+                code="DF",
+                level=0,
+                is_active=True
+            )
+            db.add(floor)
+            db.flush()
+            stats["floors_created"] += 1
+
+            # Create default room
+            room = Room(
+                floor_id=floor.id,
+                name="Default Room",
+                code="DR",
+                is_active=True
+            )
+            db.add(room)
+            db.flush()
+            stats["rooms_created"] += 1
+
+            branch_map[address_number] = (branch, room)
+
+        except Exception as e:
+            stats["errors"].append({"type": "branch", "error": str(e)})
+
+    db.commit()
+    logger.info(f"Created {stats['clients_created']} clients, {stats['branches_created']} branches")
+
+    # Step 2: Create default branch for unmapped locations
+    default_branch = None
+    default_room = None
+
+    # Get existing equipment codes
+    existing_equipment = set(
+        e.code.lower() for e in db.query(Equipment.code).join(Room).join(Floor).join(Branch).join(Client).filter(
+            Client.company_id == user.company_id,
+            Equipment.code != None
+        ).all()
+    )
+
+    # Equipment class mapping
+    eqm_category_map = {
+        '101': 'electrical',
+        '102': 'electrical',
+        '103': 'mechanical',
+        '104': 'plumbing',
+        '105': 'mechanical',
+        '106': 'mechanical',
+        '107': 'electrical',
+        '108': 'mechanical',
+    }
+
+    # Step 3: Import assets
+    batch_size = 1000
+    for idx, row in assets_df.iterrows():
+        try:
+            asset_number = str(row['Asset Number']).strip() if pd.notna(row['Asset Number']) else None
+            if not asset_number or asset_number.lower() in existing_equipment:
+                stats["equipment_skipped"] += 1
+                continue
+
+            location = str(int(row['Location '])) if pd.notna(row['Location ']) else None
+
+            # Find room for this location
+            room = None
+            if location and location in branch_map:
+                _, room = branch_map[location]
+            else:
+                # Use default branch/room
+                if not default_room:
+                    # Create default client and branch for unmapped assets
+                    default_client = db.query(Client).filter(
+                        Client.company_id == user.company_id,
+                        Client.code == "UNMAPPED"
+                    ).first()
+
+                    if not default_client:
+                        default_client = Client(
+                            company_id=user.company_id,
+                            name="Unmapped Assets",
+                            code="UNMAPPED",
+                            is_active=True
+                        )
+                        db.add(default_client)
+                        db.flush()
+                        stats["clients_created"] += 1
+
+                    default_branch = Branch(
+                        client_id=default_client.id,
+                        name="Unmapped Location",
+                        code="UNMAPPED",
+                        is_active=True
+                    )
+                    db.add(default_branch)
+                    db.flush()
+                    stats["branches_created"] += 1
+
+                    default_floor = Floor(
+                        branch_id=default_branch.id,
+                        name="Default Floor",
+                        code="DF",
+                        is_active=True
+                    )
+                    db.add(default_floor)
+                    db.flush()
+                    stats["floors_created"] += 1
+
+                    default_room = Room(
+                        floor_id=default_floor.id,
+                        name="Default Room",
+                        code="DR",
+                        is_active=True
+                    )
+                    db.add(default_room)
+                    db.flush()
+                    stats["rooms_created"] += 1
+
+                room = default_room
+
+            # Get description
+            desc = str(row['Description ']).strip() if pd.notna(row['Description ']) else asset_number
+
+            # Get category from equipment class
+            eqm_cls = str(row['Eqm Cls']).strip() if pd.notna(row['Eqm Cls']) else ''
+            category = eqm_category_map.get(eqm_cls, 'mechanical')
+
+            # Get other fields
+            serial_number = str(row['Serial Number']).strip() if pd.notna(row['Serial Number']) else None
+            manufacturer = str(row['Mfg ']).strip() if pd.notna(row['Mfg ']) else None
+
+            # Parse dates
+            installation_date = None
+            if pd.notna(row['Date Acquired']):
+                try:
+                    installation_date = pd.to_datetime(row['Date Acquired']).date()
+                except:
+                    pass
+
+            warranty_expiry = None
+            if pd.notna(row['Warranty Expiration']):
+                try:
+                    warranty_expiry = pd.to_datetime(row['Warranty Expiration']).date()
+                except:
+                    pass
+
+            # Get status
+            eq_status = str(row['Eq St']).strip() if pd.notna(row['Eq St']) else ''
+            status_val = "operational" if eq_status == "OP" else "retired" if eq_status == "DS" else "operational"
+
+            equipment = Equipment(
+                room_id=room.id,
+                name=desc[:200] if desc else asset_number,
+                code=asset_number,
+                category=category,
+                equipment_type=eqm_cls if eqm_cls else None,
+                serial_number=serial_number[:100] if serial_number else None,
+                manufacturer=manufacturer[:200] if manufacturer else None,
+                installation_date=installation_date,
+                warranty_expiry=warranty_expiry,
+                status=status_val,
+                is_active=True
+            )
+            db.add(equipment)
+            existing_equipment.add(asset_number.lower())
+            stats["equipment_created"] += 1
+
+            # Commit in batches
+            if stats["equipment_created"] % batch_size == 0:
+                db.flush()
+                logger.info(f"Asset import progress: {stats['equipment_created']} created")
+
+        except Exception as e:
+            stats["errors"].append({"row": idx, "error": str(e)})
+            if len(stats["errors"]) > 100:
+                break
+
+    db.commit()
+    logger.info(f"Bulk asset import complete: {stats}")
+
+    return {
+        "success": True,
+        "stats": stats,
+        "error_details": stats["errors"][:10] if stats["errors"] else []
+    }
