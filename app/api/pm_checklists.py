@@ -11,10 +11,11 @@ import logging
 
 from app.database import get_db
 from app.models import (
-    User, PMEquipmentClass, PMSystemCode, PMAssetType,
+    User, Company, PMEquipmentClass, PMSystemCode, PMAssetType,
     PMChecklist, PMActivity
 )
 from app.api.auth import get_current_user
+from app.utils.pm_seed import seed_pm_checklists_for_company
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -513,4 +514,121 @@ async def get_pm_stats(
         "asset_types_with_checklists": asset_types_with_checklists,
         "checklists": checklists,
         "activities": activities
+    }
+
+
+# ============================================================================
+# PM Seeding Endpoints
+# ============================================================================
+
+def check_company_has_pm_data(db: Session, company_id: int) -> bool:
+    """Check if a company already has PM equipment classes seeded"""
+    count = db.query(PMEquipmentClass).filter(
+        PMEquipmentClass.company_id == company_id
+    ).count()
+    return count > 0
+
+
+@router.post("/pm/seed")
+async def seed_pm_data_for_company(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Seed PM data for the current user's company.
+    Only seeds if PM data doesn't already exist.
+    """
+    if not user.company_id:
+        raise HTTPException(status_code=400, detail="User has no company")
+
+    # Check if already seeded
+    if check_company_has_pm_data(db, user.company_id):
+        return {
+            "success": True,
+            "message": "PM data already exists for this company",
+            "already_seeded": True
+        }
+
+    try:
+        stats = seed_pm_checklists_for_company(user.company_id, db)
+        db.commit()
+
+        if "error" in stats:
+            raise HTTPException(status_code=500, detail=stats["error"])
+
+        return {
+            "success": True,
+            "message": "PM data seeded successfully",
+            "already_seeded": False,
+            "stats": stats
+        }
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error seeding PM data: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/pm/seed-all")
+async def seed_pm_data_for_all_companies(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Seed PM data for ALL companies that don't have PM data yet.
+    Admin only endpoint.
+    """
+    # Check if user is admin
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    # Get all companies
+    companies = db.query(Company).all()
+
+    results = {
+        "total_companies": len(companies),
+        "seeded": [],
+        "skipped": [],
+        "errors": []
+    }
+
+    for company in companies:
+        try:
+            # Check if already seeded
+            if check_company_has_pm_data(db, company.id):
+                results["skipped"].append({
+                    "company_id": company.id,
+                    "company_name": company.name,
+                    "reason": "Already has PM data"
+                })
+                continue
+
+            # Seed PM data
+            stats = seed_pm_checklists_for_company(company.id, db)
+            db.commit()
+
+            if "error" in stats:
+                results["errors"].append({
+                    "company_id": company.id,
+                    "company_name": company.name,
+                    "error": stats["error"]
+                })
+            else:
+                results["seeded"].append({
+                    "company_id": company.id,
+                    "company_name": company.name,
+                    "stats": stats
+                })
+
+        except Exception as e:
+            db.rollback()
+            results["errors"].append({
+                "company_id": company.id,
+                "company_name": company.name,
+                "error": str(e)
+            })
+
+    return {
+        "success": True,
+        "message": f"Processed {len(companies)} companies",
+        "results": results
     }
