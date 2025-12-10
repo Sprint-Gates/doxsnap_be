@@ -4,7 +4,6 @@ python-multipart==0.0.6
 python-jose==3.3.0
 passlib==1.7.4
 bcrypt==4.1.2
-python-decouple==3.8
 sqlalchemy==2.0.23
 alembic==1.12.1
 psycopg2-binary==2.9.9
@@ -13,11 +12,9 @@ pillow==10.1.0
 pydantic==2.7.4
 pydantic-settings==2.4.0
 email-validator==2.1.0
-opencv-python==4.8.1.78
+opencv-python-headless==4.8.1.78
 pytesseract==0.3.10
 numpy==1.26.4
 google-generativeai==0.3.2
-python-dotenv==1.0.0
 openpyxl==3.1.2
-pymupdf==1.24.0
 reportlab==4.0.8
