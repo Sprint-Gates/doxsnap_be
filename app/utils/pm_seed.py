@@ -290,8 +290,9 @@ def seed_pm_checklists_for_company(company_id: int, db: Session, xml_path: str =
     """
     # Default XML path relative to backend directory
     if xml_path is None:
+        # Get the backend root directory (where misc/ folder is)
         backend_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        xml_path = os.path.join(os.path.dirname(backend_dir), 'SFG20.xml')
+        xml_path = os.path.join(backend_dir, 'misc', 'SFG20.xml')
 
     if not os.path.exists(xml_path):
         logger.warning(f"SFG20.xml not found at {xml_path}, skipping PM seed")
