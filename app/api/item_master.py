@@ -2394,7 +2394,7 @@ async def get_unlinked_invoice_items(
 
 # ============ Bulk Import ============
 
-@router.post("/bulk-import")
+@router.post("/items/bulk-import")
 async def bulk_import_items(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
