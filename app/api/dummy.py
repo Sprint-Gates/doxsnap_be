@@ -86,14 +86,16 @@ def flush_assets(db: Session = Depends(get_db)):
 
 @router.post("/dummy/import-assets-step1")
 def import_assets_step1(db: Session = Depends(get_db)):
-    """Step 1: Create floors, rooms, and main equipment"""
-    excel_path = os.path.join(os.path.dirname(__file__), "..", "..", "misc", "assets-mmg.xlsx")
+    """Step 1: Create floors, rooms, and main equipment from JSON"""
+    import json
+    json_path = os.path.join(os.path.dirname(__file__), "..", "..", "misc", "assets-import.json")
 
-    if not os.path.exists(excel_path):
-        raise HTTPException(status_code=404, detail=f"Excel file not found: {excel_path}")
+    if not os.path.exists(json_path):
+        raise HTTPException(status_code=404, detail=f"JSON file not found: {json_path}")
 
     try:
-        df = pd.read_excel(excel_path)
+        with open(json_path, 'r') as f:
+            data = json.load(f)
 
         # Build branch code to ID mapping
         branches = db.query(Branch).all()
@@ -110,10 +112,11 @@ def import_assets_step1(db: Session = Depends(get_db)):
             "skipped_no_branch": 0
         }
 
-        # First pass: Create floors and rooms for branches that have assets
-        branch_codes_with_assets = df['Address Number'].dropna().unique()
-        for branch_code in branch_codes_with_assets:
-            branch_code_str = str(int(branch_code))
+        # Get unique branch codes from main equipment
+        branch_codes_with_assets = set(item['address_number'] for item in data['main_equipment'])
+
+        # Create floors and rooms
+        for branch_code_str in branch_codes_with_assets:
             if branch_code_str in branch_map:
                 branch_id = branch_map[branch_code_str]
 
@@ -140,15 +143,9 @@ def import_assets_step1(db: Session = Depends(get_db)):
                     created_rooms[branch_id] = room.id
                     stats["rooms_created"] += 1
 
-        # Second pass: Import main equipment (Asset Number = Parent Number)
-        main_equipment = df[df['Asset Number'] == df['Parent Number']]
-        for _, row in main_equipment.iterrows():
-            address_num = row.get('Address Number')
-            if pd.isna(address_num):
-                stats["skipped_no_branch"] += 1
-                continue
-
-            branch_code_str = str(int(address_num))
+        # Import main equipment
+        for item in data['main_equipment']:
+            branch_code_str = item['address_number']
             if branch_code_str not in branch_map:
                 stats["skipped_no_branch"] += 1
                 continue
@@ -160,31 +157,20 @@ def import_assets_step1(db: Session = Depends(get_db)):
                 continue
 
             install_date = None
-            date_str = row.get('Date Acquired')
-            if pd.notna(date_str):
+            if item.get('date_acquired'):
                 try:
-                    install_date = pd.to_datetime(date_str, format='%d/%m/%y').date()
-                except:
-                    pass
-
-            warranty_date = None
-            warranty_str = row.get('Warranty Expiration')
-            if pd.notna(warranty_str):
-                try:
-                    warranty_date = pd.to_datetime(warranty_str, format='%d/%m/%y').date()
+                    install_date = pd.to_datetime(item['date_acquired'], format='%d/%m/%y').date()
                 except:
                     pass
 
             equipment = Equipment(
                 room_id=room_id,
-                name=str(row.get('Description ', 'Unknown')).strip()[:255],
-                code=str(int(row['Asset Number'])),
-                category=str(row.get('Description .1', 'General')).strip()[:100] if pd.notna(row.get('Description .1')) else 'General',
-                equipment_type=str(row.get('Eqm Cls', '')).strip()[:50] if pd.notna(row.get('Eqm Cls')) else None,
-                manufacturer=str(row.get('Mfg ', '')).strip()[:100] if pd.notna(row.get('Mfg ')) else None,
-                serial_number=str(row.get('Serial Number', '')).strip()[:100] if pd.notna(row.get('Serial Number')) else None,
-                installation_date=install_date,
-                warranty_expiry=warranty_date
+                name=item['name'],
+                code=str(item['asset_number']),
+                category=item['category'],
+                manufacturer=item.get('manufacturer'),
+                serial_number=item.get('serial_number'),
+                installation_date=install_date
             )
             db.add(equipment)
             stats["equipment_created"] += 1
@@ -199,22 +185,23 @@ def import_assets_step1(db: Session = Depends(get_db)):
 
 @router.post("/dummy/import-assets-step2")
 def import_assets_step2(batch: int = 0, batch_size: int = 10000, db: Session = Depends(get_db)):
-    """Step 2: Import sub-equipment in batches. Call multiple times with increasing batch number."""
-    excel_path = os.path.join(os.path.dirname(__file__), "..", "..", "misc", "assets-mmg.xlsx")
+    """Step 2: Import sub-equipment in batches from JSON."""
+    import json
+    json_path = os.path.join(os.path.dirname(__file__), "..", "..", "misc", "assets-import.json")
 
-    if not os.path.exists(excel_path):
-        raise HTTPException(status_code=404, detail=f"Excel file not found: {excel_path}")
+    if not os.path.exists(json_path):
+        raise HTTPException(status_code=404, detail=f"JSON file not found: {json_path}")
 
     try:
-        df = pd.read_excel(excel_path)
+        with open(json_path, 'r') as f:
+            data = json.load(f)
 
         # Build equipment code to ID mapping from database
         equipment_list = db.query(Equipment).all()
         equipment_map = {int(e.code): e.id for e in equipment_list if e.code and e.code.isdigit()}
 
-        # Get sub-equipment rows
-        sub_equipment_df = df[df['Asset Number'] != df['Parent Number']]
-        total_rows = len(sub_equipment_df)
+        sub_equipment_list = data['sub_equipment']
+        total_rows = len(sub_equipment_list)
 
         start_idx = batch * batch_size
         end_idx = min(start_idx + batch_size, total_rows)
@@ -222,7 +209,7 @@ def import_assets_step2(batch: int = 0, batch_size: int = 10000, db: Session = D
         if start_idx >= total_rows:
             return {"message": "All batches completed", "total_rows": total_rows}
 
-        batch_df = sub_equipment_df.iloc[start_idx:end_idx]
+        batch_items = sub_equipment_list[start_idx:end_idx]
 
         stats = {
             "batch": batch,
@@ -233,39 +220,21 @@ def import_assets_step2(batch: int = 0, batch_size: int = 10000, db: Session = D
             "skipped_no_parent": 0
         }
 
-        for _, row in batch_df.iterrows():
-            parent_num = int(row['Parent Number']) if pd.notna(row['Parent Number']) else None
+        for item in batch_items:
+            parent_num = item.get('parent_number')
             if parent_num is None or parent_num not in equipment_map:
                 stats["skipped_no_parent"] += 1
                 continue
 
             equipment_id = equipment_map[parent_num]
 
-            install_date = None
-            date_str = row.get('Date Acquired')
-            if pd.notna(date_str):
-                try:
-                    install_date = pd.to_datetime(date_str, format='%d/%m/%y').date()
-                except:
-                    pass
-
-            warranty_date = None
-            warranty_str = row.get('Warranty Expiration')
-            if pd.notna(warranty_str):
-                try:
-                    warranty_date = pd.to_datetime(warranty_str, format='%d/%m/%y').date()
-                except:
-                    pass
-
             sub_equip = SubEquipment(
                 equipment_id=equipment_id,
-                name=str(row.get('Description ', 'Unknown')).strip()[:255],
-                code=str(int(row['Asset Number'])),
-                component_type=str(row.get('Description .1', '')).strip()[:100] if pd.notna(row.get('Description .1')) else None,
-                manufacturer=str(row.get('Mfg ', '')).strip()[:100] if pd.notna(row.get('Mfg ')) else None,
-                serial_number=str(row.get('Serial Number', '')).strip()[:100] if pd.notna(row.get('Serial Number')) else None,
-                installation_date=install_date,
-                warranty_expiry=warranty_date
+                name=item['name'],
+                code=str(item['asset_number']),
+                component_type=item.get('component_type'),
+                manufacturer=item.get('manufacturer'),
+                serial_number=item.get('serial_number')
             )
             db.add(sub_equip)
             stats["sub_equipment_created"] += 1
