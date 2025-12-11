@@ -1,10 +1,14 @@
 from datetime import datetime, timedelta
 from typing import Optional
+import secrets
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from app.config import settings
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+# Refresh token settings
+REFRESH_TOKEN_EXPIRE_DAYS = 7
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
@@ -35,3 +39,13 @@ def verify_token(token: str) -> Optional[str]:
         return email
     except JWTError:
         return None
+
+
+def generate_refresh_token() -> str:
+    """Generate a secure random refresh token"""
+    return secrets.token_urlsafe(64)
+
+
+def get_refresh_token_expiry() -> datetime:
+    """Get the expiry datetime for a refresh token"""
+    return datetime.utcnow() + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)

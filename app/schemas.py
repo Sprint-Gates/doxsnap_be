@@ -49,11 +49,17 @@ class User(UserBase):
 
 class Token(BaseModel):
     access_token: str
+    refresh_token: str
     token_type: str
+    expires_in: int  # Access token expiry in seconds
 
 
 class TokenData(BaseModel):
     email: Optional[str] = None
+
+
+class RefreshTokenRequest(BaseModel):
+    refresh_token: str
 
 
 class ProcessedImageBase(BaseModel):

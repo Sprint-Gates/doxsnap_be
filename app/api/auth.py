@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException, status, Response
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.responses import HTMLResponse
@@ -6,11 +6,12 @@ from sqlalchemy.orm import Session
 import os
 
 from app.database import get_db
-from app.schemas import UserCreate, UserLogin, Token, User as UserSchema, PasswordReset, PasswordResetConfirm, UserUpdate
+from app.schemas import UserCreate, UserLogin, Token, User as UserSchema, PasswordReset, PasswordResetConfirm, UserUpdate, RefreshTokenRequest
 from app.services.auth import create_user, authenticate_user, get_user_by_email, get_user_by_id, update_user_profile
-from app.utils.security import create_access_token, verify_token, get_password_hash
+from app.utils.security import create_access_token, verify_token, get_password_hash, generate_refresh_token, get_refresh_token_expiry
 from app.config import settings
 from app.services.otp import OTPService
+from app.models import RefreshToken
 
 router = APIRouter()
 security = HTTPBearer()
@@ -59,11 +60,120 @@ async def login(user_credentials: UserLogin, db: Session = Depends(get_db)):
             detail="Incorrect email or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+    # Create access token
     access_token_expires = timedelta(minutes=settings.access_token_expire_minutes)
     access_token = create_access_token(
         data={"sub": user.email}, expires_delta=access_token_expires
     )
-    return {"access_token": access_token, "token_type": "bearer"}
+
+    # Create refresh token
+    refresh_token_str = generate_refresh_token()
+    refresh_token_expiry = get_refresh_token_expiry()
+
+    # Store refresh token in database
+    db_refresh_token = RefreshToken(
+        user_id=user.id,
+        token=refresh_token_str,
+        expires_at=refresh_token_expiry
+    )
+    db.add(db_refresh_token)
+    db.commit()
+
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token_str,
+        "token_type": "bearer",
+        "expires_in": settings.access_token_expire_minutes * 60  # Convert to seconds
+    }
+
+
+@router.post("/refresh", response_model=Token)
+async def refresh_token(request: RefreshTokenRequest, db: Session = Depends(get_db)):
+    """Get a new access token using a refresh token"""
+    # Find the refresh token in database
+    db_token = db.query(RefreshToken).filter(
+        RefreshToken.token == request.refresh_token,
+        RefreshToken.is_revoked == False
+    ).first()
+
+    if not db_token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid refresh token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    # Check if token is expired
+    if db_token.expires_at < datetime.utcnow():
+        # Revoke the expired token
+        db_token.is_revoked = True
+        db_token.revoked_at = datetime.utcnow()
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Refresh token has expired",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    # Get the user
+    user = get_user_by_id(db, db_token.user_id)
+    if not user or not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found or inactive",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    # Revoke old refresh token
+    db_token.is_revoked = True
+    db_token.revoked_at = datetime.utcnow()
+
+    # Create new access token
+    access_token_expires = timedelta(minutes=settings.access_token_expire_minutes)
+    access_token = create_access_token(
+        data={"sub": user.email}, expires_delta=access_token_expires
+    )
+
+    # Create new refresh token
+    new_refresh_token_str = generate_refresh_token()
+    new_refresh_token_expiry = get_refresh_token_expiry()
+
+    new_db_refresh_token = RefreshToken(
+        user_id=user.id,
+        token=new_refresh_token_str,
+        expires_at=new_refresh_token_expiry
+    )
+    db.add(new_db_refresh_token)
+    db.commit()
+
+    return {
+        "access_token": access_token,
+        "refresh_token": new_refresh_token_str,
+        "token_type": "bearer",
+        "expires_in": settings.access_token_expire_minutes * 60
+    }
+
+
+@router.post("/logout")
+async def logout(
+    request: RefreshTokenRequest,
+    db: Session = Depends(get_db),
+    current_user: UserSchema = Depends(get_current_user)
+):
+    """Logout and revoke the refresh token"""
+    db_token = db.query(RefreshToken).filter(
+        RefreshToken.token == request.refresh_token,
+        RefreshToken.user_id == current_user.id,
+        RefreshToken.is_revoked == False
+    ).first()
+
+    if db_token:
+        db_token.is_revoked = True
+        db_token.revoked_at = datetime.utcnow()
+        db.commit()
+
+    return {"message": "Successfully logged out"}
 
 
 @router.get("/me", response_model=UserSchema)

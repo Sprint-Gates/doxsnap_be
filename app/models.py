@@ -300,6 +300,22 @@ class OTPCode(Base):
     used_at = Column(DateTime, nullable=True)
 
 
+class RefreshToken(Base):
+    """Refresh tokens for JWT authentication"""
+    __tablename__ = "refresh_tokens"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    token = Column(String, unique=True, nullable=False, index=True)
+    expires_at = Column(DateTime, nullable=False)
+    is_revoked = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=func.now())
+    revoked_at = Column(DateTime, nullable=True)
+
+    # Relationships
+    user = relationship("User", backref="refresh_tokens")
+
+
 class Technician(Base):
     """Technician/Field worker belonging to a company"""
     __tablename__ = "technicians"
