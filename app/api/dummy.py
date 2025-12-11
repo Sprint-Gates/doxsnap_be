@@ -113,7 +113,7 @@ def import_assets_step1(db: Session = Depends(get_db)):
         }
 
         # Get unique branch codes from main equipment
-        branch_codes_with_assets = set(item['address_number'] for item in data['main_equipment'])
+        branch_codes_with_assets = set(item['branch_code'] for item in data['main_equipment'])
 
         # Create floors and rooms
         for branch_code_str in branch_codes_with_assets:
@@ -145,7 +145,7 @@ def import_assets_step1(db: Session = Depends(get_db)):
 
         # Import main equipment
         for item in data['main_equipment']:
-            branch_code_str = item['address_number']
+            branch_code_str = item['branch_code']
             if branch_code_str not in branch_map:
                 stats["skipped_no_branch"] += 1
                 continue
