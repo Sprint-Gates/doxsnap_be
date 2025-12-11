@@ -84,9 +84,9 @@ def flush_assets(db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/dummy/import-assets")
-def import_assets(db: Session = Depends(get_db)):
-    """Import assets from Excel file"""
+@router.post("/dummy/import-assets-step1")
+def import_assets_step1(db: Session = Depends(get_db)):
+    """Step 1: Create floors, rooms, and main equipment"""
     excel_path = os.path.join(os.path.dirname(__file__), "..", "..", "misc", "assets-mmg.xlsx")
 
     if not os.path.exists(excel_path):
@@ -100,17 +100,14 @@ def import_assets(db: Session = Depends(get_db)):
         branch_map = {b.code: b.id for b in branches if b.code}
 
         # Track created entities
-        created_floors = {}  # branch_id -> floor_id
-        created_rooms = {}   # branch_id -> room_id
-        created_equipment = {}  # asset_number -> equipment_id
+        created_floors = {}
+        created_rooms = {}
 
         stats = {
             "floors_created": 0,
             "rooms_created": 0,
             "equipment_created": 0,
-            "sub_equipment_created": 0,
-            "skipped_no_branch": 0,
-            "skipped_no_parent": 0
+            "skipped_no_branch": 0
         }
 
         # First pass: Create floors and rooms for branches that have assets
@@ -120,7 +117,6 @@ def import_assets(db: Session = Depends(get_db)):
             if branch_code_str in branch_map:
                 branch_id = branch_map[branch_code_str]
 
-                # Create default floor if not exists
                 if branch_id not in created_floors:
                     floor = Floor(
                         branch_id=branch_id,
@@ -133,7 +129,6 @@ def import_assets(db: Session = Depends(get_db)):
                     created_floors[branch_id] = floor.id
                     stats["floors_created"] += 1
 
-                    # Create default room
                     room = Room(
                         floor_id=floor.id,
                         name="Default Room",
@@ -164,7 +159,6 @@ def import_assets(db: Session = Depends(get_db)):
                 stats["skipped_no_branch"] += 1
                 continue
 
-            # Parse date
             install_date = None
             date_str = row.get('Date Acquired')
             if pd.notna(date_str):
@@ -193,21 +187,60 @@ def import_assets(db: Session = Depends(get_db)):
                 warranty_expiry=warranty_date
             )
             db.add(equipment)
-            db.flush()
-            created_equipment[int(row['Asset Number'])] = equipment.id
             stats["equipment_created"] += 1
 
-        # Third pass: Import sub-equipment
+        db.commit()
+        return {"message": "Step 1 completed", "stats": stats}
+
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/dummy/import-assets-step2")
+def import_assets_step2(batch: int = 0, batch_size: int = 10000, db: Session = Depends(get_db)):
+    """Step 2: Import sub-equipment in batches. Call multiple times with increasing batch number."""
+    excel_path = os.path.join(os.path.dirname(__file__), "..", "..", "misc", "assets-mmg.xlsx")
+
+    if not os.path.exists(excel_path):
+        raise HTTPException(status_code=404, detail=f"Excel file not found: {excel_path}")
+
+    try:
+        df = pd.read_excel(excel_path)
+
+        # Build equipment code to ID mapping from database
+        equipment_list = db.query(Equipment).all()
+        equipment_map = {int(e.code): e.id for e in equipment_list if e.code and e.code.isdigit()}
+
+        # Get sub-equipment rows
         sub_equipment_df = df[df['Asset Number'] != df['Parent Number']]
-        for _, row in sub_equipment_df.iterrows():
+        total_rows = len(sub_equipment_df)
+
+        start_idx = batch * batch_size
+        end_idx = min(start_idx + batch_size, total_rows)
+
+        if start_idx >= total_rows:
+            return {"message": "All batches completed", "total_rows": total_rows}
+
+        batch_df = sub_equipment_df.iloc[start_idx:end_idx]
+
+        stats = {
+            "batch": batch,
+            "start_idx": start_idx,
+            "end_idx": end_idx,
+            "total_rows": total_rows,
+            "sub_equipment_created": 0,
+            "skipped_no_parent": 0
+        }
+
+        for _, row in batch_df.iterrows():
             parent_num = int(row['Parent Number']) if pd.notna(row['Parent Number']) else None
-            if parent_num is None or parent_num not in created_equipment:
+            if parent_num is None or parent_num not in equipment_map:
                 stats["skipped_no_parent"] += 1
                 continue
 
-            equipment_id = created_equipment[parent_num]
+            equipment_id = equipment_map[parent_num]
 
-            # Parse dates
             install_date = None
             date_str = row.get('Date Acquired')
             if pd.notna(date_str):
@@ -237,15 +270,14 @@ def import_assets(db: Session = Depends(get_db)):
             db.add(sub_equip)
             stats["sub_equipment_created"] += 1
 
-            # Commit in batches to avoid memory issues
-            if stats["sub_equipment_created"] % 1000 == 0:
-                db.flush()
-
         db.commit()
 
+        remaining_batches = (total_rows - end_idx + batch_size - 1) // batch_size
         return {
-            "message": "Assets imported successfully",
-            "stats": stats
+            "message": f"Batch {batch} completed",
+            "stats": stats,
+            "remaining_batches": remaining_batches,
+            "next_batch": batch + 1 if end_idx < total_rows else None
         }
 
     except Exception as e:
