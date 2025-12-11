@@ -4,9 +4,10 @@ from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
 from typing import Optional, List
 from app.database import get_db
-from app.models import Client, User, Company
+from app.models import Client, User, Company, Branch, Floor, Room
 from app.utils.security import verify_token
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -359,3 +360,148 @@ async def toggle_client_status(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error toggling client status: {str(e)}"
         )
+
+
+# ============================================================================
+# Bulk Import
+# ============================================================================
+
+@router.post("/clients/bulk-import")
+async def bulk_import_clients_branches(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Bulk import clients and branches from misc/client-branch-mmg.xlsx.
+    Creates clients, branches with default floors and rooms.
+    Restricted to specific user only.
+    """
+    # Restrict to specific user
+    if user.email != "flahham@mmg-holdings.com":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This endpoint is restricted"
+        )
+
+    try:
+        import pandas as pd
+    except ImportError:
+        raise HTTPException(status_code=500, detail="pandas not installed")
+
+    backend_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    file_path = os.path.join(backend_dir, 'misc', 'client-branch-mmg.xlsx')
+
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
+
+    # Read file
+    df = pd.read_excel(file_path)
+
+    stats = {
+        "clients_created": 0,
+        "clients_skipped": 0,
+        "branches_created": 0,
+        "branches_skipped": 0,
+        "floors_created": 0,
+        "rooms_created": 0,
+        "errors": []
+    }
+
+    # Get existing clients for this company
+    existing_clients = {c.code: c for c in db.query(Client).filter(
+        Client.company_id == user.company_id
+    ).all()}
+
+    # Get existing branches
+    existing_branches = set()
+    for client in existing_clients.values():
+        for branch in db.query(Branch).filter(Branch.client_id == client.id).all():
+            existing_branches.add((client.code, branch.code))
+
+    # Track created clients in this run
+    client_map = {}  # client_code -> Client
+
+    for _, row in df.iterrows():
+        try:
+            client_code = str(int(row['Client Code'])) if pd.notna(row['Client Code']) else None
+            client_name = str(row['Client Name']).strip() if pd.notna(row['Client Name']) else None
+            address_number = str(int(row['Address Number'])) if pd.notna(row['Address Number']) else None
+            branch_name = str(row['Alpha Name']).strip() if pd.notna(row['Alpha Name']) else None
+
+            if not client_code or not address_number:
+                continue
+
+            # Create/get client
+            if client_code not in client_map:
+                if client_code in existing_clients:
+                    client_map[client_code] = existing_clients[client_code]
+                    stats["clients_skipped"] += 1
+                else:
+                    client = Client(
+                        company_id=user.company_id,
+                        name=client_name or f"Client {client_code}",
+                        code=client_code,
+                        is_active=True
+                    )
+                    db.add(client)
+                    db.flush()
+                    client_map[client_code] = client
+                    existing_clients[client_code] = client
+                    stats["clients_created"] += 1
+
+            client = client_map[client_code]
+
+            # Check if branch already exists
+            if (client_code, address_number) in existing_branches:
+                stats["branches_skipped"] += 1
+                continue
+
+            # Create branch
+            branch = Branch(
+                client_id=client.id,
+                name=branch_name or f"Branch {address_number}",
+                code=address_number,
+                is_active=True
+            )
+            db.add(branch)
+            db.flush()
+            stats["branches_created"] += 1
+
+            # Create default floor
+            floor = Floor(
+                branch_id=branch.id,
+                name="Default Floor",
+                code="DF",
+                level=0,
+                is_active=True
+            )
+            db.add(floor)
+            db.flush()
+            stats["floors_created"] += 1
+
+            # Create default room
+            room = Room(
+                floor_id=floor.id,
+                name="Default Room",
+                code="DR",
+                is_active=True
+            )
+            db.add(room)
+            db.flush()
+            stats["rooms_created"] += 1
+
+            existing_branches.add((client_code, address_number))
+
+        except Exception as e:
+            stats["errors"].append({"row": _, "error": str(e)})
+            if len(stats["errors"]) > 50:
+                break
+
+    db.commit()
+    logger.info(f"Bulk client/branch import complete: {stats}")
+
+    return {
+        "success": True,
+        "stats": stats,
+        "error_details": stats["errors"][:10] if stats["errors"] else []
+    }
