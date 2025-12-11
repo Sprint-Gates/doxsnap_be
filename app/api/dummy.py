@@ -252,3 +252,30 @@ def import_assets_step2(batch: int = 0, batch_size: int = 10000, db: Session = D
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/dummy/user-role")
+def update_user_role(
+    email: str,
+    role: str,
+    db: Session = Depends(get_db)
+):
+    """Update a user's role - for admin use only"""
+    valid_roles = ["admin", "operator", "accounting"]
+    if role not in valid_roles:
+        raise HTTPException(status_code=400, detail=f"Invalid role. Must be one of: {valid_roles}")
+
+    user = db.query(User).filter(User.email == email).first()
+    if not user:
+        raise HTTPException(status_code=404, detail=f"User with email {email} not found")
+
+    old_role = user.role
+    user.role = role
+    db.commit()
+
+    return {
+        "email": email,
+        "old_role": old_role,
+        "new_role": role,
+        "message": "Role updated successfully. Please log out and log in again."
+    }

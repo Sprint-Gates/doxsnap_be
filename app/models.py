@@ -381,6 +381,9 @@ class HandHeldDevice(Base):
     assigned_technician_id = Column(Integer, ForeignKey("technicians.id"), nullable=True)
     assigned_at = Column(DateTime, nullable=True)  # When technician was assigned
 
+    # Mobile app authentication
+    mobile_pin = Column(String, nullable=True)  # PIN for mobile app login (4-6 digits)
+
     # Device status
     status = Column(String, default="available")  # available, assigned, maintenance, retired
     notes = Column(Text, nullable=True)

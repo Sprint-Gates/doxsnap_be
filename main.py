@@ -5,7 +5,7 @@ import os
 import logging
 import google.generativeai as genai
 
-from app.api import auth, images, otp, admin, document_types, vendors, plans, companies, clients, branches, projects, operators, technicians, handheld_devices, assets, attendance, work_orders, warehouses, pm_checklists, pm_work_orders, dashboard, item_master, cycle_count, dummy
+from app.api import auth, images, otp, admin, document_types, vendors, plans, companies, clients, branches, projects, operators, technicians, handheld_devices, assets, attendance, work_orders, warehouses, pm_checklists, pm_work_orders, dashboard, item_master, cycle_count, dummy, hhd_auth, users
 from app.database import engine
 from app.models import Base, User, ProcessedImage, DocumentType, Vendor, Warehouse, Plan, Company, Client, Branch, Project, Technician, HandHeldDevice, Floor, Room, Equipment, SubEquipment, TechnicianAttendance, SparePart, WorkOrder, WorkOrderSparePart, WorkOrderTimeEntry, PMSchedule, ItemCategory, ItemMaster, ItemStock, ItemLedger, ItemTransfer, ItemTransferLine, InvoiceItem, CycleCount, CycleCountItem, RefreshToken
 from app.config import settings
@@ -22,6 +22,8 @@ def run_migrations():
     migrations = [
         # Add code column to clients table
         ("clients", "code", "ALTER TABLE clients ADD COLUMN IF NOT EXISTS code VARCHAR"),
+        # Add mobile_pin column to handheld_devices table
+        ("handheld_devices", "mobile_pin", "ALTER TABLE handheld_devices ADD COLUMN IF NOT EXISTS mobile_pin VARCHAR"),
     ]
 
     with engine.connect() as conn:
@@ -103,6 +105,8 @@ app.include_router(dashboard.router, prefix="/api", tags=["Dashboard"])
 app.include_router(item_master.router, prefix="/api", tags=["Item Master"])
 app.include_router(cycle_count.router, prefix="/api", tags=["Cycle Count"])
 app.include_router(dummy.router, prefix="/api", tags=["dummy"])
+app.include_router(hhd_auth.router, prefix="/api", tags=["HHD Auth"])
+app.include_router(users.router, prefix="/api", tags=["Users"])
 
 @app.get("/")
 async def root():

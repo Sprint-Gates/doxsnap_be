@@ -55,6 +55,7 @@ class HandHeldDeviceCreate(BaseModel):
     os_version: Optional[str] = None
     app_version: Optional[str] = None
     warehouse_id: Optional[int] = None
+    mobile_pin: Optional[str] = None  # 4-6 digit PIN for mobile login
     notes: Optional[str] = None
 
 
@@ -66,6 +67,7 @@ class HandHeldDeviceUpdate(BaseModel):
     os_version: Optional[str] = None
     app_version: Optional[str] = None
     warehouse_id: Optional[int] = None
+    mobile_pin: Optional[str] = None  # 4-6 digit PIN for mobile login
     status: Optional[str] = None
     notes: Optional[str] = None
     is_active: Optional[bool] = None
@@ -141,6 +143,7 @@ def device_to_response(device: HandHeldDevice, db: Session) -> dict:
         "assigned_technician": technician_data,
         "assigned_technicians": assigned_technicians_data,
         "assigned_at": device.assigned_at.isoformat() if device.assigned_at else None,
+        "mobile_pin_set": bool(device.mobile_pin),  # Indicates if PIN is configured (don't expose actual PIN)
         "status": device.status,
         "notes": device.notes,
         "is_active": device.is_active,
@@ -298,6 +301,7 @@ async def create_handheld_device(
             os_version=data.os_version,
             app_version=data.app_version,
             warehouse_id=data.warehouse_id,
+            mobile_pin=data.mobile_pin,
             notes=data.notes,
             status="available"
         )
