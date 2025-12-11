@@ -94,6 +94,7 @@ class Client(Base):
     id = Column(Integer, primary_key=True, index=True)
     company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
     name = Column(String, nullable=False)
+    code = Column(String, nullable=True, index=True)  # Client code for imports
     email = Column(String, nullable=True)
     phone = Column(String, nullable=True)
     address = Column(Text, nullable=True)

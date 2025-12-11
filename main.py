@@ -9,11 +9,35 @@ from app.api import auth, images, otp, admin, document_types, vendors, plans, co
 from app.database import engine
 from app.models import Base, User, ProcessedImage, DocumentType, Vendor, Warehouse, Plan, Company, Client, Branch, Project, Technician, HandHeldDevice, Floor, Room, Equipment, SubEquipment, TechnicianAttendance, SparePart, WorkOrder, WorkOrderSparePart, WorkOrderTimeEntry, PMSchedule, ItemCategory, ItemMaster, ItemStock, ItemLedger, ItemTransfer, ItemTransferLine, InvoiceItem, CycleCount, CycleCountItem
 from app.config import settings
+from sqlalchemy import text
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 Base.metadata.create_all(bind=engine)
+
+# Run simple migrations for new columns
+def run_migrations():
+    """Add new columns to existing tables if they don't exist"""
+    migrations = [
+        # Add code column to clients table
+        ("clients", "code", "ALTER TABLE clients ADD COLUMN IF NOT EXISTS code VARCHAR"),
+    ]
+
+    with engine.connect() as conn:
+        for table, column, sql in migrations:
+            try:
+                conn.execute(text(sql))
+                conn.commit()
+                logger.info(f"Migration: Added {column} to {table}")
+            except Exception as e:
+                # Column might already exist or other error
+                logger.debug(f"Migration skipped for {table}.{column}: {e}")
+
+try:
+    run_migrations()
+except Exception as e:
+    logger.warning(f"Migration runner error: {e}")
 
 # Validate Google API Key on startup
 def validate_google_api_key():
