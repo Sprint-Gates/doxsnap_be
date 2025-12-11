@@ -21,10 +21,84 @@ from app.models import (
 )
 from app.api.auth import verify_token
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from jose import jwt
+from app.config import settings
 
 router = APIRouter()
 security = HTTPBearer()
 logger = logging.getLogger(__name__)
+
+
+# ============ HHD Authentication Support ============
+
+class HHDContext:
+    """Context object for HHD authentication - mimics User for compatibility"""
+    def __init__(self, device: HandHeldDevice, technician_id: Optional[int] = None):
+        self.device = device
+        self.company_id = device.company_id
+        self.id = technician_id  # For created_by fields
+        self.email = f"hhd:{device.device_code}"
+        self.name = device.device_name
+        self.role = "technician"  # HHD has technician-level access
+
+
+def verify_token_payload(token: str) -> Optional[dict]:
+    """Verify token and return full payload"""
+    try:
+        payload = jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm])
+        return payload
+    except:
+        return None
+
+
+def get_current_user_or_hhd(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db)
+):
+    """
+    Authenticate either a User (admin portal) or HHD device (mobile app).
+    Returns User object for admin tokens, or HHDContext for mobile tokens.
+    """
+    token = credentials.credentials
+    payload = verify_token_payload(token)
+
+    if not payload:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
+
+    sub = payload.get("sub")
+    token_type = payload.get("type")
+
+    # Check if this is an HHD token
+    if token_type == "hhd" or (sub and sub.startswith("hhd:")):
+        device_id = payload.get("device_id")
+        if not device_id:
+            # Try to extract from sub
+            try:
+                device_id = int(sub.split(":")[1])
+            except:
+                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid HHD token")
+
+        device = db.query(HandHeldDevice).filter(
+            HandHeldDevice.id == device_id,
+            HandHeldDevice.is_active == True
+        ).first()
+
+        if not device:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Device not found or inactive")
+
+        technician_id = payload.get("technician_id")
+        return HHDContext(device, technician_id)
+
+    # Regular user token
+    email = sub
+    if not email:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+
+    user = db.query(User).filter(User.email == email).first()
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+
+    return user
 
 
 # ============ Pydantic Schemas ============
@@ -1241,14 +1315,18 @@ async def get_transfers(
     status_filter: Optional[str] = None,
     from_warehouse_id: Optional[int] = None,
     to_hhd_id: Optional[int] = None,
-    user: User = Depends(get_current_user),
+    auth_context = Depends(get_current_user_or_hhd),
     db: Session = Depends(get_db)
 ):
-    """Get all transfers for the company"""
-    if not user.company_id:
+    """Get all transfers for the company (supports both admin and HHD authentication)"""
+    if not auth_context.company_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No company associated")
 
-    query = db.query(ItemTransfer).filter(ItemTransfer.company_id == user.company_id)
+    # For HHD authentication, force filter by to_hhd_id
+    if isinstance(auth_context, HHDContext):
+        to_hhd_id = auth_context.device.id
+
+    query = db.query(ItemTransfer).filter(ItemTransfer.company_id == auth_context.company_id)
 
     if status_filter:
         query = query.filter(ItemTransfer.status == status_filter)
@@ -1282,11 +1360,11 @@ async def get_transfers(
 @router.get("/transfers/{transfer_id}")
 async def get_transfer(
     transfer_id: int,
-    user: User = Depends(get_current_user),
+    auth_context = Depends(get_current_user_or_hhd),
     db: Session = Depends(get_db)
 ):
-    """Get a specific transfer with lines"""
-    if not user.company_id:
+    """Get a specific transfer with lines (supports both admin and HHD authentication)"""
+    if not auth_context.company_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No company associated")
 
     transfer = db.query(ItemTransfer).options(
@@ -1296,11 +1374,16 @@ async def get_transfer(
         joinedload(ItemTransfer.to_hhd)
     ).filter(
         ItemTransfer.id == transfer_id,
-        ItemTransfer.company_id == user.company_id
+        ItemTransfer.company_id == auth_context.company_id
     ).first()
 
     if not transfer:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transfer not found")
+
+    # For HHD authentication, verify the transfer is to this HHD
+    if isinstance(auth_context, HHDContext):
+        if transfer.to_hhd_id != auth_context.device.id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Transfer not assigned to this device")
 
     return {
         "id": transfer.id,
@@ -1402,22 +1485,27 @@ async def create_transfer(
 @router.post("/transfers/{transfer_id}/complete")
 async def complete_transfer(
     transfer_id: int,
-    user: User = Depends(get_current_user),
+    auth_context = Depends(get_current_user_or_hhd),
     db: Session = Depends(get_db)
 ):
-    """Complete a transfer and update stock levels"""
-    if not user.company_id:
+    """Complete a transfer and update stock levels (supports both admin and HHD authentication)"""
+    if not auth_context.company_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No company associated")
 
     transfer = db.query(ItemTransfer).options(
         joinedload(ItemTransfer.lines)
     ).filter(
         ItemTransfer.id == transfer_id,
-        ItemTransfer.company_id == user.company_id
+        ItemTransfer.company_id == auth_context.company_id
     ).first()
 
     if not transfer:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transfer not found")
+
+    # For HHD authentication, verify the transfer is to this HHD
+    if isinstance(auth_context, HHDContext):
+        if transfer.to_hhd_id != auth_context.device.id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Transfer not assigned to this device")
 
     if transfer.status == "completed":
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Transfer already completed")
@@ -1445,11 +1533,11 @@ async def complete_transfer(
             # Create TRANSFER_OUT ledger entry (from source)
             update_stock_and_create_ledger(
                 db=db,
-                company_id=user.company_id,
+                company_id=auth_context.company_id,
                 item_id=line.item_id,
                 quantity=float(line.quantity_requested),
                 transaction_type="TRANSFER_OUT",
-                user_id=user.id,
+                user_id=auth_context.id,
                 from_warehouse_id=transfer.from_warehouse_id,
                 transfer_id=transfer.id,
                 unit_cost=transfer_unit_cost,
@@ -1460,11 +1548,11 @@ async def complete_transfer(
             # Use the same weighted average cost from source
             update_stock_and_create_ledger(
                 db=db,
-                company_id=user.company_id,
+                company_id=auth_context.company_id,
                 item_id=line.item_id,
                 quantity=float(line.quantity_requested),
                 transaction_type="TRANSFER_IN",
-                user_id=user.id,
+                user_id=auth_context.id,
                 to_warehouse_id=transfer.to_warehouse_id,
                 to_hhd_id=transfer.to_hhd_id,
                 transfer_id=transfer.id,
@@ -1479,7 +1567,7 @@ async def complete_transfer(
         # Update transfer status
         transfer.status = "completed"
         transfer.completed_at = datetime.utcnow()
-        transfer.completed_by = user.id
+        transfer.completed_by = auth_context.id
 
         db.commit()
 
@@ -1569,16 +1657,21 @@ async def get_warehouse_stock(
 @router.get("/hhd/{hhd_id}/stock")
 async def get_hhd_stock(
     hhd_id: int,
-    user: User = Depends(get_current_user),
+    auth_context = Depends(get_current_user_or_hhd),
     db: Session = Depends(get_db)
 ):
-    """Get all stock levels for a handheld device"""
-    if not user.company_id:
+    """Get all stock levels for a handheld device (supports both admin and HHD authentication)"""
+    if not auth_context.company_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No company associated")
+
+    # For HHD authentication, verify the request is for this HHD
+    if isinstance(auth_context, HHDContext):
+        if hhd_id != auth_context.device.id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Can only view your own device stock")
 
     hhd = db.query(HandHeldDevice).filter(
         HandHeldDevice.id == hhd_id,
-        HandHeldDevice.company_id == user.company_id
+        HandHeldDevice.company_id == auth_context.company_id
     ).first()
     if not hhd:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="HHD not found")

@@ -4,14 +4,38 @@ from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
 from typing import Optional, List
 from app.database import get_db
-from app.models import Branch, Client, User, Company, Project
+from app.models import Branch, Client, User, Company, Project, HandHeldDevice
 from app.utils.security import verify_token
+from jose import jwt
+from app.config import settings
 import logging
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 security = HTTPBearer()
+
+
+# ============ HHD Authentication Support ============
+
+class HHDContext:
+    """Context object for HHD authentication - mimics User for compatibility"""
+    def __init__(self, device: HandHeldDevice, technician_id: Optional[int] = None):
+        self.device = device
+        self.company_id = device.company_id
+        self.id = technician_id
+        self.email = f"hhd:{device.device_code}"
+        self.name = device.device_name
+        self.role = "technician"
+
+
+def verify_token_payload(token: str) -> Optional[dict]:
+    """Verify token and return full payload"""
+    try:
+        payload = jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm])
+        return payload
+    except:
+        return None
 
 
 def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security), db: Session = Depends(get_db)):
@@ -32,6 +56,49 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="User not found"
         )
+
+    return user
+
+
+def get_current_user_or_hhd(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db)
+):
+    """Authenticate either a User or HHD device."""
+    token = credentials.credentials
+    payload = verify_token_payload(token)
+
+    if not payload:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
+
+    sub = payload.get("sub")
+    token_type = payload.get("type")
+
+    if token_type == "hhd" or (sub and sub.startswith("hhd:")):
+        device_id = payload.get("device_id")
+        if not device_id:
+            try:
+                device_id = int(sub.split(":")[1])
+            except:
+                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid HHD token")
+
+        device = db.query(HandHeldDevice).filter(
+            HandHeldDevice.id == device_id,
+            HandHeldDevice.is_active == True
+        ).first()
+
+        if not device:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Device not found or inactive")
+
+        return HHDContext(device, payload.get("technician_id"))
+
+    email = sub
+    if not email:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+
+    user = db.query(User).filter(User.email == email).first()
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
 
     return user
 
@@ -102,23 +169,26 @@ async def get_branches(
     client_id: Optional[int] = None,
     include_inactive: bool = False,
     search: Optional[str] = None,
-    user: User = Depends(get_current_user),
+    auth_context = Depends(get_current_user_or_hhd),
     db: Session = Depends(get_db)
 ):
-    """Get all branches for the current company"""
-    if not user.company_id:
+    """Get all branches for the current company (supports both admin and HHD authentication)"""
+    if not auth_context.company_id:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="No company associated with this user"
+            detail="No company associated"
         )
 
+    # For HHD devices, show all branches from company's clients
+    if isinstance(auth_context, HHDContext):
+        query = db.query(Branch).join(Client).filter(Client.company_id == auth_context.company_id)
     # For operators, only show branches they're assigned to
-    if user.role == "operator":
-        branch_ids = [b.id for b in user.assigned_branches]
+    elif auth_context.role == "operator":
+        branch_ids = [b.id for b in auth_context.assigned_branches]
         query = db.query(Branch).filter(Branch.id.in_(branch_ids))
     else:
         # For admins, show all branches from company's clients
-        query = db.query(Branch).join(Client).filter(Client.company_id == user.company_id)
+        query = db.query(Branch).join(Client).filter(Client.company_id == auth_context.company_id)
 
     if client_id:
         query = query.filter(Branch.client_id == client_id)
@@ -142,19 +212,19 @@ async def get_branches(
 @router.get("/branches/{branch_id}")
 async def get_branch(
     branch_id: int,
-    user: User = Depends(get_current_user),
+    auth_context = Depends(get_current_user_or_hhd),
     db: Session = Depends(get_db)
 ):
-    """Get a specific branch"""
-    if not user.company_id:
+    """Get a specific branch (supports both admin and HHD authentication)"""
+    if not auth_context.company_id:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="No company associated with this user"
+            detail="No company associated"
         )
 
     branch = db.query(Branch).join(Client).filter(
         Branch.id == branch_id,
-        Client.company_id == user.company_id
+        Client.company_id == auth_context.company_id
     ).first()
 
     if not branch:
@@ -163,9 +233,9 @@ async def get_branch(
             detail="Branch not found"
         )
 
-    # Operators can only access their assigned branches
-    if user.role == "operator":
-        if branch.id not in [b.id for b in user.assigned_branches]:
+    # Operators can only access their assigned branches (HHD has full access)
+    if not isinstance(auth_context, HHDContext) and auth_context.role == "operator":
+        if branch.id not in [b.id for b in auth_context.assigned_branches]:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Access denied to this branch"

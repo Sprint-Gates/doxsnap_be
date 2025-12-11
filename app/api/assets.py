@@ -5,15 +5,39 @@ from sqlalchemy.orm import Session
 from typing import Optional, List
 from datetime import date
 from app.database import get_db
-from app.models import User, Branch, Client, Floor, Room, Equipment, SubEquipment
+from app.models import User, Branch, Client, Floor, Room, Equipment, SubEquipment, HandHeldDevice
 import os
 from app.utils.security import verify_token
+from jose import jwt
+from app.config import settings
 import logging
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 security = HTTPBearer()
+
+
+# ============ HHD Authentication Support ============
+
+class HHDContext:
+    """Context object for HHD authentication - mimics User for compatibility"""
+    def __init__(self, device: HandHeldDevice, technician_id: Optional[int] = None):
+        self.device = device
+        self.company_id = device.company_id
+        self.id = technician_id  # For created_by fields
+        self.email = f"hhd:{device.device_code}"
+        self.name = device.device_name
+        self.role = "technician"  # HHD has technician-level access
+
+
+def verify_token_payload(token: str) -> Optional[dict]:
+    """Verify token and return full payload"""
+    try:
+        payload = jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm])
+        return payload
+    except:
+        return None
 
 
 def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security), db: Session = Depends(get_db)):
@@ -36,7 +60,56 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
         )
 
     return user
-print("test")
+
+
+def get_current_user_or_hhd(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db)
+):
+    """
+    Authenticate either a User (admin portal) or HHD device (mobile app).
+    Returns User object for admin tokens, or HHDContext for mobile tokens.
+    """
+    token = credentials.credentials
+    payload = verify_token_payload(token)
+
+    if not payload:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
+
+    sub = payload.get("sub")
+    token_type = payload.get("type")
+
+    # Check if this is an HHD token
+    if token_type == "hhd" or (sub and sub.startswith("hhd:")):
+        device_id = payload.get("device_id")
+        if not device_id:
+            # Try to extract from sub
+            try:
+                device_id = int(sub.split(":")[1])
+            except:
+                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid HHD token")
+
+        device = db.query(HandHeldDevice).filter(
+            HandHeldDevice.id == device_id,
+            HandHeldDevice.is_active == True
+        ).first()
+
+        if not device:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Device not found or inactive")
+
+        technician_id = payload.get("technician_id")
+        return HHDContext(device, technician_id)
+
+    # Regular user token
+    email = sub
+    if not email:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+
+    user = db.query(User).filter(User.email == email).first()
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+
+    return user
 
 def require_admin(user: User = Depends(get_current_user)):
     """Require admin role"""
@@ -170,11 +243,11 @@ class SubEquipmentUpdate(BaseModel):
 # Helper Functions
 # ============================================================================
 
-def verify_branch_access(branch_id: int, user: User, db: Session) -> Branch:
-    """Verify user has access to the branch"""
+def verify_branch_access(branch_id: int, auth_context, db: Session) -> Branch:
+    """Verify user/HHD has access to the branch"""
     branch = db.query(Branch).join(Client).filter(
         Branch.id == branch_id,
-        Client.company_id == user.company_id
+        Client.company_id == auth_context.company_id
     ).first()
 
     if not branch:
@@ -402,11 +475,11 @@ async def get_branch_assets_summary(
 async def get_floors(
     branch_id: int,
     include_inactive: bool = False,
-    user: User = Depends(get_current_user),
+    auth_context = Depends(get_current_user_or_hhd),
     db: Session = Depends(get_db)
 ):
-    """Get all floors for a branch"""
-    verify_branch_access(branch_id, user, db)
+    """Get all floors for a branch (supports both admin and HHD authentication)"""
+    verify_branch_access(branch_id, auth_context, db)
 
     query = db.query(Floor).filter(Floor.branch_id == branch_id)
     if not include_inactive:
@@ -419,15 +492,15 @@ async def get_floors(
 @router.get("/floors/{floor_id}")
 async def get_floor(
     floor_id: int,
-    user: User = Depends(get_current_user),
+    auth_context = Depends(get_current_user_or_hhd),
     db: Session = Depends(get_db)
 ):
-    """Get a specific floor"""
+    """Get a specific floor (supports both admin and HHD authentication)"""
     floor = db.query(Floor).filter(Floor.id == floor_id).first()
     if not floor:
         raise HTTPException(status_code=404, detail="Floor not found")
 
-    verify_branch_access(floor.branch_id, user, db)
+    verify_branch_access(floor.branch_id, auth_context, db)
     return floor_to_response(floor, include_children=True)
 
 
@@ -510,15 +583,15 @@ async def delete_floor(
 async def get_rooms(
     floor_id: int,
     include_inactive: bool = False,
-    user: User = Depends(get_current_user),
+    auth_context = Depends(get_current_user_or_hhd),
     db: Session = Depends(get_db)
 ):
-    """Get all rooms for a floor"""
+    """Get all rooms for a floor (supports both admin and HHD authentication)"""
     floor = db.query(Floor).filter(Floor.id == floor_id).first()
     if not floor:
         raise HTTPException(status_code=404, detail="Floor not found")
 
-    verify_branch_access(floor.branch_id, user, db)
+    verify_branch_access(floor.branch_id, auth_context, db)
 
     query = db.query(Room).filter(Room.floor_id == floor_id)
     if not include_inactive:
@@ -531,15 +604,15 @@ async def get_rooms(
 @router.get("/rooms/{room_id}")
 async def get_room(
     room_id: int,
-    user: User = Depends(get_current_user),
+    auth_context = Depends(get_current_user_or_hhd),
     db: Session = Depends(get_db)
 ):
-    """Get a specific room"""
+    """Get a specific room (supports both admin and HHD authentication)"""
     room = db.query(Room).filter(Room.id == room_id).first()
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
 
-    verify_branch_access(room.floor.branch_id, user, db)
+    verify_branch_access(room.floor.branch_id, auth_context, db)
     return room_to_response(room, include_children=True)
 
 
@@ -630,26 +703,26 @@ async def get_equipment(
     category: Optional[str] = None,
     status: Optional[str] = None,
     include_inactive: bool = False,
-    user: User = Depends(get_current_user),
+    auth_context = Depends(get_current_user_or_hhd),
     db: Session = Depends(get_db)
 ):
-    """Get equipment with optional filters"""
-    if not user.company_id:
+    """Get equipment with optional filters (supports both admin and HHD authentication)"""
+    if not auth_context.company_id:
         raise HTTPException(status_code=404, detail="No company associated")
 
     if room_id:
         room = db.query(Room).filter(Room.id == room_id).first()
         if not room:
             raise HTTPException(status_code=404, detail="Room not found")
-        verify_branch_access(room.floor.branch_id, user, db)
+        verify_branch_access(room.floor.branch_id, auth_context, db)
         query = db.query(Equipment).filter(Equipment.room_id == room_id)
     elif branch_id:
-        verify_branch_access(branch_id, user, db)
+        verify_branch_access(branch_id, auth_context, db)
         query = db.query(Equipment).join(Room).join(Floor).filter(Floor.branch_id == branch_id)
     else:
         # Get all equipment for company
         query = db.query(Equipment).join(Room).join(Floor).join(Branch).join(Client).filter(
-            Client.company_id == user.company_id
+            Client.company_id == auth_context.company_id
         )
 
     if not include_inactive:
@@ -668,15 +741,15 @@ async def get_equipment(
 @router.get("/equipment/{equipment_id}")
 async def get_equipment_item(
     equipment_id: int,
-    user: User = Depends(get_current_user),
+    auth_context = Depends(get_current_user_or_hhd),
     db: Session = Depends(get_db)
 ):
-    """Get a specific equipment item"""
+    """Get a specific equipment item (supports both admin and HHD authentication)"""
     equip = db.query(Equipment).filter(Equipment.id == equipment_id).first()
     if not equip:
         raise HTTPException(status_code=404, detail="Equipment not found")
 
-    verify_branch_access(equip.room.floor.branch_id, user, db)
+    verify_branch_access(equip.room.floor.branch_id, auth_context, db)
     return equipment_to_response(equip, include_children=True)
 
 

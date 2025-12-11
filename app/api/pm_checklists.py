@@ -2,9 +2,10 @@
 API endpoints for Preventive Maintenance Checklists.
 Provides the PM hierarchy and checklist data for the frontend.
 """
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session, joinedload
-from typing import List, Optional
+from typing import List, Optional, Union
 from pydantic import BaseModel
 from datetime import datetime
 import logging
@@ -12,13 +13,88 @@ import logging
 from app.database import get_db
 from app.models import (
     User, Company, PMEquipmentClass, PMSystemCode, PMAssetType,
-    PMChecklist, PMActivity
+    PMChecklist, PMActivity, HandHeldDevice
 )
 from app.api.auth import get_current_user
 from app.utils.pm_seed import seed_pm_checklists_for_company
+from app.config import settings
+from jose import jwt
 
 router = APIRouter()
+security = HTTPBearer()
 logger = logging.getLogger(__name__)
+
+
+def verify_token_payload(token: str) -> Optional[dict]:
+    """Verify token and return full payload"""
+    try:
+        payload = jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm])
+        return payload
+    except:
+        return None
+
+
+# HHD Authentication Support
+class HHDContext:
+    """Context object for HHD authentication - mimics User for compatibility"""
+    def __init__(self, device: HandHeldDevice, technician_id: Optional[int] = None):
+        self.device = device
+        self.company_id = device.company_id
+        self.id = technician_id
+        self.email = f"hhd:{device.device_code}"
+        self.name = device.device_name
+        self.role = "technician"
+
+
+def get_current_user_or_hhd(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db)
+):
+    """Authenticate either a regular user or an HHD device"""
+    token = credentials.credentials
+    payload = verify_token_payload(token)
+
+    if not payload:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token"
+        )
+
+    sub = payload.get("sub")
+    token_type = payload.get("type")
+
+    # Check if this is an HHD token
+    if token_type == "hhd" or (sub and sub.startswith("hhd:")):
+        device_id = payload.get("device_id")
+        if not device_id:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid HHD token"
+            )
+
+        device = db.query(HandHeldDevice).filter(
+            HandHeldDevice.id == device_id,
+            HandHeldDevice.is_active == True
+        ).first()
+
+        if not device:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Device not found or inactive"
+            )
+
+        technician_id = payload.get("technician_id")
+        return HHDContext(device, technician_id)
+
+    # Regular user token
+    user = db.query(User).filter(User.email == sub).first()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found"
+        )
+
+    return user
 
 
 # ============================================================================
@@ -112,7 +188,7 @@ class PMHierarchyResponse(BaseModel):
 
 @router.get("/pm/equipment-classes", response_model=List[PMEquipmentClassResponse])
 async def get_equipment_classes(
-    user: User = Depends(get_current_user),
+    user: Union[User, HHDContext] = Depends(get_current_user_or_hhd),
     db: Session = Depends(get_db)
 ):
     """Get all equipment classes for the company"""
@@ -136,7 +212,7 @@ async def get_equipment_classes(
 @router.get("/pm/equipment-classes/{class_id}", response_model=PMEquipmentClassWithSystemCodesResponse)
 async def get_equipment_class(
     class_id: int,
-    user: User = Depends(get_current_user),
+    user: Union[User, HHDContext] = Depends(get_current_user_or_hhd),
     db: Session = Depends(get_db)
 ):
     """Get an equipment class with its system codes"""
@@ -175,7 +251,7 @@ async def get_equipment_class(
 @router.get("/pm/system-codes", response_model=List[PMSystemCodeResponse])
 async def get_system_codes(
     equipment_class_id: Optional[int] = None,
-    user: User = Depends(get_current_user),
+    user: Union[User, HHDContext] = Depends(get_current_user_or_hhd),
     db: Session = Depends(get_db)
 ):
     """Get all system codes, optionally filtered by equipment class"""
@@ -204,7 +280,7 @@ async def get_system_codes(
 @router.get("/pm/system-codes/{system_code_id}", response_model=PMSystemCodeWithAssetTypesResponse)
 async def get_system_code(
     system_code_id: int,
-    user: User = Depends(get_current_user),
+    user: Union[User, HHDContext] = Depends(get_current_user_or_hhd),
     db: Session = Depends(get_db)
 ):
     """Get a system code with its asset types"""
@@ -246,7 +322,7 @@ async def get_asset_types(
     system_code_id: Optional[int] = None,
     search: Optional[str] = None,
     has_checklists: bool = False,
-    user: User = Depends(get_current_user),
+    user: Union[User, HHDContext] = Depends(get_current_user_or_hhd),
     db: Session = Depends(get_db)
 ):
     """Get all asset types, optionally filtered by system code or search query"""
@@ -288,7 +364,7 @@ async def get_asset_types(
 @router.get("/pm/asset-types/{asset_type_id}", response_model=PMAssetTypeDetailResponse)
 async def get_asset_type(
     asset_type_id: int,
-    user: User = Depends(get_current_user),
+    user: Union[User, HHDContext] = Depends(get_current_user_or_hhd),
     db: Session = Depends(get_db)
 ):
     """Get an asset type with its checklists and activities"""
@@ -344,7 +420,7 @@ async def get_asset_type(
 @router.get("/pm/checklists/{checklist_id}", response_model=PMChecklistWithActivitiesResponse)
 async def get_checklist(
     checklist_id: int,
-    user: User = Depends(get_current_user),
+    user: Union[User, HHDContext] = Depends(get_current_user_or_hhd),
     db: Session = Depends(get_db)
 ):
     """Get a checklist with its activities"""
@@ -385,7 +461,7 @@ async def get_checklist(
 
 @router.get("/pm/hierarchy", response_model=PMHierarchyResponse)
 async def get_pm_hierarchy(
-    user: User = Depends(get_current_user),
+    user: Union[User, HHDContext] = Depends(get_current_user_or_hhd),
     db: Session = Depends(get_db)
 ):
     """Get the full PM hierarchy (equipment classes with system codes)"""
@@ -426,7 +502,7 @@ async def get_pm_hierarchy(
 @router.get("/pm/search")
 async def search_pm(
     q: str = Query(..., min_length=2),
-    user: User = Depends(get_current_user),
+    user: Union[User, HHDContext] = Depends(get_current_user_or_hhd),
     db: Session = Depends(get_db)
 ):
     """Search across asset types and return matches with their checklists"""
@@ -469,7 +545,7 @@ async def search_pm(
 
 @router.get("/pm/stats")
 async def get_pm_stats(
-    user: User = Depends(get_current_user),
+    user: Union[User, HHDContext] = Depends(get_current_user_or_hhd),
     db: Session = Depends(get_db)
 ):
     """Get PM statistics for the dashboard"""

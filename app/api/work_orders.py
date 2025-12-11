@@ -7,7 +7,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import and_, or_, func
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional, List, Union
 from datetime import datetime, date
 from decimal import Decimal
 import logging
@@ -20,10 +20,85 @@ from app.models import (
     ItemMaster, ItemStock, ItemLedger
 )
 from app.api.auth import verify_token
+from app.utils.security import verify_token as verify_token_raw
+from jose import jwt
+from app.config import settings
 
 router = APIRouter()
 security = HTTPBearer()
 logger = logging.getLogger(__name__)
+
+
+# ============ HHD Authentication Support ============
+
+class HHDContext:
+    """Context object for HHD authentication - mimics User for compatibility"""
+    def __init__(self, device: HandHeldDevice, technician_id: Optional[int] = None):
+        self.device = device
+        self.company_id = device.company_id
+        self.id = technician_id  # For created_by fields
+        self.email = f"hhd:{device.device_code}"
+        self.name = device.device_name
+        self.role = "technician"  # HHD has technician-level access
+
+
+def verify_token_payload(token: str) -> Optional[dict]:
+    """Verify token and return full payload"""
+    try:
+        payload = jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm])
+        return payload
+    except:
+        return None
+
+
+def get_current_user_or_hhd(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db)
+):
+    """
+    Authenticate either a User (admin portal) or HHD device (mobile app).
+    Returns User object for admin tokens, or HHDContext for mobile tokens.
+    """
+    token = credentials.credentials
+    payload = verify_token_payload(token)
+
+    if not payload:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
+
+    sub = payload.get("sub")
+    token_type = payload.get("type")
+
+    # Check if this is an HHD token
+    if token_type == "hhd" or (sub and sub.startswith("hhd:")):
+        device_id = payload.get("device_id")
+        if not device_id:
+            # Try to extract from sub
+            try:
+                device_id = int(sub.split(":")[1])
+            except:
+                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid HHD token")
+
+        device = db.query(HandHeldDevice).filter(
+            HandHeldDevice.id == device_id,
+            HandHeldDevice.is_active == True
+        ).first()
+
+        if not device:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Device not found or inactive")
+
+        technician_id = payload.get("technician_id")
+        return HHDContext(device, technician_id)
+
+    # Regular user token
+    email = sub
+    if not email:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+
+    user = db.query(User).filter(User.email == email).first()
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+
+    return user
 
 
 # ============ Pydantic Schemas ============
@@ -223,7 +298,7 @@ def calculate_billable_amount(work_order: WorkOrder) -> float:
     return round(billable_labor + billable_parts, 2)
 
 
-def work_order_to_response(wo: WorkOrder, include_details: bool = False) -> dict:
+def work_order_to_response(wo: WorkOrder, include_details: bool = False, db: Session = None) -> dict:
     """Convert WorkOrder model to response dict"""
     response = {
         "id": wo.id,
@@ -372,6 +447,28 @@ def work_order_to_response(wo: WorkOrder, include_details: bool = False) -> dict
             for item in sorted_checklist
         ]
 
+        # Add issued items (from item ledger)
+        response["issued_items"] = []
+        if db:
+            issued_items = db.query(ItemLedger).filter(
+                ItemLedger.work_order_id == wo.id,
+                ItemLedger.transaction_type == "ISSUE_WORK_ORDER"
+            ).all()
+            response["issued_items"] = [
+                {
+                    "id": item.id,
+                    "item_id": item.item_id,
+                    "item_code": item.item.code if item.item else None,
+                    "item_name": item.item.name if item.item else None,
+                    "quantity": item.quantity,
+                    "unit_cost": decimal_to_float(item.unit_cost),
+                    "total_cost": decimal_to_float(item.total_cost),
+                    "notes": item.notes,
+                    "created_at": item.created_at.isoformat() if item.created_at else None
+                }
+                for item in issued_items
+            ]
+
     return response
 
 
@@ -389,14 +486,18 @@ async def get_work_orders(
     is_billable: Optional[bool] = Query(None, description="Filter by billable status"),
     search: Optional[str] = Query(None, description="Search in WO number and title"),
     include_details: bool = Query(False, description="Include full details (technicians, time entries, etc.)"),
-    user: User = Depends(get_current_user),
+    auth_context = Depends(get_current_user_or_hhd),
     db: Session = Depends(get_db)
 ):
-    """Get all work orders for the company"""
-    if not user.company_id:
+    """Get all work orders for the company (supports both admin and HHD authentication)"""
+    if not auth_context.company_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No company associated")
 
-    query = db.query(WorkOrder).filter(WorkOrder.company_id == user.company_id)
+    # For HHD authentication, force filter by assigned HHD
+    if isinstance(auth_context, HHDContext):
+        hhd_id = auth_context.device.id
+
+    query = db.query(WorkOrder).filter(WorkOrder.company_id == auth_context.company_id)
 
     # If include_details, eagerly load relationships
     if include_details:
@@ -445,11 +546,11 @@ async def get_work_orders(
 @router.get("/work-orders/{wo_id}")
 async def get_work_order(
     wo_id: int,
-    user: User = Depends(get_current_user),
+    auth_context = Depends(get_current_user_or_hhd),
     db: Session = Depends(get_db)
 ):
-    """Get a specific work order with full details"""
-    if not user.company_id:
+    """Get a specific work order with full details (supports both admin and HHD authentication)"""
+    if not auth_context.company_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No company associated")
 
     wo = db.query(WorkOrder).options(
@@ -463,19 +564,24 @@ async def get_work_order(
         joinedload(WorkOrder.checklist_items)
     ).filter(
         WorkOrder.id == wo_id,
-        WorkOrder.company_id == user.company_id
+        WorkOrder.company_id == auth_context.company_id
     ).first()
+
+    # For HHD authentication, verify the work order is assigned to this HHD
+    if isinstance(auth_context, HHDContext) and wo:
+        if wo.assigned_hhd_id != auth_context.device.id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Work order not assigned to this device")
 
     if not wo:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Work order not found")
 
-    return work_order_to_response(wo, include_details=True)
+    return work_order_to_response(wo, include_details=True, db=db)
 
 
 @router.post("/work-orders/")
 async def create_work_order(
     data: WorkOrderCreate,
-    user: User = Depends(get_current_user),
+    user: Union[User, HHDContext] = Depends(get_current_user_or_hhd),
     db: Session = Depends(get_db)
 ):
     """Create a new work order"""
@@ -611,17 +717,22 @@ async def create_work_order(
 async def update_work_order(
     wo_id: int,
     data: WorkOrderUpdate,
-    user: User = Depends(get_current_user),
+    auth_context = Depends(get_current_user_or_hhd),
     db: Session = Depends(get_db)
 ):
-    """Update a work order"""
-    if not user.company_id:
+    """Update a work order (supports both admin and HHD authentication)"""
+    if not auth_context.company_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No company associated")
 
     wo = db.query(WorkOrder).filter(
         WorkOrder.id == wo_id,
-        WorkOrder.company_id == user.company_id
+        WorkOrder.company_id == auth_context.company_id
     ).first()
+
+    # For HHD authentication, verify the work order is assigned to this HHD
+    if isinstance(auth_context, HHDContext) and wo:
+        if wo.assigned_hhd_id != auth_context.device.id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Work order not assigned to this device")
 
     if not wo:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Work order not found")
@@ -633,12 +744,14 @@ async def update_work_order(
             detail="Cannot edit an approved work order"
         )
 
-    # Validate HHD if being updated
+    # Validate HHD if being updated (admin only - HHD can't reassign)
     if data.assigned_hhd_id is not None:
+        if isinstance(auth_context, HHDContext):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="HHD cannot reassign work orders")
         if data.assigned_hhd_id != 0:  # 0 means clear assignment
             hhd = db.query(HandHeldDevice).filter(
                 HandHeldDevice.id == data.assigned_hhd_id,
-                HandHeldDevice.company_id == user.company_id,
+                HandHeldDevice.company_id == auth_context.company_id,
                 HandHeldDevice.is_active == True
             ).first()
             if not hhd:
@@ -678,7 +791,7 @@ async def update_work_order(
             if value is not None or field == 'assigned_hhd_id':
                 setattr(wo, field, value)
 
-        wo.updated_by = user.id
+        wo.updated_by = auth_context.id
 
         # Recalculate costs if status changed to completed
         if data.status == "completed":
@@ -697,7 +810,7 @@ async def update_work_order(
         db.commit()
         db.refresh(wo)
 
-        logger.info(f"Work order {wo.wo_number} updated by {user.email}")
+        logger.info(f"Work order {wo.wo_number} updated by {auth_context.email}")
         return work_order_to_response(wo, include_details=True)
 
     except Exception as e:
@@ -1159,20 +1272,28 @@ def generate_ledger_transaction_number(db: Session, company_id: int, prefix: str
 async def issue_item_to_work_order(
     wo_id: int,
     data: WorkOrderItemIssue,
-    user: User = Depends(get_current_user),
+    auth_context = Depends(get_current_user_or_hhd),
     db: Session = Depends(get_db)
 ):
-    """Issue an item from HHD stock to a work order (creates ledger entry)"""
-    if not user.company_id:
+    """Issue an item from HHD stock to a work order (creates ledger entry) - supports both admin and HHD authentication"""
+    if not auth_context.company_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No company associated")
 
     # Get work order
     wo = db.query(WorkOrder).filter(
         WorkOrder.id == wo_id,
-        WorkOrder.company_id == user.company_id
+        WorkOrder.company_id == auth_context.company_id
     ).first()
     if not wo:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Work order not found")
+
+    # For HHD authentication, verify the work order is assigned to this HHD
+    if isinstance(auth_context, HHDContext):
+        if wo.assigned_hhd_id != auth_context.device.id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Work order not assigned to this device")
+        # Also verify the HHD issuing items is the same as the authenticated HHD
+        if data.hhd_id != auth_context.device.id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Can only issue items from your own device")
 
     if wo.approved_by is not None:
         raise HTTPException(
@@ -1183,7 +1304,7 @@ async def issue_item_to_work_order(
     # Get item from item master
     item = db.query(ItemMaster).filter(
         ItemMaster.id == data.item_id,
-        ItemMaster.company_id == user.company_id
+        ItemMaster.company_id == auth_context.company_id
     ).first()
     if not item:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Item not found")
@@ -1191,7 +1312,7 @@ async def issue_item_to_work_order(
     # Get HHD
     hhd = db.query(HandHeldDevice).filter(
         HandHeldDevice.id == data.hhd_id,
-        HandHeldDevice.company_id == user.company_id
+        HandHeldDevice.company_id == auth_context.company_id
     ).first()
     if not hhd:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="HHD not found")
@@ -1230,10 +1351,10 @@ async def issue_item_to_work_order(
         unit_price = float(item.unit_price or unit_cost)
 
         # Create ledger entry with status pending (not yet confirmed)
-        transaction_number = generate_ledger_transaction_number(db, user.company_id, "ISS")
+        transaction_number = generate_ledger_transaction_number(db, auth_context.company_id, "ISS")
 
         ledger_entry = ItemLedger(
-            company_id=user.company_id,
+            company_id=auth_context.company_id,
             item_id=data.item_id,
             transaction_number=transaction_number,
             transaction_date=datetime.utcnow(),
@@ -1246,7 +1367,7 @@ async def issue_item_to_work_order(
             work_order_id=wo_id,
             balance_after=on_hand - reserved - data.quantity,  # Available after this reservation
             notes=data.notes or f"Issued to WO {wo.wo_number} (pending approval)",
-            created_by=user.id
+            created_by=auth_context.id
         )
         db.add(ledger_entry)
 
@@ -1439,7 +1560,7 @@ async def get_work_order_issued_items(
 async def add_time_entry(
     wo_id: int,
     data: TimeEntryCreate,
-    user: User = Depends(get_current_user),
+    user: Union[User, HHDContext] = Depends(get_current_user_or_hhd),
     db: Session = Depends(get_db)
 ):
     """Add a time entry to a work order"""
@@ -1704,19 +1825,24 @@ class ChecklistItemUpdate(BaseModel):
 @router.get("/work-orders/{wo_id}/checklist")
 async def get_checklist_items(
     wo_id: int,
-    user: User = Depends(get_current_user),
+    auth_context = Depends(get_current_user_or_hhd),
     db: Session = Depends(get_db)
 ):
-    """Get all checklist items for a work order"""
-    if not user.company_id:
+    """Get all checklist items for a work order (supports both admin and HHD authentication)"""
+    if not auth_context.company_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No company associated")
 
     wo = db.query(WorkOrder).filter(
         WorkOrder.id == wo_id,
-        WorkOrder.company_id == user.company_id
+        WorkOrder.company_id == auth_context.company_id
     ).first()
     if not wo:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Work order not found")
+
+    # For HHD authentication, verify the work order is assigned to this HHD
+    if isinstance(auth_context, HHDContext):
+        if wo.assigned_hhd_id != auth_context.device.id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Work order not assigned to this device")
 
     items = db.query(WorkOrderChecklistItem).filter(
         WorkOrderChecklistItem.work_order_id == wo_id
@@ -1797,19 +1923,24 @@ async def update_checklist_item(
     wo_id: int,
     item_id: int,
     data: ChecklistItemUpdate,
-    user: User = Depends(get_current_user),
+    auth_context = Depends(get_current_user_or_hhd),
     db: Session = Depends(get_db)
 ):
-    """Update a checklist item (toggle completion, add notes)"""
-    if not user.company_id:
+    """Update a checklist item (toggle completion, add notes) - supports both admin and HHD authentication"""
+    if not auth_context.company_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No company associated")
 
     wo = db.query(WorkOrder).filter(
         WorkOrder.id == wo_id,
-        WorkOrder.company_id == user.company_id
+        WorkOrder.company_id == auth_context.company_id
     ).first()
     if not wo:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Work order not found")
+
+    # For HHD authentication, verify the work order is assigned to this HHD
+    if isinstance(auth_context, HHDContext):
+        if wo.assigned_hhd_id != auth_context.device.id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Work order not assigned to this device")
 
     item = db.query(WorkOrderChecklistItem).filter(
         WorkOrderChecklistItem.id == item_id,
@@ -1822,7 +1953,7 @@ async def update_checklist_item(
         if data.is_completed is not None:
             item.is_completed = data.is_completed
             if data.is_completed:
-                item.completed_by = user.id
+                item.completed_by = auth_context.id
                 item.completed_at = datetime.utcnow()
             else:
                 item.completed_by = None
