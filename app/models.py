@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, Text, Boolean, ForeignKey, Float, Date, Numeric, Table, UniqueConstraint
+from sqlalchemy import Column, Integer, String, DateTime, Text, Boolean, ForeignKey, Float, Date, Numeric, Table, UniqueConstraint, Time
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.database import Base
@@ -1852,3 +1852,125 @@ class Ticket(Base):
     converter = relationship("User", foreign_keys=[converted_by])
     reviewer = relationship("User", foreign_keys=[reviewed_by])
     work_order = relationship("WorkOrder", backref="source_ticket")
+
+
+# ============================================================================
+# Calendar & Scheduling Models
+# ============================================================================
+
+class CalendarSlot(Base):
+    """
+    Represents an available time slot that can be booked for work order visits.
+    Slots are hourly increments throughout the day.
+    """
+    __tablename__ = "calendar_slots"
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+
+    # Date and time
+    slot_date = Column(Date, nullable=False, index=True)
+    start_time = Column(Time, nullable=False)  # e.g., 09:00
+    end_time = Column(Time, nullable=False)    # e.g., 10:00
+
+    # Capacity (how many work orders can be scheduled in this slot)
+    max_capacity = Column(Integer, default=1)
+    current_bookings = Column(Integer, default=0)
+
+    # Technician assignment (optional - slot can be for specific technician)
+    technician_id = Column(Integer, ForeignKey("technicians.id"), nullable=True)
+
+    # Site context (optional - slot can be site-specific)
+    site_id = Column(Integer, ForeignKey("sites.id"), nullable=True)
+
+    # Status
+    status = Column(String, default="available")  # available, fully_booked, blocked
+
+    # Metadata
+    notes = Column(Text, nullable=True)
+    is_active = Column(Boolean, default=True)
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    # Relationships
+    company = relationship("Company", backref="calendar_slots")
+    technician = relationship("Technician", backref="calendar_slots")
+    site = relationship("Site", backref="calendar_slots")
+    creator = relationship("User", foreign_keys=[created_by])
+    assignments = relationship("WorkOrderSlotAssignment", back_populates="calendar_slot", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        UniqueConstraint('company_id', 'slot_date', 'start_time', 'technician_id', name='uq_slot_date_time_technician'),
+    )
+
+
+class WorkOrderSlotAssignment(Base):
+    """
+    Links work orders to calendar slots.
+    A work order can be assigned to one or more slots.
+    """
+    __tablename__ = "work_order_slot_assignments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    work_order_id = Column(Integer, ForeignKey("work_orders.id", ondelete="CASCADE"), nullable=False)
+    calendar_slot_id = Column(Integer, ForeignKey("calendar_slots.id", ondelete="CASCADE"), nullable=False)
+
+    # Assignment details
+    assigned_at = Column(DateTime, default=func.now())
+    assigned_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+
+    # Status
+    status = Column(String, default="scheduled")  # scheduled, confirmed, completed, cancelled
+
+    notes = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    # Relationships
+    work_order = relationship("WorkOrder", backref="slot_assignments")
+    calendar_slot = relationship("CalendarSlot", back_populates="assignments")
+    assigner = relationship("User", foreign_keys=[assigned_by])
+
+    __table_args__ = (
+        UniqueConstraint('work_order_id', 'calendar_slot_id', name='uq_work_order_slot'),
+    )
+
+
+class CalendarTemplate(Base):
+    """
+    Template for generating recurring calendar slots automatically.
+    Defines working hours and days for a company.
+    """
+    __tablename__ = "calendar_templates"
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+
+    name = Column(String, nullable=False)  # e.g., "Standard Work Week"
+
+    # Days of week (JSON array: [0,1,2,3,4] for Mon-Fri, where 0=Monday)
+    days_of_week = Column(Text, nullable=False)
+
+    # Working hours
+    start_hour = Column(Integer, default=8)   # 8 AM
+    end_hour = Column(Integer, default=17)    # 5 PM
+    slot_duration_minutes = Column(Integer, default=60)  # 1 hour slots
+
+    # Break time (optional)
+    break_start_hour = Column(Integer, nullable=True)  # e.g., 12
+    break_end_hour = Column(Integer, nullable=True)    # e.g., 13
+
+    # Capacity per slot
+    default_capacity = Column(Integer, default=1)
+
+    # Technician (optional - template can be technician-specific)
+    technician_id = Column(Integer, ForeignKey("technicians.id"), nullable=True)
+
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    # Relationships
+    company = relationship("Company", backref="calendar_templates")
+    technician = relationship("Technician", backref="calendar_templates")
