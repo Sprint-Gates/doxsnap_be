@@ -644,6 +644,657 @@ async def seed_pm_data_for_company(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ============================================================================
+# Admin CRUD Endpoints - Equipment Classes
+# ============================================================================
+
+class PMEquipmentClassCreate(BaseModel):
+    code: str
+    name: str
+    description: Optional[str] = None
+    sort_order: Optional[int] = 0
+
+
+class PMEquipmentClassUpdate(BaseModel):
+    code: Optional[str] = None
+    name: Optional[str] = None
+    description: Optional[str] = None
+    sort_order: Optional[int] = None
+    is_active: Optional[bool] = None
+
+
+@router.post("/pm/equipment-classes", response_model=PMEquipmentClassResponse)
+async def create_equipment_class(
+    data: PMEquipmentClassCreate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Create a new equipment class (admin only)"""
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    # Check for duplicate code
+    existing = db.query(PMEquipmentClass).filter(
+        PMEquipmentClass.company_id == user.company_id,
+        PMEquipmentClass.code == data.code
+    ).first()
+    if existing:
+        raise HTTPException(status_code=400, detail=f"Equipment class with code '{data.code}' already exists")
+
+    ec = PMEquipmentClass(
+        company_id=user.company_id,
+        code=data.code,
+        name=data.name,
+        description=data.description,
+        sort_order=data.sort_order or 0,
+        is_active=True
+    )
+    db.add(ec)
+    db.commit()
+    db.refresh(ec)
+
+    return {
+        "id": ec.id,
+        "code": ec.code,
+        "name": ec.name,
+        "description": ec.description,
+        "system_codes_count": 0
+    }
+
+
+@router.put("/pm/equipment-classes/{class_id}", response_model=PMEquipmentClassResponse)
+async def update_equipment_class(
+    class_id: int,
+    data: PMEquipmentClassUpdate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Update an equipment class (admin only)"""
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    ec = db.query(PMEquipmentClass).filter(
+        PMEquipmentClass.id == class_id,
+        PMEquipmentClass.company_id == user.company_id
+    ).first()
+
+    if not ec:
+        raise HTTPException(status_code=404, detail="Equipment class not found")
+
+    if data.code is not None:
+        ec.code = data.code
+    if data.name is not None:
+        ec.name = data.name
+    if data.description is not None:
+        ec.description = data.description
+    if data.sort_order is not None:
+        ec.sort_order = data.sort_order
+    if data.is_active is not None:
+        ec.is_active = data.is_active
+
+    db.commit()
+    db.refresh(ec)
+
+    return {
+        "id": ec.id,
+        "code": ec.code,
+        "name": ec.name,
+        "description": ec.description,
+        "system_codes_count": len([sc for sc in ec.system_codes if sc.is_active])
+    }
+
+
+@router.delete("/pm/equipment-classes/{class_id}")
+async def delete_equipment_class(
+    class_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Delete (deactivate) an equipment class (admin only)"""
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    ec = db.query(PMEquipmentClass).filter(
+        PMEquipmentClass.id == class_id,
+        PMEquipmentClass.company_id == user.company_id
+    ).first()
+
+    if not ec:
+        raise HTTPException(status_code=404, detail="Equipment class not found")
+
+    ec.is_active = False
+    db.commit()
+
+    return {"success": True, "message": "Equipment class deleted"}
+
+
+# ============================================================================
+# Admin CRUD Endpoints - System Codes
+# ============================================================================
+
+class PMSystemCodeCreate(BaseModel):
+    equipment_class_id: int
+    code: str
+    name: str
+    description: Optional[str] = None
+    sort_order: Optional[int] = 0
+
+
+class PMSystemCodeUpdate(BaseModel):
+    code: Optional[str] = None
+    name: Optional[str] = None
+    description: Optional[str] = None
+    sort_order: Optional[int] = None
+    is_active: Optional[bool] = None
+
+
+@router.post("/pm/system-codes", response_model=PMSystemCodeResponse)
+async def create_system_code(
+    data: PMSystemCodeCreate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Create a new system code (admin only)"""
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    # Verify equipment class belongs to company
+    ec = db.query(PMEquipmentClass).filter(
+        PMEquipmentClass.id == data.equipment_class_id,
+        PMEquipmentClass.company_id == user.company_id
+    ).first()
+    if not ec:
+        raise HTTPException(status_code=404, detail="Equipment class not found")
+
+    sc = PMSystemCode(
+        equipment_class_id=data.equipment_class_id,
+        code=data.code,
+        name=data.name,
+        description=data.description,
+        sort_order=data.sort_order or 0,
+        is_active=True
+    )
+    db.add(sc)
+    db.commit()
+    db.refresh(sc)
+
+    return {
+        "id": sc.id,
+        "code": sc.code,
+        "name": sc.name,
+        "description": sc.description,
+        "asset_types_count": 0
+    }
+
+
+@router.put("/pm/system-codes/{system_code_id}", response_model=PMSystemCodeResponse)
+async def update_system_code(
+    system_code_id: int,
+    data: PMSystemCodeUpdate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Update a system code (admin only)"""
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    sc = db.query(PMSystemCode).join(PMEquipmentClass).filter(
+        PMSystemCode.id == system_code_id,
+        PMEquipmentClass.company_id == user.company_id
+    ).first()
+
+    if not sc:
+        raise HTTPException(status_code=404, detail="System code not found")
+
+    if data.code is not None:
+        sc.code = data.code
+    if data.name is not None:
+        sc.name = data.name
+    if data.description is not None:
+        sc.description = data.description
+    if data.sort_order is not None:
+        sc.sort_order = data.sort_order
+    if data.is_active is not None:
+        sc.is_active = data.is_active
+
+    db.commit()
+    db.refresh(sc)
+
+    return {
+        "id": sc.id,
+        "code": sc.code,
+        "name": sc.name,
+        "description": sc.description,
+        "asset_types_count": len([at for at in sc.asset_types if at.is_active])
+    }
+
+
+@router.delete("/pm/system-codes/{system_code_id}")
+async def delete_system_code(
+    system_code_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Delete (deactivate) a system code (admin only)"""
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    sc = db.query(PMSystemCode).join(PMEquipmentClass).filter(
+        PMSystemCode.id == system_code_id,
+        PMEquipmentClass.company_id == user.company_id
+    ).first()
+
+    if not sc:
+        raise HTTPException(status_code=404, detail="System code not found")
+
+    sc.is_active = False
+    db.commit()
+
+    return {"success": True, "message": "System code deleted"}
+
+
+# ============================================================================
+# Admin CRUD Endpoints - Asset Types
+# ============================================================================
+
+class PMAssetTypeCreate(BaseModel):
+    system_code_id: int
+    code: str
+    name: str
+    pm_code: Optional[str] = None
+    description: Optional[str] = None
+    sort_order: Optional[int] = 0
+
+
+class PMAssetTypeUpdate(BaseModel):
+    code: Optional[str] = None
+    name: Optional[str] = None
+    pm_code: Optional[str] = None
+    description: Optional[str] = None
+    sort_order: Optional[int] = None
+    is_active: Optional[bool] = None
+
+
+@router.post("/pm/asset-types", response_model=PMAssetTypeResponse)
+async def create_asset_type(
+    data: PMAssetTypeCreate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Create a new asset type (admin only)"""
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    # Verify system code belongs to company
+    sc = db.query(PMSystemCode).join(PMEquipmentClass).filter(
+        PMSystemCode.id == data.system_code_id,
+        PMEquipmentClass.company_id == user.company_id
+    ).first()
+    if not sc:
+        raise HTTPException(status_code=404, detail="System code not found")
+
+    at = PMAssetType(
+        system_code_id=data.system_code_id,
+        code=data.code,
+        name=data.name,
+        pm_code=data.pm_code,
+        description=data.description,
+        sort_order=data.sort_order or 0,
+        is_active=True
+    )
+    db.add(at)
+    db.commit()
+    db.refresh(at)
+
+    return {
+        "id": at.id,
+        "code": at.code,
+        "name": at.name,
+        "pm_code": at.pm_code,
+        "description": at.description,
+        "checklists_count": 0
+    }
+
+
+@router.put("/pm/asset-types/{asset_type_id}", response_model=PMAssetTypeResponse)
+async def update_asset_type(
+    asset_type_id: int,
+    data: PMAssetTypeUpdate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Update an asset type (admin only)"""
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    at = db.query(PMAssetType).join(PMSystemCode).join(PMEquipmentClass).filter(
+        PMAssetType.id == asset_type_id,
+        PMEquipmentClass.company_id == user.company_id
+    ).first()
+
+    if not at:
+        raise HTTPException(status_code=404, detail="Asset type not found")
+
+    if data.code is not None:
+        at.code = data.code
+    if data.name is not None:
+        at.name = data.name
+    if data.pm_code is not None:
+        at.pm_code = data.pm_code
+    if data.description is not None:
+        at.description = data.description
+    if data.sort_order is not None:
+        at.sort_order = data.sort_order
+    if data.is_active is not None:
+        at.is_active = data.is_active
+
+    db.commit()
+    db.refresh(at)
+
+    return {
+        "id": at.id,
+        "code": at.code,
+        "name": at.name,
+        "pm_code": at.pm_code,
+        "description": at.description,
+        "checklists_count": len([cl for cl in at.checklists if cl.is_active])
+    }
+
+
+@router.delete("/pm/asset-types/{asset_type_id}")
+async def delete_asset_type(
+    asset_type_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Delete (deactivate) an asset type (admin only)"""
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    at = db.query(PMAssetType).join(PMSystemCode).join(PMEquipmentClass).filter(
+        PMAssetType.id == asset_type_id,
+        PMEquipmentClass.company_id == user.company_id
+    ).first()
+
+    if not at:
+        raise HTTPException(status_code=404, detail="Asset type not found")
+
+    at.is_active = False
+    db.commit()
+
+    return {"success": True, "message": "Asset type deleted"}
+
+
+# ============================================================================
+# Admin CRUD Endpoints - Checklists
+# ============================================================================
+
+class PMChecklistCreate(BaseModel):
+    asset_type_id: int
+    frequency_code: str
+    frequency_name: str
+    frequency_days: int
+
+
+class PMChecklistUpdate(BaseModel):
+    frequency_code: Optional[str] = None
+    frequency_name: Optional[str] = None
+    frequency_days: Optional[int] = None
+    is_active: Optional[bool] = None
+
+
+@router.post("/pm/checklists", response_model=PMChecklistResponse)
+async def create_checklist(
+    data: PMChecklistCreate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Create a new checklist (admin only)"""
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    # Verify asset type belongs to company
+    at = db.query(PMAssetType).join(PMSystemCode).join(PMEquipmentClass).filter(
+        PMAssetType.id == data.asset_type_id,
+        PMEquipmentClass.company_id == user.company_id
+    ).first()
+    if not at:
+        raise HTTPException(status_code=404, detail="Asset type not found")
+
+    cl = PMChecklist(
+        asset_type_id=data.asset_type_id,
+        frequency_code=data.frequency_code,
+        frequency_name=data.frequency_name,
+        frequency_days=data.frequency_days,
+        is_active=True
+    )
+    db.add(cl)
+    db.commit()
+    db.refresh(cl)
+
+    return {
+        "id": cl.id,
+        "frequency_code": cl.frequency_code,
+        "frequency_name": cl.frequency_name,
+        "frequency_days": cl.frequency_days,
+        "activities_count": 0
+    }
+
+
+@router.put("/pm/checklists/{checklist_id}", response_model=PMChecklistResponse)
+async def update_checklist(
+    checklist_id: int,
+    data: PMChecklistUpdate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Update a checklist (admin only)"""
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    cl = db.query(PMChecklist).join(PMAssetType).join(PMSystemCode).join(PMEquipmentClass).filter(
+        PMChecklist.id == checklist_id,
+        PMEquipmentClass.company_id == user.company_id
+    ).first()
+
+    if not cl:
+        raise HTTPException(status_code=404, detail="Checklist not found")
+
+    if data.frequency_code is not None:
+        cl.frequency_code = data.frequency_code
+    if data.frequency_name is not None:
+        cl.frequency_name = data.frequency_name
+    if data.frequency_days is not None:
+        cl.frequency_days = data.frequency_days
+    if data.is_active is not None:
+        cl.is_active = data.is_active
+
+    db.commit()
+    db.refresh(cl)
+
+    return {
+        "id": cl.id,
+        "frequency_code": cl.frequency_code,
+        "frequency_name": cl.frequency_name,
+        "frequency_days": cl.frequency_days,
+        "activities_count": len([a for a in cl.activities if a.is_active])
+    }
+
+
+@router.delete("/pm/checklists/{checklist_id}")
+async def delete_checklist(
+    checklist_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Delete (deactivate) a checklist (admin only)"""
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    cl = db.query(PMChecklist).join(PMAssetType).join(PMSystemCode).join(PMEquipmentClass).filter(
+        PMChecklist.id == checklist_id,
+        PMEquipmentClass.company_id == user.company_id
+    ).first()
+
+    if not cl:
+        raise HTTPException(status_code=404, detail="Checklist not found")
+
+    cl.is_active = False
+    db.commit()
+
+    return {"success": True, "message": "Checklist deleted"}
+
+
+# ============================================================================
+# Admin CRUD Endpoints - Activities
+# ============================================================================
+
+class PMActivityCreate(BaseModel):
+    checklist_id: int
+    sequence_order: int
+    description: str
+    estimated_duration_minutes: Optional[int] = None
+    requires_measurement: bool = False
+    measurement_unit: Optional[str] = None
+    is_critical: bool = False
+    safety_notes: Optional[str] = None
+
+
+class PMActivityUpdate(BaseModel):
+    sequence_order: Optional[int] = None
+    description: Optional[str] = None
+    estimated_duration_minutes: Optional[int] = None
+    requires_measurement: Optional[bool] = None
+    measurement_unit: Optional[str] = None
+    is_critical: Optional[bool] = None
+    safety_notes: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
+@router.post("/pm/activities", response_model=PMActivityResponse)
+async def create_activity(
+    data: PMActivityCreate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Create a new activity (admin only)"""
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    # Verify checklist belongs to company
+    cl = db.query(PMChecklist).join(PMAssetType).join(PMSystemCode).join(PMEquipmentClass).filter(
+        PMChecklist.id == data.checklist_id,
+        PMEquipmentClass.company_id == user.company_id
+    ).first()
+    if not cl:
+        raise HTTPException(status_code=404, detail="Checklist not found")
+
+    activity = PMActivity(
+        checklist_id=data.checklist_id,
+        sequence_order=data.sequence_order,
+        description=data.description,
+        estimated_duration_minutes=data.estimated_duration_minutes,
+        requires_measurement=data.requires_measurement,
+        measurement_unit=data.measurement_unit,
+        is_critical=data.is_critical,
+        safety_notes=data.safety_notes,
+        is_active=True
+    )
+    db.add(activity)
+    db.commit()
+    db.refresh(activity)
+
+    return {
+        "id": activity.id,
+        "sequence_order": activity.sequence_order,
+        "description": activity.description,
+        "estimated_duration_minutes": activity.estimated_duration_minutes,
+        "requires_measurement": activity.requires_measurement,
+        "measurement_unit": activity.measurement_unit,
+        "is_critical": activity.is_critical,
+        "safety_notes": activity.safety_notes
+    }
+
+
+@router.put("/pm/activities/{activity_id}", response_model=PMActivityResponse)
+async def update_activity(
+    activity_id: int,
+    data: PMActivityUpdate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Update an activity (admin only)"""
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    activity = db.query(PMActivity).join(PMChecklist).join(PMAssetType).join(PMSystemCode).join(PMEquipmentClass).filter(
+        PMActivity.id == activity_id,
+        PMEquipmentClass.company_id == user.company_id
+    ).first()
+
+    if not activity:
+        raise HTTPException(status_code=404, detail="Activity not found")
+
+    if data.sequence_order is not None:
+        activity.sequence_order = data.sequence_order
+    if data.description is not None:
+        activity.description = data.description
+    if data.estimated_duration_minutes is not None:
+        activity.estimated_duration_minutes = data.estimated_duration_minutes
+    if data.requires_measurement is not None:
+        activity.requires_measurement = data.requires_measurement
+    if data.measurement_unit is not None:
+        activity.measurement_unit = data.measurement_unit
+    if data.is_critical is not None:
+        activity.is_critical = data.is_critical
+    if data.safety_notes is not None:
+        activity.safety_notes = data.safety_notes
+    if data.is_active is not None:
+        activity.is_active = data.is_active
+
+    db.commit()
+    db.refresh(activity)
+
+    return {
+        "id": activity.id,
+        "sequence_order": activity.sequence_order,
+        "description": activity.description,
+        "estimated_duration_minutes": activity.estimated_duration_minutes,
+        "requires_measurement": activity.requires_measurement,
+        "measurement_unit": activity.measurement_unit,
+        "is_critical": activity.is_critical,
+        "safety_notes": activity.safety_notes
+    }
+
+
+@router.delete("/pm/activities/{activity_id}")
+async def delete_activity(
+    activity_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Delete (deactivate) an activity (admin only)"""
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    activity = db.query(PMActivity).join(PMChecklist).join(PMAssetType).join(PMSystemCode).join(PMEquipmentClass).filter(
+        PMActivity.id == activity_id,
+        PMEquipmentClass.company_id == user.company_id
+    ).first()
+
+    if not activity:
+        raise HTTPException(status_code=404, detail="Activity not found")
+
+    activity.is_active = False
+    db.commit()
+
+    return {"success": True, "message": "Activity deleted"}
+
+
+# ============================================================================
+# PM Seeding Endpoints
+# ============================================================================
+
 @router.post("/pm/seed-all")
 async def seed_pm_data_for_all_companies(
     user: User = Depends(get_current_user),

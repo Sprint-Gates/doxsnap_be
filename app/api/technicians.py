@@ -2,8 +2,9 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
-from typing import Optional
+from typing import Optional, List
 from decimal import Decimal
+import json
 from app.database import get_db
 from app.models import User, Company, Technician
 from app.utils.security import verify_token
@@ -62,7 +63,7 @@ class TechnicianCreate(BaseModel):
     email: Optional[EmailStr] = None
     phone: Optional[str] = None
     employee_id: Optional[str] = None
-    specialization: Optional[str] = None
+    specializations: Optional[List[str]] = None  # Multiple specializations
     notes: Optional[str] = None
 
 
@@ -71,9 +72,35 @@ class TechnicianUpdate(BaseModel):
     email: Optional[EmailStr] = None
     phone: Optional[str] = None
     employee_id: Optional[str] = None
-    specialization: Optional[str] = None
+    specializations: Optional[List[str]] = None  # Multiple specializations
     notes: Optional[str] = None
     is_active: Optional[bool] = None
+
+
+def parse_specializations(specialization_str: Optional[str]) -> List[str]:
+    """Parse specialization string (JSON array or single value) to list"""
+    if not specialization_str:
+        return []
+    try:
+        # Try to parse as JSON array
+        parsed = json.loads(specialization_str)
+        if isinstance(parsed, list):
+            return [s for s in parsed if s]
+        return [specialization_str] if specialization_str else []
+    except (json.JSONDecodeError, TypeError):
+        # If not valid JSON, treat as single specialization
+        return [specialization_str] if specialization_str else []
+
+
+def serialize_specializations(specializations: Optional[List[str]]) -> Optional[str]:
+    """Serialize list of specializations to JSON string for storage"""
+    if not specializations:
+        return None
+    # Filter out empty strings
+    filtered = [s.strip() for s in specializations if s and s.strip()]
+    if not filtered:
+        return None
+    return json.dumps(filtered)
 
 
 class SalaryBreakdownUpdate(BaseModel):
@@ -113,7 +140,7 @@ def technician_to_response(technician: Technician, include_salary: bool = False)
         "email": technician.email,
         "phone": technician.phone,
         "employee_id": technician.employee_id,
-        "specialization": technician.specialization,
+        "specializations": parse_specializations(technician.specialization),  # Return as list
         "notes": technician.notes,
         "is_active": technician.is_active,
         "created_at": technician.created_at.isoformat(),
@@ -196,7 +223,12 @@ async def get_technicians(
         )
 
     if specialization:
-        query = query.filter(Technician.specialization == specialization)
+        # Filter by specialization - check if the JSON array contains this value
+        # Use LIKE to match within JSON array or exact match for legacy single values
+        query = query.filter(
+            (Technician.specialization.like(f'%"{specialization}"%')) |
+            (Technician.specialization == specialization)
+        )
 
     technicians = query.order_by(Technician.name).all()
 
@@ -215,13 +247,21 @@ async def get_specializations(
             detail="No company associated with this user"
         )
 
-    specializations = db.query(Technician.specialization).filter(
+    # Get all specialization values (may be JSON arrays or single strings)
+    specialization_rows = db.query(Technician.specialization).filter(
         Technician.company_id == user.company_id,
         Technician.specialization.isnot(None),
         Technician.specialization != ""
     ).distinct().all()
 
-    return [s[0] for s in specializations if s[0]]
+    # Parse all specializations and collect unique values
+    all_specs = set()
+    for row in specialization_rows:
+        if row[0]:
+            specs = parse_specializations(row[0])
+            all_specs.update(specs)
+
+    return sorted(list(all_specs))
 
 
 @router.get("/technicians/{technician_id}")
@@ -283,7 +323,7 @@ async def create_technician(
             email=data.email,
             phone=data.phone,
             employee_id=data.employee_id,
-            specialization=data.specialization,
+            specialization=serialize_specializations(data.specializations),
             notes=data.notes
         )
 
@@ -346,7 +386,11 @@ async def update_technician(
         update_data = data.dict(exclude_unset=True)
         for field, value in update_data.items():
             if value is not None:
-                setattr(technician, field, value)
+                # Handle specializations conversion
+                if field == 'specializations':
+                    setattr(technician, 'specialization', serialize_specializations(value))
+                else:
+                    setattr(technician, field, value)
 
         db.commit()
         db.refresh(technician)

@@ -84,7 +84,15 @@ async def login(user_credentials: UserLogin, db: Session = Depends(get_db)):
         "access_token": access_token,
         "refresh_token": refresh_token_str,
         "token_type": "bearer",
-        "expires_in": settings.access_token_expire_minutes * 60  # Convert to seconds
+        "expires_in": settings.access_token_expire_minutes * 60,  # Convert to seconds
+        "user": {
+            "id": user.id,
+            "email": user.email,
+            "name": user.name,
+            "role": user.role,
+            "is_active": user.is_active,
+            "phone": user.phone
+        }
     }
 
 

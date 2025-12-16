@@ -1,8 +1,8 @@
 """
 Work Orders API endpoints for maintenance management
 """
-from fastapi import APIRouter, Depends, HTTPException, status, Query
-from fastapi.responses import Response
+from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File, Form
+from fastapi.responses import Response, FileResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import and_, or_, func
@@ -11,10 +11,13 @@ from typing import Optional, List, Union
 from datetime import datetime, date
 from decimal import Decimal
 import logging
+import uuid
+import os
+import shutil
 
 from app.database import get_db
 from app.models import (
-    User, WorkOrder, WorkOrderTimeEntry, WorkOrderChecklistItem,
+    User, WorkOrder, WorkOrderTimeEntry, WorkOrderChecklistItem, WorkOrderSnapshot,
     Technician, Equipment, SubEquipment,
     Branch, Floor, Room, Project, work_order_technicians, HandHeldDevice,
     ItemMaster, ItemStock, ItemLedger
@@ -311,6 +314,7 @@ def work_order_to_response(wo: WorkOrder, include_details: bool = False, db: Ses
         "status": wo.status,
         "equipment_id": wo.equipment_id,
         "sub_equipment_id": wo.sub_equipment_id,
+        "site_id": wo.site_id,
         "branch_id": wo.branch_id,
         "floor_id": wo.floor_id,
         "room_id": wo.room_id,
@@ -361,6 +365,8 @@ def work_order_to_response(wo: WorkOrder, include_details: bool = False, db: Ses
         }
 
     # Add location info
+    if wo.site:
+        response["site"] = {"id": wo.site.id, "name": wo.site.name}
     if wo.branch:
         response["branch"] = {"id": wo.branch.id, "name": wo.branch.name}
     if wo.floor:
@@ -458,8 +464,8 @@ def work_order_to_response(wo: WorkOrder, include_details: bool = False, db: Ses
                 {
                     "id": item.id,
                     "item_id": item.item_id,
-                    "item_code": item.item.code if item.item else None,
-                    "item_name": item.item.name if item.item else None,
+                    "item_code": item.item.item_number if item.item else None,
+                    "item_name": item.item.description if item.item else None,
                     "quantity": item.quantity,
                     "unit_cost": decimal_to_float(item.unit_cost),
                     "total_cost": decimal_to_float(item.total_cost),
@@ -504,7 +510,10 @@ async def get_work_orders(
         query = query.options(
             joinedload(WorkOrder.equipment),
             joinedload(WorkOrder.sub_equipment),
+            joinedload(WorkOrder.site),
             joinedload(WorkOrder.branch),
+            joinedload(WorkOrder.floor),
+            joinedload(WorkOrder.room),
             joinedload(WorkOrder.project),
             joinedload(WorkOrder.assigned_hhd).joinedload(HandHeldDevice.assigned_technician),
             joinedload(WorkOrder.assigned_technicians),
@@ -556,7 +565,10 @@ async def get_work_order(
     wo = db.query(WorkOrder).options(
         joinedload(WorkOrder.equipment),
         joinedload(WorkOrder.sub_equipment),
+        joinedload(WorkOrder.site),
         joinedload(WorkOrder.branch),
+        joinedload(WorkOrder.floor),
+        joinedload(WorkOrder.room),
         joinedload(WorkOrder.project),
         joinedload(WorkOrder.assigned_hhd).joinedload(HandHeldDevice.assigned_technician),
         joinedload(WorkOrder.assigned_technicians),
@@ -872,7 +884,10 @@ async def approve_work_order(
     wo = db.query(WorkOrder).options(
         joinedload(WorkOrder.equipment),
         joinedload(WorkOrder.sub_equipment),
+        joinedload(WorkOrder.site),
         joinedload(WorkOrder.branch),
+        joinedload(WorkOrder.floor),
+        joinedload(WorkOrder.room),
         joinedload(WorkOrder.project),
         joinedload(WorkOrder.assigned_hhd).joinedload(HandHeldDevice.assigned_technician),
         joinedload(WorkOrder.assigned_technicians),
@@ -999,7 +1014,10 @@ async def cancel_work_order(
     wo = db.query(WorkOrder).options(
         joinedload(WorkOrder.equipment),
         joinedload(WorkOrder.sub_equipment),
+        joinedload(WorkOrder.site),
         joinedload(WorkOrder.branch),
+        joinedload(WorkOrder.floor),
+        joinedload(WorkOrder.room),
         joinedload(WorkOrder.project),
         joinedload(WorkOrder.assigned_hhd).joinedload(HandHeldDevice.assigned_technician),
         joinedload(WorkOrder.assigned_technicians),
@@ -2084,9 +2102,12 @@ async def export_work_order_pdf(
     wo = db.query(WorkOrder).options(
         joinedload(WorkOrder.equipment),
         joinedload(WorkOrder.sub_equipment),
+        joinedload(WorkOrder.site),
         joinedload(WorkOrder.branch),
         joinedload(WorkOrder.floor),
         joinedload(WorkOrder.room),
+        joinedload(WorkOrder.project),
+        joinedload(WorkOrder.assigned_hhd).joinedload(HandHeldDevice.assigned_technician),
         joinedload(WorkOrder.assigned_technicians),
         joinedload(WorkOrder.time_entries).joinedload(WorkOrderTimeEntry.technician),
         joinedload(WorkOrder.checklist_items)
@@ -2135,9 +2156,12 @@ async def email_work_order(
     wo = db.query(WorkOrder).options(
         joinedload(WorkOrder.equipment),
         joinedload(WorkOrder.sub_equipment),
+        joinedload(WorkOrder.site),
         joinedload(WorkOrder.branch),
         joinedload(WorkOrder.floor),
         joinedload(WorkOrder.room),
+        joinedload(WorkOrder.project),
+        joinedload(WorkOrder.assigned_hhd).joinedload(HandHeldDevice.assigned_technician),
         joinedload(WorkOrder.assigned_technicians),
         joinedload(WorkOrder.time_entries).joinedload(WorkOrderTimeEntry.technician),
         joinedload(WorkOrder.checklist_items)
@@ -2176,3 +2200,232 @@ async def email_work_order(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to send email. Please check email configuration."
         )
+
+
+# ============================================================================
+# Work Order Snapshots API
+# ============================================================================
+
+SNAPSHOTS_UPLOAD_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "uploads", "work_order_snapshots")
+
+# Ensure upload directory exists
+os.makedirs(SNAPSHOTS_UPLOAD_DIR, exist_ok=True)
+
+
+def snapshot_to_response(snapshot: WorkOrderSnapshot) -> dict:
+    """Convert WorkOrderSnapshot to response dict"""
+    return {
+        "id": snapshot.id,
+        "work_order_id": snapshot.work_order_id,
+        "filename": snapshot.filename,
+        "original_filename": snapshot.original_filename,
+        "file_path": snapshot.file_path,
+        "file_size": snapshot.file_size,
+        "mime_type": snapshot.mime_type,
+        "caption": snapshot.caption,
+        "taken_by": snapshot.taken_by,
+        "taken_by_name": snapshot.photographer.name if snapshot.photographer else None,
+        "taken_at": snapshot.taken_at.isoformat() if snapshot.taken_at else None,
+        "created_at": snapshot.created_at.isoformat() if snapshot.created_at else None
+    }
+
+
+@router.get("/{wo_id}/snapshots")
+async def get_work_order_snapshots(
+    wo_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get all snapshots for a work order"""
+    if not user.company_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No company associated")
+
+    # Verify work order exists and belongs to user's company
+    wo = db.query(WorkOrder).filter(
+        WorkOrder.id == wo_id,
+        WorkOrder.company_id == user.company_id
+    ).first()
+    if not wo:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Work order not found")
+
+    snapshots = db.query(WorkOrderSnapshot).options(
+        joinedload(WorkOrderSnapshot.photographer)
+    ).filter(
+        WorkOrderSnapshot.work_order_id == wo_id
+    ).order_by(WorkOrderSnapshot.taken_at.desc()).all()
+
+    return [snapshot_to_response(s) for s in snapshots]
+
+
+@router.post("/{wo_id}/snapshots")
+async def upload_work_order_snapshot(
+    wo_id: int,
+    file: UploadFile = File(...),
+    caption: Optional[str] = Form(None),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Upload a snapshot to a work order"""
+    if not user.company_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No company associated")
+
+    # Verify work order exists and belongs to user's company
+    wo = db.query(WorkOrder).filter(
+        WorkOrder.id == wo_id,
+        WorkOrder.company_id == user.company_id
+    ).first()
+    if not wo:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Work order not found")
+
+    # Validate file type
+    allowed_types = ["image/jpeg", "image/png", "image/gif", "image/webp"]
+    if file.content_type not in allowed_types:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid file type. Allowed: {', '.join(allowed_types)}"
+        )
+
+    # Generate unique filename
+    file_ext = os.path.splitext(file.filename)[1] or ".jpg"
+    unique_filename = f"{uuid.uuid4()}{file_ext}"
+
+    # Create company-specific subdirectory
+    company_dir = os.path.join(SNAPSHOTS_UPLOAD_DIR, str(user.company_id))
+    os.makedirs(company_dir, exist_ok=True)
+
+    file_path = os.path.join(company_dir, unique_filename)
+
+    try:
+        # Save file
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+
+        # Get file size
+        file_size = os.path.getsize(file_path)
+
+        # Create snapshot record
+        snapshot = WorkOrderSnapshot(
+            work_order_id=wo_id,
+            company_id=user.company_id,
+            filename=unique_filename,
+            original_filename=file.filename,
+            file_path=file_path,
+            file_size=file_size,
+            mime_type=file.content_type,
+            caption=caption,
+            taken_by=user.id
+        )
+        db.add(snapshot)
+        db.commit()
+        db.refresh(snapshot)
+
+        return snapshot_to_response(snapshot)
+
+    except Exception as e:
+        # Clean up file if database operation fails
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to upload snapshot: {str(e)}"
+        )
+
+
+@router.get("/{wo_id}/snapshots/{snapshot_id}/image")
+async def get_snapshot_image(
+    wo_id: int,
+    snapshot_id: int,
+    token: str = Query(...),
+    db: Session = Depends(get_db)
+):
+    """Get snapshot image file (requires token in query param for img src)"""
+    # Verify token
+    payload = verify_token_payload(token)
+    if not payload:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+
+    company_id = payload.get("company_id")
+    if not company_id:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+
+    # Get snapshot
+    snapshot = db.query(WorkOrderSnapshot).filter(
+        WorkOrderSnapshot.id == snapshot_id,
+        WorkOrderSnapshot.work_order_id == wo_id,
+        WorkOrderSnapshot.company_id == company_id
+    ).first()
+
+    if not snapshot:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Snapshot not found")
+
+    if not os.path.exists(snapshot.file_path):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Image file not found")
+
+    return FileResponse(
+        snapshot.file_path,
+        media_type=snapshot.mime_type or "image/jpeg",
+        filename=snapshot.original_filename
+    )
+
+
+@router.patch("/{wo_id}/snapshots/{snapshot_id}")
+async def update_snapshot_caption(
+    wo_id: int,
+    snapshot_id: int,
+    caption: str = None,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Update snapshot caption"""
+    if not user.company_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No company associated")
+
+    snapshot = db.query(WorkOrderSnapshot).filter(
+        WorkOrderSnapshot.id == snapshot_id,
+        WorkOrderSnapshot.work_order_id == wo_id,
+        WorkOrderSnapshot.company_id == user.company_id
+    ).first()
+
+    if not snapshot:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Snapshot not found")
+
+    snapshot.caption = caption
+    db.commit()
+    db.refresh(snapshot)
+
+    return snapshot_to_response(snapshot)
+
+
+@router.delete("/{wo_id}/snapshots/{snapshot_id}")
+async def delete_work_order_snapshot(
+    wo_id: int,
+    snapshot_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Delete a snapshot from a work order"""
+    if not user.company_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No company associated")
+
+    snapshot = db.query(WorkOrderSnapshot).filter(
+        WorkOrderSnapshot.id == snapshot_id,
+        WorkOrderSnapshot.work_order_id == wo_id,
+        WorkOrderSnapshot.company_id == user.company_id
+    ).first()
+
+    if not snapshot:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Snapshot not found")
+
+    # Delete file
+    if os.path.exists(snapshot.file_path):
+        try:
+            os.remove(snapshot.file_path)
+        except Exception as e:
+            logger.warning(f"Failed to delete snapshot file: {e}")
+
+    # Delete record
+    db.delete(snapshot)
+    db.commit()
+
+    return {"success": True, "message": "Snapshot deleted"}

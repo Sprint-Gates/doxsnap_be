@@ -66,6 +66,7 @@ def convert_pdf_to_image(pdf_bytes: bytes) -> bytes:
 async def upload_image(
     file: UploadFile = File(...),
     document_type: str = "invoice",
+    invoice_category: str = None,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -162,6 +163,7 @@ async def upload_image(
                 s3_url=s3_url,
                 processing_status=processing_status,
                 document_type=document_type,
+                invoice_category=invoice_category if document_type == "invoice" else None,
                 ocr_extracted_words=int(invoice_results.get("total_words_extracted", 0)),
                 ocr_average_confidence=float(invoice_results.get("average_confidence", 0.0)),
                 ocr_preprocessing_methods=int(enhancement_features.get("multiple_preprocessing", 1)),
@@ -181,6 +183,7 @@ async def upload_image(
                 s3_url=s3_url,
                 processing_status=processing_status,
                 document_type=document_type,
+                invoice_category=invoice_category if document_type == "invoice" else None,
                 ocr_extracted_words=0,
                 ocr_average_confidence=0.0,
                 ocr_preprocessing_methods=1,

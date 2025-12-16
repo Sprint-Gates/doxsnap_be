@@ -2485,6 +2485,221 @@ async def get_unlinked_invoice_items(
     ]
 
 
+class CreateGenericItemRequest(BaseModel):
+    """Request to create a generic Item Master entry from an invoice line item"""
+    category_id: Optional[int] = None
+    unit: Optional[str] = "EA"
+    auto_receive: Optional[bool] = True
+
+
+@router.post("/invoice-items/{invoice_item_id}/create-generic")
+async def create_generic_item_from_invoice(
+    invoice_item_id: int,
+    data: CreateGenericItemRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Create a generic Item Master entry from an unlinked invoice line item.
+    This is useful when an invoice contains items not yet in the Item Master.
+
+    The new item will:
+    1. Use the invoice item description as the item description
+    2. Generate a unique item number based on description
+    3. Link the invoice item to the new Item Master entry
+    4. Optionally auto-receive to main warehouse
+    """
+    if not user.company_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No company associated")
+
+    # Get the invoice item
+    invoice_item = db.query(InvoiceItem).filter(
+        InvoiceItem.id == invoice_item_id
+    ).first()
+
+    if not invoice_item:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Invoice item not found")
+
+    if invoice_item.item_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invoice item is already linked to an Item Master entry"
+        )
+
+    # Get or validate category
+    category = None
+    if data.category_id:
+        category = db.query(ItemCategory).filter(
+            ItemCategory.id == data.category_id,
+            ItemCategory.company_id == user.company_id
+        ).first()
+        if not category:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Category not found")
+    else:
+        # Try to get or create a "General" category
+        category = db.query(ItemCategory).filter(
+            ItemCategory.company_id == user.company_id,
+            ItemCategory.name.ilike("general")
+        ).first()
+
+        if not category:
+            # Create a General category
+            category = ItemCategory(
+                company_id=user.company_id,
+                name="General",
+                description="General category for uncategorized items",
+                code="GEN"
+            )
+            db.add(category)
+            db.flush()
+
+    # Generate item number from description
+    description = invoice_item.item_description or "Generic Item"
+
+    # Create a sanitized item number from description
+    # Take first 3 chars of each word, uppercase, max 20 chars
+    words = description.split()[:4]  # Max 4 words
+    base_item_no = "-".join(w[:3].upper() for w in words if w)
+    base_item_no = base_item_no[:20] if base_item_no else "GEN"
+
+    # Check for uniqueness and add suffix if needed
+    item_number = base_item_no
+    counter = 1
+    while db.query(ItemMaster).filter(
+        ItemMaster.company_id == user.company_id,
+        ItemMaster.item_number == item_number
+    ).first():
+        item_number = f"{base_item_no}-{counter}"
+        counter += 1
+
+    # Get next short_item_no
+    max_short_no = db.query(func.max(ItemMaster.short_item_no)).filter(
+        ItemMaster.company_id == user.company_id
+    ).scalar() or 0
+    short_item_no = max_short_no + 1
+
+    # Create the new Item Master entry
+    new_item = ItemMaster(
+        company_id=user.company_id,
+        category_id=category.id if category else None,
+        item_number=item_number,
+        short_item_no=short_item_no,
+        description=description,
+        unit=data.unit or invoice_item.unit or "EA",
+        is_active=True,
+        notes=f"Created from invoice line item. Original item code: {invoice_item.item_number or 'N/A'}"
+    )
+    db.add(new_item)
+    db.flush()
+
+    # Link the invoice item to the new Item Master entry
+    invoice_item.item_id = new_item.id
+
+    # Create an alias if the invoice item has an item code
+    alias_created = False
+    if invoice_item.item_number:
+        # Get vendor_id from the invoice if available
+        from app.models import ProcessedImage
+        invoice = db.query(ProcessedImage).filter(
+            ProcessedImage.id == invoice_item.invoice_id
+        ).first()
+        vendor_id = invoice.vendor_id if invoice else None
+
+        new_alias = ItemAlias(
+            company_id=user.company_id,
+            item_id=new_item.id,
+            alias_code=invoice_item.item_number,
+            alias_description=invoice_item.item_description,
+            vendor_id=vendor_id,
+            source="generic_item_creation",
+            created_by=user.id
+        )
+        db.add(new_alias)
+        alias_created = True
+
+    result = {
+        "success": True,
+        "message": f"Created new Item Master entry '{item_number}'",
+        "invoice_item_id": invoice_item.id,
+        "created_item": {
+            "id": new_item.id,
+            "item_number": new_item.item_number,
+            "short_item_no": new_item.short_item_no,
+            "description": new_item.description,
+            "unit": new_item.unit,
+            "category": category.name if category else None
+        },
+        "alias_created": alias_created,
+        "auto_received": False,
+        "receive_details": None
+    }
+
+    # Auto-receive to main warehouse if requested
+    if data.auto_receive:
+        quantity = float(invoice_item.quantity or 0)
+
+        if quantity > 0:
+            main_warehouse = db.query(Warehouse).filter(
+                Warehouse.company_id == user.company_id,
+                Warehouse.is_main == True,
+                Warehouse.is_active == True
+            ).first()
+
+            if main_warehouse:
+                try:
+                    unit_cost = float(invoice_item.unit_price) if invoice_item.unit_price else None
+
+                    # Create ledger entry and update stock
+                    ledger_entry = update_stock_and_create_ledger(
+                        db=db,
+                        company_id=user.company_id,
+                        item_id=new_item.id,
+                        quantity=quantity,
+                        transaction_type="RECEIVE_INVOICE",
+                        user_id=user.id,
+                        to_warehouse_id=main_warehouse.id,
+                        invoice_id=invoice_item.invoice_id,
+                        unit_cost=unit_cost,
+                        notes=f"Initial stock from invoice - new generic item"
+                    )
+
+                    # Update invoice item status
+                    invoice_item.quantity_received = quantity
+                    invoice_item.received_to_warehouse_id = main_warehouse.id
+                    invoice_item.received_by = user.id
+                    invoice_item.received_at = datetime.utcnow()
+                    invoice_item.receive_status = "received"
+
+                    # Get updated stock info
+                    stock = db.query(ItemStock).filter(
+                        ItemStock.item_id == new_item.id,
+                        ItemStock.warehouse_id == main_warehouse.id
+                    ).first()
+
+                    result["auto_received"] = True
+                    result["receive_details"] = {
+                        "warehouse_id": main_warehouse.id,
+                        "warehouse_name": main_warehouse.name,
+                        "quantity_received": quantity,
+                        "transaction_number": ledger_entry.transaction_number,
+                        "new_quantity_on_hand": float(stock.quantity_on_hand) if stock else quantity,
+                        "unit_cost": unit_cost
+                    }
+                    result["message"] = f"Created '{item_number}' and received {quantity} units to {main_warehouse.name}"
+
+                except Exception as receive_error:
+                    logger.error(f"Error auto-receiving new generic item: {receive_error}")
+                    result["auto_received"] = False
+                    result["message"] = f"Item created but auto-receive failed: {str(receive_error)}"
+            else:
+                result["message"] = f"Created '{item_number}' (no main warehouse for auto-receive)"
+        else:
+            result["message"] = f"Created '{item_number}' (no quantity to receive)"
+
+    db.commit()
+    return result
+
+
 # ============ Bulk Import ============
 
 @router.post("/items/bulk-import")

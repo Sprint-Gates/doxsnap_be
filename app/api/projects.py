@@ -8,7 +8,7 @@ from datetime import date
 from decimal import Decimal
 from app.database import get_db
 from app.models import (
-    Project, Branch, Client, User, Company, ProcessedImage,
+    Project, Site, Client, User, Company, ProcessedImage,
     WorkOrder, WorkOrderTimeEntry, WorkOrderSparePart
 )
 from app.utils.security import verify_token
@@ -53,7 +53,7 @@ def require_admin(user: User = Depends(get_current_user)):
 
 
 class ProjectCreate(BaseModel):
-    branch_id: int
+    site_id: int
     name: str
     code: Optional[str] = None
     description: Optional[str] = None
@@ -101,10 +101,10 @@ def project_to_response(project: Project, db: Session) -> dict:
 
     return {
         "id": project.id,
-        "branch_id": project.branch_id,
-        "branch_name": project.branch.name if project.branch else None,
-        "client_id": project.branch.client_id if project.branch else None,
-        "client_name": project.branch.client.name if project.branch and project.branch.client else None,
+        "site_id": project.site_id,
+        "site_name": project.site.name if project.site else None,
+        "client_id": project.site.client_id if project.site else None,
+        "client_name": project.site.client.name if project.site and project.site.client else None,
         "name": project.name,
         "code": project.code,
         "description": project.description,
@@ -125,7 +125,7 @@ def project_to_response(project: Project, db: Session) -> dict:
 
 @router.get("/projects/")
 async def get_projects(
-    branch_id: Optional[int] = None,
+    site_id: Optional[int] = None,
     client_id: Optional[int] = None,
     status_filter: Optional[str] = None,
     search: Optional[str] = None,
@@ -141,18 +141,18 @@ async def get_projects(
 
     # Build query based on role
     if user.role == "operator":
-        # Operators only see projects from their assigned branches
-        branch_ids = [b.id for b in user.assigned_branches]
-        query = db.query(Project).filter(Project.branch_id.in_(branch_ids))
+        # Operators only see projects from their assigned sites
+        site_ids = [s.id for s in user.assigned_sites]
+        query = db.query(Project).filter(Project.site_id.in_(site_ids))
     else:
         # Admins see all projects from company's clients
-        query = db.query(Project).join(Branch).join(Client).filter(Client.company_id == user.company_id)
+        query = db.query(Project).join(Site).join(Client).filter(Client.company_id == user.company_id)
 
-    if branch_id:
-        query = query.filter(Project.branch_id == branch_id)
+    if site_id:
+        query = query.filter(Project.site_id == site_id)
 
     if client_id:
-        query = query.join(Branch).filter(Branch.client_id == client_id)
+        query = query.join(Site).filter(Site.client_id == client_id)
 
     if status_filter:
         query = query.filter(Project.status == status_filter)
@@ -183,7 +183,7 @@ async def get_project(
             detail="No company associated with this user"
         )
 
-    project = db.query(Project).join(Branch).join(Client).filter(
+    project = db.query(Project).join(Site).join(Client).filter(
         Project.id == project_id,
         Client.company_id == user.company_id
     ).first()
@@ -194,9 +194,9 @@ async def get_project(
             detail="Project not found"
         )
 
-    # Operators can only access projects from their assigned branches
+    # Operators can only access projects from their assigned sites
     if user.role == "operator":
-        if project.branch_id not in [b.id for b in user.assigned_branches]:
+        if project.site_id not in [s.id for s in user.assigned_sites]:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Access denied to this project"
@@ -218,22 +218,22 @@ async def create_project(
             detail="No company associated with this user"
         )
 
-    # Verify branch belongs to company
-    branch = db.query(Branch).join(Client).filter(
-        Branch.id == data.branch_id,
+    # Verify site belongs to company
+    site = db.query(Site).join(Client).filter(
+        Site.id == data.site_id,
         Client.company_id == user.company_id
     ).first()
 
-    if not branch:
+    if not site:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Branch not found"
+            detail="Site not found"
         )
 
     # Check plan limits
     company = db.query(Company).filter(Company.id == user.company_id).first()
     if company and company.plan:
-        current_count = db.query(Project).join(Branch).join(Client).filter(
+        current_count = db.query(Project).join(Site).join(Client).filter(
             Client.company_id == user.company_id
         ).count()
         if current_count >= company.plan.max_projects:
@@ -252,7 +252,7 @@ async def create_project(
 
     try:
         project = Project(
-            branch_id=data.branch_id,
+            site_id=data.site_id,
             name=data.name,
             code=data.code,
             description=data.description,
@@ -296,7 +296,7 @@ async def update_project(
             detail="No company associated with this user"
         )
 
-    project = db.query(Project).join(Branch).join(Client).filter(
+    project = db.query(Project).join(Site).join(Client).filter(
         Project.id == project_id,
         Client.company_id == user.company_id
     ).first()
@@ -357,7 +357,7 @@ async def delete_project(
             detail="No company associated with this user"
         )
 
-    project = db.query(Project).join(Branch).join(Client).filter(
+    project = db.query(Project).join(Site).join(Client).filter(
         Project.id == project_id,
         Client.company_id == user.company_id
     ).first()
@@ -401,7 +401,7 @@ async def get_project_invoices(
             detail="No company associated with this user"
         )
 
-    project = db.query(Project).join(Branch).join(Client).filter(
+    project = db.query(Project).join(Site).join(Client).filter(
         Project.id == project_id,
         Client.company_id == user.company_id
     ).first()
@@ -412,9 +412,9 @@ async def get_project_invoices(
             detail="Project not found"
         )
 
-    # Operators can only access projects from their assigned branches
+    # Operators can only access projects from their assigned sites
     if user.role == "operator":
-        if project.branch_id not in [b.id for b in user.assigned_branches]:
+        if project.site_id not in [s.id for s in user.assigned_sites]:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Access denied to this project"
@@ -461,7 +461,7 @@ async def link_invoice_to_project(
         )
 
     # Verify project belongs to company
-    project = db.query(Project).join(Branch).join(Client).filter(
+    project = db.query(Project).join(Site).join(Client).filter(
         Project.id == project_id,
         Client.company_id == user.company_id
     ).first()
@@ -573,7 +573,7 @@ async def get_project_cost_center(
         )
 
     # Get project
-    project = db.query(Project).join(Branch).join(Client).filter(
+    project = db.query(Project).join(Site).join(Client).filter(
         Project.id == project_id,
         Client.company_id == user.company_id
     ).first()
@@ -717,8 +717,8 @@ async def get_project_cost_center(
             "currency": project.currency,
             "labor_markup_percent": decimal_to_float(project.labor_markup_percent),
             "parts_markup_percent": decimal_to_float(project.parts_markup_percent),
-            "branch_name": project.branch.name if project.branch else None,
-            "client_name": project.branch.client.name if project.branch and project.branch.client else None
+            "site_name": project.site.name if project.site else None,
+            "client_name": project.site.client.name if project.site and project.site.client else None
         },
         "summary": {
             "total_work_orders": len(work_orders),

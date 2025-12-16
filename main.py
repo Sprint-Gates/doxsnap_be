@@ -5,9 +5,9 @@ import os
 import logging
 import google.generativeai as genai
 
-from app.api import auth, images, otp, admin, document_types, vendors, plans, companies, clients, branches, projects, operators, technicians, handheld_devices, assets, attendance, work_orders, warehouses, pm_checklists, pm_work_orders, dashboard, item_master, cycle_count, dummy, hhd_auth, users
+from app.api import auth, images, otp, admin, document_types, vendors, plans, companies, clients, branches, projects, operators, technicians, handheld_devices, assets, attendance, work_orders, warehouses, pm_checklists, pm_work_orders, dashboard, item_master, cycle_count, dummy, hhd_auth, users, sites, contracts, tickets
 from app.database import engine
-from app.models import Base, User, ProcessedImage, DocumentType, Vendor, Warehouse, Plan, Company, Client, Branch, Project, Technician, HandHeldDevice, Floor, Room, Equipment, SubEquipment, TechnicianAttendance, SparePart, WorkOrder, WorkOrderSparePart, WorkOrderTimeEntry, PMSchedule, ItemCategory, ItemMaster, ItemStock, ItemLedger, ItemTransfer, ItemTransferLine, InvoiceItem, CycleCount, CycleCountItem, RefreshToken
+from app.models import Base, User, ProcessedImage, DocumentType, Vendor, Warehouse, Plan, Company, Client, Branch, Project, Technician, HandHeldDevice, Floor, Room, Equipment, SubEquipment, TechnicianAttendance, SparePart, WorkOrder, WorkOrderSparePart, WorkOrderTimeEntry, PMSchedule, ItemCategory, ItemMaster, ItemStock, ItemLedger, ItemTransfer, ItemTransferLine, InvoiceItem, CycleCount, CycleCountItem, RefreshToken, Site, Building, Space, Scope, Contract, ContractScope, Ticket
 from app.config import settings
 from sqlalchemy import text
 
@@ -107,6 +107,9 @@ app.include_router(cycle_count.router, prefix="/api", tags=["Cycle Count"])
 app.include_router(dummy.router, prefix="/api", tags=["dummy"])
 app.include_router(hhd_auth.router, prefix="/api", tags=["HHD Auth"])
 app.include_router(users.router, prefix="/api", tags=["Users"])
+app.include_router(sites.router, prefix="/api/sites", tags=["Sites"])
+app.include_router(contracts.router, prefix="/api/contracts", tags=["Contracts"])
+app.include_router(tickets.router, prefix="/api", tags=["Tickets"])
 
 @app.get("/")
 async def root():

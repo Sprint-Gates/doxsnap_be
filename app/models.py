@@ -24,6 +24,24 @@ handheld_device_technicians = Table(
     Column('notes', Text, nullable=True)
 )
 
+# Association table for Operator-Site many-to-many relationship
+operator_sites = Table(
+    'operator_sites',
+    Base.metadata,
+    Column('user_id', Integer, ForeignKey('users.id'), primary_key=True),
+    Column('site_id', Integer, ForeignKey('sites.id'), primary_key=True),
+    Column('assigned_at', DateTime, default=func.now())
+)
+
+# Association table for Contract-Site many-to-many relationship
+contract_sites = Table(
+    'contract_sites',
+    Base.metadata,
+    Column('contract_id', Integer, ForeignKey('contracts.id', ondelete='CASCADE'), primary_key=True),
+    Column('site_id', Integer, ForeignKey('sites.id', ondelete='CASCADE'), primary_key=True),
+    Column('created_at', DateTime, default=func.now())
+)
+
 
 class Plan(Base):
     """Subscription plans for document management"""
@@ -133,16 +151,16 @@ class Branch(Base):
 
     # Relationships
     client = relationship("Client", back_populates="branches")
-    projects = relationship("Project", back_populates="branch")
     operators = relationship("User", secondary=operator_branches, back_populates="assigned_branches")
+    floors = relationship("Floor", back_populates="branch")
 
 
 class Project(Base):
-    """Project under a branch"""
+    """Project under a site"""
     __tablename__ = "projects"
 
     id = Column(Integer, primary_key=True, index=True)
-    branch_id = Column(Integer, ForeignKey("branches.id"), nullable=False)
+    site_id = Column(Integer, ForeignKey("sites.id"), nullable=False)
     name = Column(String, nullable=False)
     code = Column(String, nullable=True)  # Project code for reference
     description = Column(Text, nullable=True)
@@ -159,7 +177,7 @@ class Project(Base):
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
 
     # Relationships
-    branch = relationship("Branch", back_populates="projects")
+    site = relationship("Site", back_populates="projects")
     invoices = relationship("ProcessedImage", back_populates="project")
 
 
@@ -198,6 +216,7 @@ class ProcessedImage(Base):
     s3_url = Column(String)
     processing_status = Column(String, default="pending")  # pending, completed, failed
     document_type = Column(String, default="invoice")  # invoice, receipt, purchase_order, bill_of_lading, etc.
+    invoice_category = Column(String, nullable=True)  # service (subcontractor invoice) or spare_parts
 
     # Project linkage for multi-tenant structure
     project_id = Column(Integer, ForeignKey("projects.id"), nullable=True)
@@ -399,11 +418,12 @@ class HandHeldDevice(Base):
 
 
 class Floor(Base):
-    """Floor within a branch for asset capturing"""
+    """Floor within a building for asset capturing"""
     __tablename__ = "floors"
 
     id = Column(Integer, primary_key=True, index=True)
-    branch_id = Column(Integer, ForeignKey("branches.id"), nullable=False)
+    branch_id = Column(Integer, ForeignKey("branches.id"), nullable=True)  # Legacy field
+    building_id = Column(Integer, ForeignKey("buildings.id"), nullable=True)
     name = Column(String, nullable=False)  # e.g., "Ground Floor", "Floor 1", "Basement"
     code = Column(String, nullable=True)  # e.g., "GF", "F1", "B1"
     level = Column(Integer, default=0)  # Numeric level for sorting (-1 for basement, 0 for ground, etc.)
@@ -414,16 +434,42 @@ class Floor(Base):
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
 
     # Relationships
-    branch = relationship("Branch", backref="floors")
+    branch = relationship("Branch", back_populates="floors")
+    building = relationship("Building", back_populates="floors")
     rooms = relationship("Room", back_populates="floor", cascade="all, delete-orphan")
+    units = relationship("Unit", back_populates="floor", cascade="all, delete-orphan")
 
 
-class Room(Base):
-    """Room within a floor for asset capturing"""
-    __tablename__ = "rooms"
+class Unit(Base):
+    """Unit within a floor (e.g., apartment, office unit) for asset capturing"""
+    __tablename__ = "units"
 
     id = Column(Integer, primary_key=True, index=True)
     floor_id = Column(Integer, ForeignKey("floors.id"), nullable=False)
+    name = Column(String, nullable=False)  # e.g., "Unit 101", "Apartment A", "Office Suite 5"
+    code = Column(String, nullable=True)  # e.g., "U-101", "APT-A"
+    unit_type = Column(String, nullable=True)  # e.g., "Apartment", "Office", "Retail", "Storage"
+    area_sqm = Column(Float, nullable=True)  # Unit area in square meters
+    tenant_name = Column(String, nullable=True)  # Current tenant/occupant
+    description = Column(Text, nullable=True)
+    notes = Column(Text, nullable=True)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    # Relationships
+    floor = relationship("Floor", back_populates="units")
+    rooms = relationship("Room", back_populates="unit", cascade="all, delete-orphan")
+    equipment = relationship("Equipment", back_populates="unit")
+
+
+class Room(Base):
+    """Room within a floor or unit for asset capturing"""
+    __tablename__ = "rooms"
+
+    id = Column(Integer, primary_key=True, index=True)
+    floor_id = Column(Integer, ForeignKey("floors.id"), nullable=True)  # Direct parent floor (if not in a unit)
+    unit_id = Column(Integer, ForeignKey("units.id"), nullable=True)  # Parent unit (if in a unit)
     name = Column(String, nullable=False)  # e.g., "Server Room", "Office 101", "Kitchen"
     code = Column(String, nullable=True)  # e.g., "SR-01", "OFF-101"
     room_type = Column(String, nullable=True)  # e.g., "Office", "Storage", "Utility", "Common Area"
@@ -436,21 +482,59 @@ class Room(Base):
 
     # Relationships
     floor = relationship("Floor", back_populates="rooms")
+    unit = relationship("Unit", back_populates="rooms")
+    desks = relationship("Desk", back_populates="room", cascade="all, delete-orphan")
     equipment = relationship("Equipment", back_populates="room", cascade="all, delete-orphan")
 
 
-class Equipment(Base):
-    """Equipment/Asset within a room"""
-    __tablename__ = "equipment"
+class Desk(Base):
+    """Desk/Workstation within a room for asset capturing"""
+    __tablename__ = "desks"
 
     id = Column(Integer, primary_key=True, index=True)
     room_id = Column(Integer, ForeignKey("rooms.id"), nullable=False)
+    name = Column(String, nullable=False)  # e.g., "Desk 1", "Workstation A", "Reception Desk"
+    code = Column(String, nullable=True)  # e.g., "D-001", "WS-A"
+    desk_type = Column(String, nullable=True)  # e.g., "Workstation", "Reception", "Manager", "Hot Desk"
+    occupant_name = Column(String, nullable=True)  # Current occupant/user
+    description = Column(Text, nullable=True)
+    notes = Column(Text, nullable=True)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    # Relationships
+    room = relationship("Room", back_populates="desks")
+    equipment = relationship("Equipment", back_populates="desk")
+
+
+class Equipment(Base):
+    """
+    Equipment/Asset - can be assigned to any level of the hierarchy
+    Must have exactly ONE parent (client, site, building, space, floor, or room)
+    """
+    __tablename__ = "equipment"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    # Flexible parent assignment - equipment can belong to any level
+    # Only ONE of these should be set (enforced at application level)
+    client_id = Column(Integer, ForeignKey("clients.id"), nullable=True)
+    site_id = Column(Integer, ForeignKey("sites.id"), nullable=True)
+    building_id = Column(Integer, ForeignKey("buildings.id"), nullable=True)
+    space_id = Column(Integer, ForeignKey("spaces.id"), nullable=True)
+    floor_id = Column(Integer, ForeignKey("floors.id"), nullable=True)
+    unit_id = Column(Integer, ForeignKey("units.id"), nullable=True)
+    room_id = Column(Integer, ForeignKey("rooms.id"), nullable=True)
+    desk_id = Column(Integer, ForeignKey("desks.id"), nullable=True)
+
     name = Column(String, nullable=False)  # e.g., "Air Conditioning Unit", "Main Distribution Panel"
-    code = Column(String, nullable=True)  # Asset tag/code e.g., "AC-001", "MDP-01"
+    code = Column(String, nullable=True, index=True)  # Asset tag/code e.g., "AC-001", "MDP-01"
     category = Column(String, nullable=False)  # "electrical", "mechanical", "plumbing"
     equipment_type = Column(String, nullable=True)  # Specific type within category
 
-    # PM Hierarchy link - links to PMAssetType for maintenance checklists
+    # PM Hierarchy link - links to PMEquipmentClass for maintenance checklists
+    pm_equipment_class_id = Column(Integer, ForeignKey("pm_equipment_classes.id"), nullable=True)
     pm_asset_type_id = Column(Integer, ForeignKey("pm_asset_types.id"), nullable=True)
     manufacturer = Column(String, nullable=True)
     model = Column(String, nullable=True)
@@ -459,8 +543,9 @@ class Equipment(Base):
     warranty_expiry = Column(Date, nullable=True)
     status = Column(String, default="operational")  # operational, needs_maintenance, out_of_service, retired
     condition = Column(String, default="good")  # excellent, good, fair, poor
+    condition_rating = Column(Integer, nullable=True)  # 1-10 rating scale
     specifications = Column(Text, nullable=True)  # JSON string for technical specs
-    location_details = Column(String, nullable=True)  # Specific location within room
+    location_details = Column(String, nullable=True)  # Specific location description
     photo_url = Column(String, nullable=True)  # Photo of the equipment
     qr_code = Column(String, nullable=True)  # QR code for quick scanning
     notes = Column(Text, nullable=True)
@@ -469,19 +554,42 @@ class Equipment(Base):
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
 
     # Relationships
+    client = relationship("Client", backref="equipment")
+    site = relationship("Site", backref="equipment")
+    building = relationship("Building", backref="equipment")
+    space = relationship("Space", backref="equipment")
+    floor = relationship("Floor", backref="equipment")
+    unit = relationship("Unit", back_populates="equipment")
     room = relationship("Room", back_populates="equipment")
+    desk = relationship("Desk", back_populates="equipment")
     sub_equipment = relationship("SubEquipment", back_populates="parent_equipment", cascade="all, delete-orphan")
+    pm_equipment_class = relationship("PMEquipmentClass", backref="equipment")
     pm_asset_type = relationship("PMAssetType", backref="equipment")
 
 
 class SubEquipment(Base):
-    """Sub-component of an equipment item"""
+    """
+    Sub-component - can be assigned to Equipment OR any level of the hierarchy
+    Typically a component of Equipment, but can also be standalone at any location level
+    """
     __tablename__ = "sub_equipment"
 
     id = Column(Integer, primary_key=True, index=True)
-    equipment_id = Column(Integer, ForeignKey("equipment.id"), nullable=False)
+
+    # Parent equipment (most common case)
+    equipment_id = Column(Integer, ForeignKey("equipment.id"), nullable=True)
+
+    # Flexible parent assignment - sub-equipment can also belong to any level directly
+    # Only ONE of these should be set (enforced at application level)
+    client_id = Column(Integer, ForeignKey("clients.id"), nullable=True)
+    site_id = Column(Integer, ForeignKey("sites.id"), nullable=True)
+    building_id = Column(Integer, ForeignKey("buildings.id"), nullable=True)
+    space_id = Column(Integer, ForeignKey("spaces.id"), nullable=True)
+    floor_id = Column(Integer, ForeignKey("floors.id"), nullable=True)
+    room_id = Column(Integer, ForeignKey("rooms.id"), nullable=True)
+
     name = Column(String, nullable=False)  # e.g., "Compressor", "Filter", "Motor"
-    code = Column(String, nullable=True)  # Sub-asset code
+    code = Column(String, nullable=True, index=True)  # Sub-asset code
     component_type = Column(String, nullable=True)  # Type of component
     manufacturer = Column(String, nullable=True)
     model = Column(String, nullable=True)
@@ -499,6 +607,12 @@ class SubEquipment(Base):
 
     # Relationships
     parent_equipment = relationship("Equipment", back_populates="sub_equipment")
+    client = relationship("Client", backref="sub_equipment")
+    site = relationship("Site", backref="sub_equipment")
+    building = relationship("Building", backref="sub_equipment")
+    space = relationship("Space", backref="sub_equipment")
+    floor = relationship("Floor", backref="sub_equipment")
+    room = relationship("Room", backref="sub_equipment")
 
 
 class TechnicianAttendance(Base):
@@ -624,12 +738,16 @@ class WorkOrder(Base):
     sub_equipment_id = Column(Integer, ForeignKey("sub_equipment.id"), nullable=True)
 
     # Location context (denormalized for easier querying)
+    site_id = Column(Integer, ForeignKey("sites.id"), nullable=True)
     branch_id = Column(Integer, ForeignKey("branches.id"), nullable=True)
     floor_id = Column(Integer, ForeignKey("floors.id"), nullable=True)
     room_id = Column(Integer, ForeignKey("rooms.id"), nullable=True)
 
-    # Project assignment
+    # Project assignment (legacy - use contract_id instead)
     project_id = Column(Integer, ForeignKey("projects.id"), nullable=True)
+
+    # Contract assignment
+    contract_id = Column(Integer, ForeignKey("contracts.id"), nullable=True)
 
     # Direct HHD assignment (alternative to technician assignment)
     assigned_hhd_id = Column(Integer, ForeignKey("handheld_devices.id"), nullable=True)
@@ -685,10 +803,12 @@ class WorkOrder(Base):
     company = relationship("Company")
     equipment = relationship("Equipment", backref="work_orders")
     sub_equipment = relationship("SubEquipment", backref="work_orders")
+    site = relationship("Site", backref="work_orders")
     branch = relationship("Branch")
     floor = relationship("Floor")
     room = relationship("Room")
     project = relationship("Project", backref="work_orders")
+    contract = relationship("Contract", backref="work_orders")
     assigned_hhd = relationship("HandHeldDevice", backref="assigned_work_orders")
     approver = relationship("User", foreign_keys=[approved_by])
     canceller = relationship("User", foreign_keys=[cancelled_by])
@@ -698,6 +818,7 @@ class WorkOrder(Base):
     spare_parts_used = relationship("WorkOrderSparePart", back_populates="work_order", cascade="all, delete-orphan")
     time_entries = relationship("WorkOrderTimeEntry", back_populates="work_order", cascade="all, delete-orphan")
     checklist_items = relationship("WorkOrderChecklistItem", back_populates="work_order", cascade="all, delete-orphan", order_by="WorkOrderChecklistItem.item_number")
+    snapshots = relationship("WorkOrderSnapshot", back_populates="work_order", cascade="all, delete-orphan")
 
 
 class WorkOrderSparePart(Base):
@@ -779,6 +900,34 @@ class WorkOrderChecklistItem(Base):
     # Relationships
     work_order = relationship("WorkOrder", back_populates="checklist_items")
     completer = relationship("User", foreign_keys=[completed_by])
+
+
+class WorkOrderSnapshot(Base):
+    """Snapshots/photos attached to work orders"""
+    __tablename__ = "work_order_snapshots"
+
+    id = Column(Integer, primary_key=True, index=True)
+    work_order_id = Column(Integer, ForeignKey("work_orders.id", ondelete="CASCADE"), nullable=False)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+
+    # File info
+    filename = Column(String, nullable=False)  # Stored filename (UUID-based)
+    original_filename = Column(String, nullable=False)  # Original uploaded filename
+    file_path = Column(String, nullable=False)  # Full path to file
+    file_size = Column(Integer, nullable=True)  # File size in bytes
+    mime_type = Column(String, nullable=True)  # MIME type (image/jpeg, etc.)
+
+    # Metadata
+    caption = Column(String(500), nullable=True)
+    taken_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    taken_at = Column(DateTime, default=func.now())
+
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    # Relationships
+    work_order = relationship("WorkOrder", back_populates="snapshots")
+    photographer = relationship("User", foreign_keys=[taken_by])
 
 
 # ============================================================================
@@ -1357,3 +1506,349 @@ class CycleCountItem(Base):
     cycle_count = relationship("CycleCount", back_populates="items")
     item = relationship("ItemMaster")
     counter = relationship("User", foreign_keys=[counted_by])
+
+# ============================================================================
+# New Location Hierarchy Models (Site, Building, Space)
+# ============================================================================
+
+class Site(Base):
+    """
+    Site - Location/facility of a client (replaces Branch concept for asset hierarchy)
+    Client -> Site -> Building -> Space/Floor -> Room
+    """
+    __tablename__ = "sites"
+
+    id = Column(Integer, primary_key=True, index=True)
+    client_id = Column(Integer, ForeignKey("clients.id"), nullable=False)
+    name = Column(String, nullable=False)
+    code = Column(String, nullable=True, index=True)  # Site code for reference
+    address = Column(Text, nullable=True)
+    city = Column(String, nullable=True)
+    country = Column(String, nullable=True)
+    latitude = Column(Float, nullable=True)  # GPS coordinates
+    longitude = Column(Float, nullable=True)
+    phone = Column(String, nullable=True)
+    email = Column(String, nullable=True)
+    site_manager = Column(String, nullable=True)
+    notes = Column(Text, nullable=True)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    # Relationships
+    client = relationship("Client", backref="sites")
+    blocks = relationship("Block", back_populates="site", cascade="all, delete-orphan")
+    buildings = relationship("Building", back_populates="site", cascade="all, delete-orphan")
+    spaces = relationship("Space", back_populates="site", cascade="all, delete-orphan")
+    operators = relationship("User", secondary=operator_sites, backref="assigned_sites")
+    contracts = relationship("Contract", secondary=contract_sites, back_populates="sites")
+    projects = relationship("Project", back_populates="site", cascade="all, delete-orphan")
+
+
+class Block(Base):
+    """
+    Block within a Site - A grouping of buildings or a subdivision of the site
+    Examples: Block A, North Wing, Phase 1, Zone A
+    """
+    __tablename__ = "blocks"
+
+    id = Column(Integer, primary_key=True, index=True)
+    site_id = Column(Integer, ForeignKey("sites.id"), nullable=False)
+    name = Column(String, nullable=False)  # e.g., "Block A", "North Wing", "Phase 1"
+    code = Column(String, nullable=True, index=True)  # Block code
+    block_type = Column(String, nullable=True)  # Zone, Wing, Phase, Sector, etc.
+    description = Column(Text, nullable=True)
+    notes = Column(Text, nullable=True)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    # Relationships
+    site = relationship("Site", back_populates="blocks")
+    buildings = relationship("Building", back_populates="block", cascade="all, delete-orphan")
+
+
+class Building(Base):
+    """
+    Building within a Site or Block
+    Building can have both Spaces (direct) and Floors
+    Can belong to a Site directly OR to a Block within a Site
+    """
+    __tablename__ = "buildings"
+
+    id = Column(Integer, primary_key=True, index=True)
+    site_id = Column(Integer, ForeignKey("sites.id"), nullable=True)  # For direct site-level buildings
+    block_id = Column(Integer, ForeignKey("blocks.id"), nullable=True)  # For buildings within a block
+    name = Column(String, nullable=False)  # e.g., "Main Building", "Tower A", "Warehouse"
+    code = Column(String, nullable=True, index=True)  # Building code
+    building_type = Column(String, nullable=True)  # Office, Warehouse, Residential, Industrial, etc.
+    address = Column(Text, nullable=True)  # Building-specific address if different from site
+    total_floors = Column(Integer, nullable=True)  # Number of floors
+    total_area_sqm = Column(Float, nullable=True)  # Total building area
+    year_built = Column(Integer, nullable=True)
+    description = Column(Text, nullable=True)
+    notes = Column(Text, nullable=True)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    # Relationships
+    site = relationship("Site", back_populates="buildings")
+    block = relationship("Block", back_populates="buildings")
+    floors = relationship("Floor", back_populates="building", cascade="all, delete-orphan")
+    spaces = relationship("Space", back_populates="building", cascade="all, delete-orphan")
+
+
+class Space(Base):
+    """
+    Space - Direct area under a Site or Building (not on a specific floor)
+    Examples: Parking lot, Courtyard, Rooftop, External area, Garden
+    Can be attached to either a Site directly or to a Building
+    """
+    __tablename__ = "spaces"
+
+    id = Column(Integer, primary_key=True, index=True)
+    site_id = Column(Integer, ForeignKey("sites.id"), nullable=True)  # For site-level spaces
+    building_id = Column(Integer, ForeignKey("buildings.id"), nullable=True)  # For building-level spaces
+    name = Column(String, nullable=False)  # e.g., "Parking Lot A", "Rooftop", "Courtyard"
+    code = Column(String, nullable=True, index=True)
+    space_type = Column(String, nullable=True)  # Parking, Outdoor, Rooftop, Common Area, etc.
+    area_sqm = Column(Float, nullable=True)
+    description = Column(Text, nullable=True)
+    notes = Column(Text, nullable=True)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    # Relationships
+    site = relationship("Site", back_populates="spaces")
+    building = relationship("Building", back_populates="spaces")
+
+
+# ============================================================================
+# Contract Management Models
+# ============================================================================
+
+class Scope(Base):
+    """
+    Reference table for contract scope types
+    Examples: HVAC, Spare Parts, Labor, Subcontractor, Electrical, Plumbing, Fire Safety
+    """
+    __tablename__ = "scopes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+    name = Column(String, nullable=False)  # HVAC, Spare Parts, Labor, etc.
+    code = Column(String, nullable=True, index=True)  # Short code
+    description = Column(Text, nullable=True)
+    sort_order = Column(Integer, default=0)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    # Relationships
+    company = relationship("Company", backref="scopes")
+
+    __table_args__ = (
+        UniqueConstraint('company_id', 'name', name='uq_company_scope_name'),
+    )
+
+
+class Contract(Base):
+    """
+    Contract under a Client
+    One client can have multiple contracts
+    Each contract can cover multiple sites
+    """
+    __tablename__ = "contracts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+    client_id = Column(Integer, ForeignKey("clients.id"), nullable=False)
+    
+    # Contract identification
+    contract_number = Column(String, nullable=False, index=True)  # Auto-generated or manual
+    name = Column(String, nullable=False)  # Contract name/title
+    description = Column(Text, nullable=True)
+    
+    # Contract type
+    # comprehensive: Full coverage including parts
+    # non_comprehensive: Labor only
+    # with_threshold: Parts covered up to threshold amount
+    contract_type = Column(String, nullable=False, default="comprehensive")
+    threshold_amount = Column(Numeric(12, 2), nullable=True)  # For with_threshold type
+    threshold_period = Column(String, nullable=True)  # per_work_order, monthly, yearly, contract_period
+    
+    # Dates
+    start_date = Column(Date, nullable=False)
+    end_date = Column(Date, nullable=False)
+    
+    # Financials
+    contract_value = Column(Numeric(14, 2), nullable=True)  # Total contract value
+    budget = Column(Numeric(14, 2), nullable=True)  # Budget allocation
+    currency = Column(String(10), default="USD")
+    
+    # Status
+    status = Column(String, default="draft")  # draft, active, expired, terminated, renewed
+    
+    # Renewal
+    is_renewable = Column(Boolean, default=False)
+    renewal_notice_days = Column(Integer, nullable=True)  # Days before end to notify for renewal
+    auto_renew = Column(Boolean, default=False)
+    
+    # Documents
+    document_url = Column(String, nullable=True)  # Link to contract document
+    
+    # Notes
+    notes = Column(Text, nullable=True)
+    terms_conditions = Column(Text, nullable=True)
+    
+    # Audit
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    updated_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    # Relationships
+    company = relationship("Company", backref="contracts")
+    client = relationship("Client", backref="contracts")
+    sites = relationship("Site", secondary=contract_sites, back_populates="contracts")
+    scopes = relationship("ContractScope", back_populates="contract", cascade="all, delete-orphan")
+    creator = relationship("User", foreign_keys=[created_by])
+    updater = relationship("User", foreign_keys=[updated_by])
+
+
+class ContractScope(Base):
+    """
+    Scope items within a contract with their specific SLA
+    Each contract can have multiple scopes, each with its own SLA
+    """
+    __tablename__ = "contract_scopes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    contract_id = Column(Integer, ForeignKey("contracts.id", ondelete="CASCADE"), nullable=False)
+    scope_id = Column(Integer, ForeignKey("scopes.id"), nullable=False)
+    
+    # Scope-specific budget (optional, can allocate budget per scope)
+    allocated_budget = Column(Numeric(12, 2), nullable=True)
+    
+    # SLA - Response Time
+    sla_response_time_hours = Column(Integer, nullable=True)  # Hours to respond
+    sla_response_time_priority_low = Column(Integer, nullable=True)  # Hours for low priority
+    sla_response_time_priority_medium = Column(Integer, nullable=True)  # Hours for medium priority
+    sla_response_time_priority_high = Column(Integer, nullable=True)  # Hours for high priority
+    sla_response_time_priority_critical = Column(Integer, nullable=True)  # Hours for critical
+    
+    # SLA - Resolution Time
+    sla_resolution_time_hours = Column(Integer, nullable=True)  # Hours to resolve
+    sla_resolution_time_priority_low = Column(Integer, nullable=True)
+    sla_resolution_time_priority_medium = Column(Integer, nullable=True)
+    sla_resolution_time_priority_high = Column(Integer, nullable=True)
+    sla_resolution_time_priority_critical = Column(Integer, nullable=True)
+    
+    # SLA - Availability
+    sla_availability_percent = Column(Numeric(5, 2), nullable=True)  # e.g., 99.9%
+    
+    # SLA - Penalties
+    sla_penalty_response_breach = Column(Numeric(10, 2), nullable=True)  # Penalty amount per breach
+    sla_penalty_resolution_breach = Column(Numeric(10, 2), nullable=True)
+    sla_penalty_availability_breach = Column(Numeric(10, 2), nullable=True)
+    sla_penalty_calculation = Column(String, nullable=True)  # fixed, percentage, per_hour
+    
+    # Scope-specific notes
+    notes = Column(Text, nullable=True)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    # Relationships
+    contract = relationship("Contract", back_populates="scopes")
+    scope = relationship("Scope")
+
+    __table_args__ = (
+        UniqueConstraint('contract_id', 'scope_id', name='uq_contract_scope'),
+    )
+
+
+# ============================================================================
+# Ticketing System Models
+# ============================================================================
+
+class Ticket(Base):
+    """
+    Ticket/Service Request - Users can submit requests that can be converted to work orders
+    """
+    __tablename__ = "tickets"
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+
+    # Ticket identification
+    ticket_number = Column(String, nullable=False, unique=True, index=True)  # Auto-generated TKT-YYYYMMDD-XXXX
+
+    # Request details
+    title = Column(String(200), nullable=False)
+    description = Column(Text, nullable=False)
+
+    # Category/Type
+    category = Column(String(50), nullable=False)  # maintenance, repair, installation, inspection, other
+
+    # Priority
+    priority = Column(String(20), default="medium")  # low, medium, high, urgent
+
+    # Status
+    status = Column(String(20), default="open")  # open, in_review, approved, converted, rejected, closed
+
+    # Location (optional but recommended)
+    site_id = Column(Integer, ForeignKey("sites.id"), nullable=True)
+    building_id = Column(Integer, ForeignKey("buildings.id"), nullable=True)
+    floor_id = Column(Integer, ForeignKey("floors.id"), nullable=True)
+    room_id = Column(Integer, ForeignKey("rooms.id"), nullable=True)
+    location_description = Column(String(500), nullable=True)  # Free text location if not in hierarchy
+
+    # Equipment reference (optional)
+    equipment_id = Column(Integer, ForeignKey("equipment.id"), nullable=True)
+
+    # Requester info
+    requested_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    requester_name = Column(String(200), nullable=True)  # Can be different from logged-in user
+    requester_email = Column(String(200), nullable=True)
+    requester_phone = Column(String(50), nullable=True)
+
+    # Preferred scheduling
+    preferred_date = Column(Date, nullable=True)
+    preferred_time_slot = Column(String(50), nullable=True)  # morning, afternoon, evening, anytime
+
+    # Attachments (stored as JSON array of file paths)
+    attachments = Column(Text, nullable=True)  # JSON array
+
+    # Work order linkage (after conversion)
+    work_order_id = Column(Integer, ForeignKey("work_orders.id"), nullable=True)
+    converted_at = Column(DateTime, nullable=True)
+    converted_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+
+    # Review/Approval
+    reviewed_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    reviewed_at = Column(DateTime, nullable=True)
+    review_notes = Column(Text, nullable=True)
+    rejection_reason = Column(Text, nullable=True)
+
+    # Internal notes (for admins)
+    internal_notes = Column(Text, nullable=True)
+
+    # Audit
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    # Relationships
+    company = relationship("Company", backref="tickets")
+    site = relationship("Site", backref="tickets")
+    building = relationship("Building", backref="tickets")
+    floor = relationship("Floor", backref="tickets")
+    room = relationship("Room", backref="tickets")
+    equipment = relationship("Equipment", backref="tickets")
+    requester = relationship("User", foreign_keys=[requested_by], backref="submitted_tickets")
+    converter = relationship("User", foreign_keys=[converted_by])
+    reviewer = relationship("User", foreign_keys=[reviewed_by])
+    work_order = relationship("WorkOrder", backref="source_ticket")

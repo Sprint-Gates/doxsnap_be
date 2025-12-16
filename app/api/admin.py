@@ -1166,6 +1166,7 @@ async def admin_link_vendor_to_image(
 async def admin_upload_image(
     file: UploadFile = File(...),
     document_type: str = "invoice",
+    invoice_category: str = None,
     admin_user: User = Depends(get_current_admin),
     db: Session = Depends(get_db)
 ):
@@ -1276,6 +1277,7 @@ async def admin_upload_image(
             s3_url=s3_url,
             processing_status=processing_status,
             document_type=document_type,
+            invoice_category=invoice_category if document_type == "invoice" else None,
             ocr_extracted_words=int(invoice_results.get("total_words_extracted", 0)),
             ocr_average_confidence=float(invoice_results.get("average_confidence", 0.0)),
             ocr_preprocessing_methods=int(enhancement_features.get("multiple_preprocessing", 1)),
@@ -1309,6 +1311,7 @@ async def admin_upload_image(
             "original_filename": db_image.original_filename,
             "processing_status": db_image.processing_status,
             "document_type": db_image.document_type,
+            "invoice_category": db_image.invoice_category,
             "created_at": db_image.created_at.isoformat(),
             "structured_data": structured_data_json,
             "vendor_lookup": invoice_results.get("vendor_lookup"),
@@ -1328,6 +1331,7 @@ async def admin_upload_image(
 async def admin_upload_bulk_images(
     files: List[UploadFile] = File(...),
     document_type: str = "invoice",
+    invoice_category: str = None,
     admin_user: User = Depends(get_current_admin),
     db: Session = Depends(get_db)
 ):
@@ -1465,6 +1469,7 @@ async def admin_upload_bulk_images(
                 s3_url=s3_url,
                 processing_status=processing_status,
                 document_type=document_type,
+                invoice_category=invoice_category if document_type == "invoice" else None,
                 ocr_extracted_words=int(invoice_results.get("total_words_extracted", 0)),
                 ocr_average_confidence=float(invoice_results.get("average_confidence", 0.0)),
                 ocr_preprocessing_methods=int(enhancement_features.get("multiple_preprocessing", 1)),

@@ -14,10 +14,10 @@ import logging
 
 from app.database import get_db
 from app.models import (
-    User, WorkOrder, Equipment, Branch, Floor, Room, Project,
+    User, WorkOrder, Equipment, Floor, Room, Project, Site, Building, Client,
     PMEquipmentClass, PMSystemCode, PMAssetType, PMChecklist, PMActivity,
     PMSchedule, Technician, work_order_technicians, HandHeldDevice,
-    WorkOrderChecklistItem
+    WorkOrderChecklistItem, Unit, Block, Contract, contract_sites
 )
 from app.api.auth import verify_token
 
@@ -26,13 +26,70 @@ security = HTTPBearer()
 logger = logging.getLogger(__name__)
 
 
+def get_equipment_for_site(db: Session, site_id: int, with_pm_only: bool = False) -> List[Equipment]:
+    """
+    Get all equipment belonging to a site through any hierarchy path:
+    - Direct: equipment.site_id = site_id
+    - Via building: equipment.building_id -> building.site_id or building.block_id -> block.site_id
+    - Via floor: equipment.floor_id -> floor.building_id -> building...
+    - Via room: equipment.room_id -> room.floor_id -> floor...
+    - Via unit: equipment.unit_id -> unit.floor_id -> floor...
+    """
+    # Get all building IDs for this site (direct and via blocks)
+    direct_building_ids = db.query(Building.id).filter(Building.site_id == site_id).all()
+    direct_building_ids = [b[0] for b in direct_building_ids]
+
+    # Buildings via blocks
+    block_ids = db.query(Block.id).filter(Block.site_id == site_id).all()
+    block_ids = [b[0] for b in block_ids]
+    block_building_ids = db.query(Building.id).filter(Building.block_id.in_(block_ids)).all() if block_ids else []
+    block_building_ids = [b[0] for b in block_building_ids]
+
+    all_building_ids = list(set(direct_building_ids + block_building_ids))
+
+    # Get all floor IDs for these buildings
+    floor_ids = db.query(Floor.id).filter(Floor.building_id.in_(all_building_ids)).all() if all_building_ids else []
+    floor_ids = [f[0] for f in floor_ids]
+
+    # Get all room IDs for these floors
+    room_ids = db.query(Room.id).filter(Room.floor_id.in_(floor_ids)).all() if floor_ids else []
+    room_ids = [r[0] for r in room_ids]
+
+    # Get all unit IDs for these floors
+    unit_ids = db.query(Unit.id).filter(Unit.floor_id.in_(floor_ids)).all() if floor_ids else []
+    unit_ids = [u[0] for u in unit_ids]
+
+    # Build equipment query with OR conditions for all hierarchy paths
+    from sqlalchemy import or_
+
+    conditions = [Equipment.site_id == site_id]
+    if all_building_ids:
+        conditions.append(Equipment.building_id.in_(all_building_ids))
+    if floor_ids:
+        conditions.append(Equipment.floor_id.in_(floor_ids))
+    if room_ids:
+        conditions.append(Equipment.room_id.in_(room_ids))
+    if unit_ids:
+        conditions.append(Equipment.unit_id.in_(unit_ids))
+
+    query = db.query(Equipment).filter(
+        or_(*conditions),
+        Equipment.is_active == True
+    )
+
+    if with_pm_only:
+        query = query.filter(Equipment.pm_asset_type_id.isnot(None))
+
+    return query.all()
+
+
 # ============ Pydantic Schemas ============
 
 class PMWorkOrderGenerateRequest(BaseModel):
-    """Request to generate PM work orders for a branch"""
-    branch_id: int
+    """Request to generate PM work orders for a site"""
+    site_id: int
     frequency_code: str  # "1M", "3M", "6M", "1Y", etc.
-    project_id: int  # Required - project to assign work orders to
+    contract_id: int  # Required - contract to assign work orders to
     scheduled_date: Optional[datetime] = None  # When to schedule the work orders
     technician_ids: Optional[List[int]] = []  # Technicians to assign
     assigned_hhd_id: Optional[int] = None  # HHD to assign
@@ -128,29 +185,34 @@ def get_or_create_pm_schedule(db: Session, company_id: int, equipment_id: int, c
 
 @router.get("/pm-work-orders/frequencies")
 async def get_pm_frequencies(
-    branch_id: int,
+    site_id: int,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
-    Get available PM frequencies for a branch based on equipment with PM asset types
+    Get available PM frequencies for a site based on equipment with PM asset types
     Returns frequencies that have at least one equipment with checklists
     """
     if not user.company_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No company associated")
 
-    # Get all equipment in this branch that has pm_asset_type_id set
-    equipment_with_pm = db.query(Equipment).join(Room).join(Floor).filter(
-        Floor.branch_id == branch_id,
-        Equipment.pm_asset_type_id.isnot(None),
-        Equipment.is_active == True
-    ).all()
+    # Verify site access
+    site = db.query(Site).filter(Site.id == site_id).first()
+    if not site:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Site not found")
+
+    client = db.query(Client).filter(Client.id == site.client_id).first()
+    if not client or client.company_id != user.company_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
+
+    # Get all equipment in this site (through any hierarchy path) that has pm_asset_type_id set
+    equipment_with_pm = get_equipment_for_site(db, site_id, with_pm_only=True)
 
     if not equipment_with_pm:
         return {
             "frequencies": [],
             "equipment_count": 0,
-            "message": "No equipment with PM asset types found in this branch"
+            "message": "No equipment with PM asset types found in this site"
         }
 
     # Collect all unique frequencies from the checklists
@@ -187,38 +249,35 @@ async def get_pm_frequencies(
     return {
         "frequencies": frequencies,
         "equipment_count": len(equipment_with_pm),
-        "branch_id": branch_id
+        "site_id": site_id
     }
 
 
 @router.get("/pm-work-orders/preview")
 async def preview_pm_work_orders(
-    branch_id: int,
+    site_id: int,
     frequency_code: str,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
-    Preview PM work orders that would be generated for a branch and frequency
+    Preview PM work orders that would be generated for a site and frequency
     Shows equipment, their PM status, and whether they are overdue
     """
     if not user.company_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No company associated")
 
-    # Get branch
-    branch = db.query(Branch).filter(Branch.id == branch_id).first()
-    if not branch:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Branch not found")
+    # Get site and verify access
+    site = db.query(Site).filter(Site.id == site_id).first()
+    if not site:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Site not found")
 
-    # Get equipment with PM asset types in this branch
-    equipment_list = db.query(Equipment).options(
-        joinedload(Equipment.room).joinedload(Room.floor),
-        joinedload(Equipment.pm_asset_type)
-    ).join(Room).join(Floor).filter(
-        Floor.branch_id == branch_id,
-        Equipment.pm_asset_type_id.isnot(None),
-        Equipment.is_active == True
-    ).all()
+    client = db.query(Client).filter(Client.id == site.client_id).first()
+    if not client or client.company_id != user.company_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
+
+    # Get equipment with PM asset types in this site (through any hierarchy path)
+    equipment_list = get_equipment_for_site(db, site_id, with_pm_only=True)
 
     preview_items = []
     now = datetime.now()
@@ -276,9 +335,9 @@ async def preview_pm_work_orders(
     preview_items.sort(key=lambda x: (not x["is_overdue"], x["next_due"] or ""))
 
     return {
-        "branch": {
-            "id": branch.id,
-            "name": branch.name
+        "site": {
+            "id": site.id,
+            "name": site.name
         },
         "frequency": {
             "code": frequency_code
@@ -296,39 +355,42 @@ async def generate_pm_work_orders(
     db: Session = Depends(get_db)
 ):
     """
-    Generate PM work orders for a branch and frequency
+    Generate PM work orders for a site and frequency
     Creates work orders for all equipment that has the specified frequency checklist
     """
     if not user.company_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No company associated")
 
-    # Validate branch
-    branch = db.query(Branch).filter(Branch.id == data.branch_id).first()
-    if not branch:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Branch not found")
+    # Validate site
+    site = db.query(Site).filter(Site.id == data.site_id).first()
+    if not site:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Site not found")
 
-    # Validate project
-    project = db.query(Project).filter(
-        Project.id == data.project_id,
-        Project.branch_id == data.branch_id,
-        Project.status == 'active'
+    client = db.query(Client).filter(Client.id == site.client_id).first()
+    if not client or client.company_id != user.company_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
+
+    # Validate contract - contract should be for the same client and cover this site
+    contract = db.query(Contract).filter(
+        Contract.id == data.contract_id,
+        Contract.client_id == site.client_id,
+        Contract.status == 'active',
+        Contract.company_id == user.company_id
     ).first()
-    if not project:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found or not active for this branch")
+    if not contract:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Contract not found or not active")
+
+    # Verify the contract covers this site
+    contract_site_ids = [s.id for s in contract.sites]
+    if site.id not in contract_site_ids:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Contract does not cover this site")
 
     # Get markup values from request (which should come from project defaults)
     labor_markup = Decimal(str(data.labor_markup_percent or 0))
     parts_markup = Decimal(str(data.parts_markup_percent or 0))
 
-    # Get equipment with PM asset types
-    equipment_list = db.query(Equipment).options(
-        joinedload(Equipment.room).joinedload(Room.floor),
-        joinedload(Equipment.pm_asset_type)
-    ).join(Room).join(Floor).filter(
-        Floor.branch_id == data.branch_id,
-        Equipment.pm_asset_type_id.isnot(None),
-        Equipment.is_active == True
-    ).all()
+    # Get equipment with PM asset types in this site (through any hierarchy path)
+    equipment_list = get_equipment_for_site(db, data.site_id, with_pm_only=True)
 
     # Validate technicians if provided
     technicians = []
@@ -410,10 +472,10 @@ TASKS TO COMPLETE:
                 priority="medium",
                 status="pending",
                 equipment_id=equip.id,
-                branch_id=data.branch_id,
+                site_id=data.site_id,
                 floor_id=floor_id,
                 room_id=room_id,
-                project_id=data.project_id,
+                contract_id=data.contract_id,
                 scheduled_start=scheduled_date,
                 scheduled_end=scheduled_date + timedelta(days=1),  # Default 1-day window
                 is_billable=data.is_billable or False,
@@ -463,7 +525,7 @@ TASKS TO COMPLETE:
 
         db.commit()
 
-        logger.info(f"Generated {len(work_orders_created)} PM work orders for branch {data.branch_id} by {user.email}")
+        logger.info(f"Generated {len(work_orders_created)} PM work orders for site {data.site_id} by {user.email}")
 
         return {
             "success": True,
@@ -471,7 +533,7 @@ TASKS TO COMPLETE:
             "work_orders_created": len(work_orders_created),
             "work_order_numbers": work_orders_created,
             "frequency": data.frequency_code,
-            "branch_id": data.branch_id
+            "site_id": data.site_id
         }
 
     except Exception as e:
@@ -557,12 +619,12 @@ async def complete_pm_work_order(
 
 @router.get("/pm-work-orders/dashboard")
 async def get_pm_dashboard(
-    branch_id: Optional[int] = None,
+    site_id: Optional[int] = None,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
-    Get PM dashboard statistics for the company or a specific branch
+    Get PM dashboard statistics for the company or a specific site
     Shows overdue, upcoming, and completed PM work orders
     """
     if not user.company_id:
@@ -578,8 +640,8 @@ async def get_pm_dashboard(
         WorkOrder.work_order_type == "preventive"
     )
 
-    if branch_id:
-        query = query.filter(WorkOrder.branch_id == branch_id)
+    if site_id:
+        query = query.filter(WorkOrder.site_id == site_id)
 
     # Get counts by status
     pending_count = query.filter(WorkOrder.status == "pending").count()
@@ -606,9 +668,9 @@ async def get_pm_dashboard(
         PMSchedule.next_due_date < now
     )
 
-    if branch_id:
-        schedule_query = schedule_query.join(Equipment).join(Room).join(Floor).filter(
-            Floor.branch_id == branch_id
+    if site_id:
+        schedule_query = schedule_query.join(Equipment).filter(
+            Equipment.site_id == site_id
         )
 
     schedules_overdue = schedule_query.count()
@@ -636,5 +698,5 @@ async def get_pm_dashboard(
             }
             for wo in recent_work_orders
         ],
-        "branch_id": branch_id
+        "site_id": site_id
     }
