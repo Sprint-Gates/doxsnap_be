@@ -3,7 +3,6 @@ from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.database import Base
 
-
 # Association table for Operator-Branch many-to-many relationship
 operator_branches = Table(
     'operator_branches',
@@ -154,6 +153,7 @@ class Branch(Base):
     operators = relationship("User", secondary=operator_branches, back_populates="assigned_branches")
     floors = relationship("Floor", back_populates="branch")
 
+    technician_shifts = relationship("TechnicianBranchShift", back_populates="branch", cascade="all, delete-orphan")
 
 class Project(Base):
     """Project under a site"""
@@ -377,6 +377,30 @@ class Technician(Base):
     company = relationship("Company")
     assigned_device = relationship("HandHeldDevice", back_populates="assigned_technician", uselist=False)
     assigned_devices = relationship("HandHeldDevice", secondary="handheld_device_technicians", back_populates="assigned_technicians")
+    branch_shifts = relationship("TechnicianBranchShift", back_populates="technician", cascade="all, delete-orphan")
+
+class TechnicianBranchShift(Base):
+    __tablename__ = "technician_branch_shifts"
+
+    id = Column(Integer, primary_key=True)
+
+    technician_id = Column(Integer, ForeignKey("technicians.id"), nullable=False, index=True)
+
+    branch_id = Column(Integer, ForeignKey("branches.id"), nullable=False, index=True)
+
+    day_of_week = Column(Integer, nullable=False)  
+    # 0 = Monday, 6 = Sunday (choose and document)
+
+    start_time = Column(Time, nullable=False)
+    end_time = Column(Time, nullable=False)
+
+    is_active = Column(Boolean, default=True)
+
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    technician = relationship("Technician", back_populates="branch_shifts")
+    branch = relationship("Branch", back_populates="technician_shifts")
 
 
 class HandHeldDevice(Base):
