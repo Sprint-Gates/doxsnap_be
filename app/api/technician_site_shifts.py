@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from typing import Optional, List
 from datetime import time
 from app.database import get_db
-from app.models import Technician, Branch, TechnicianBranchShift, User
+from app.models import Technician, Site, TechnicianSiteShift, User
 from app.utils.security import verify_token
 import logging
 
@@ -52,7 +52,7 @@ def require_admin(user: User = Depends(get_current_user)):
 
 class ShiftCreate(BaseModel):
     technician_id: int
-    branch_id: int
+    site_id: int
     day_of_week: int  # 0 = Monday, 6 = Sunday
     start_time: time
     end_time: time
@@ -70,8 +70,8 @@ class ShiftResponse(BaseModel):
     id: int
     technician_id: int
     technician_name: str
-    branch_id: int
-    branch_name: str
+    site_id: int
+    site_name: str
     day_of_week: int
     start_time: str
     end_time: str
@@ -85,14 +85,14 @@ class ShiftResponse(BaseModel):
 # Helper functions
 # ==========================
 
-def shift_to_response(shift: TechnicianBranchShift) -> dict:
+def shift_to_response(shift: TechnicianSiteShift) -> dict:
     """Convert model to response dict"""
     return {
         "id": shift.id,
         "technician_id": shift.technician_id,
         "technician_name": shift.technician.name if shift.technician else "",
-        "branch_id": shift.branch_id,
-        "branch_name": shift.branch.name if shift.branch else "",
+        "site_id": shift.site_id,
+        "site_name": shift.site.name if shift.site else "",
         "day_of_week": shift.day_of_week,
         "start_time": shift.start_time.isoformat(),
         "end_time": shift.end_time.isoformat(),
@@ -106,23 +106,23 @@ def shift_to_response(shift: TechnicianBranchShift) -> dict:
 
 @router.get("/shifts/")
 async def get_shifts(
-    branch_id: Optional[int] = None,
+    site_id: Optional[int] = None,
     technician_id: Optional[int] = None,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Retrieve shifts, optionally filtered by branch or technician"""
-    query = db.query(TechnicianBranchShift)
+    """Retrieve shifts, optionally filtered by site or technician"""
+    query = db.query(TechnicianSiteShift)
 
-    if branch_id:
-        query = query.filter(TechnicianBranchShift.branch_id == branch_id)
+    if site_id:
+        query = query.filter(TechnicianSiteShift.site_id == site_id)
     if technician_id:
-        query = query.filter(TechnicianBranchShift.technician_id == technician_id)
+        query = query.filter(TechnicianSiteShift.technician_id == technician_id)
 
     shifts = query.order_by(
-        TechnicianBranchShift.technician_id,
-        TechnicianBranchShift.day_of_week,
-        TechnicianBranchShift.start_time
+        TechnicianSiteShift.technician_id,
+        TechnicianSiteShift.day_of_week,
+        TechnicianSiteShift.start_time
     ).all()
 
     return [shift_to_response(s) for s in shifts]
@@ -134,7 +134,7 @@ async def create_shift(
     user: User = Depends(require_admin),
     db: Session = Depends(get_db)
 ):
-    """Create a new technician branch shift (admin only)"""
+    """Create a new technician site shift (admin only)"""
     try:
         # Validate time range
         if data.start_time >= data.end_time:
@@ -148,32 +148,32 @@ async def create_shift(
         if not technician:
             raise HTTPException(status_code=400, detail=f"Technician {data.technician_id} not found or inactive")
 
-        # Validate branch exists and is active
-        branch = db.query(Branch).filter(
-            Branch.id == data.branch_id,
-            Branch.is_active == True
+        # Validate site exists and is active
+        site = db.query(Site).filter(
+            Site.id == data.site_id,
+            Site.is_active == True
         ).first()
-        if not branch:
-            raise HTTPException(status_code=400, detail=f"Branch {data.branch_id} not found or inactive")
+        if not site:
+            raise HTTPException(status_code=400, detail=f"Site {data.site_id} not found or inactive")
 
         # Prevent overlapping shifts
-        overlap = db.query(TechnicianBranchShift).filter(
-            TechnicianBranchShift.technician_id == data.technician_id,
-            TechnicianBranchShift.branch_id == data.branch_id,
-            TechnicianBranchShift.day_of_week == data.day_of_week,
-            TechnicianBranchShift.is_active == True,
-            ((TechnicianBranchShift.start_time <= data.start_time) & (TechnicianBranchShift.end_time > data.start_time)) |
-            ((TechnicianBranchShift.start_time < data.end_time) & (TechnicianBranchShift.end_time >= data.end_time)) |
-            ((TechnicianBranchShift.start_time >= data.start_time) & (TechnicianBranchShift.end_time <= data.end_time))
+        overlap = db.query(TechnicianSiteShift).filter(
+            TechnicianSiteShift.technician_id == data.technician_id,
+            TechnicianSiteShift.site_id == data.site_id,
+            TechnicianSiteShift.day_of_week == data.day_of_week,
+            TechnicianSiteShift.is_active == True,
+            ((TechnicianSiteShift.start_time <= data.start_time) & (TechnicianSiteShift.end_time > data.start_time)) |
+            ((TechnicianSiteShift.start_time < data.end_time) & (TechnicianSiteShift.end_time >= data.end_time)) |
+            ((TechnicianSiteShift.start_time >= data.start_time) & (TechnicianSiteShift.end_time <= data.end_time))
         ).first()
 
         if overlap:
             raise HTTPException(status_code=400, detail="Overlapping shift exists")
 
         # Create the shift
-        shift = TechnicianBranchShift(
+        shift = TechnicianSiteShift(
             technician_id=data.technician_id,
-            branch_id=data.branch_id,
+            site_id=data.site_id,
             day_of_week=data.day_of_week,
             start_time=data.start_time,
             end_time=data.end_time,
@@ -184,7 +184,7 @@ async def create_shift(
         db.commit()
         db.refresh(shift)
 
-        logger.info(f"Shift created: Technician {shift.technician_id} Branch {shift.branch_id}")
+        logger.info(f"Shift created: Technician {shift.technician_id} Site {shift.site_id}")
 
         return shift_to_response(shift)
 
@@ -208,7 +208,7 @@ async def update_shift(
     db: Session = Depends(get_db)
 ):
     """Update a shift (admin only)"""
-    shift = db.query(TechnicianBranchShift).get(shift_id)
+    shift = db.query(TechnicianSiteShift).get(shift_id)
     if not shift:
         raise HTTPException(status_code=404, detail="Shift not found")
 
@@ -240,7 +240,7 @@ async def delete_shift(
     db: Session = Depends(get_db)
 ):
     """Soft delete a shift (admin only)"""
-    shift = db.query(TechnicianBranchShift).get(shift_id)
+    shift = db.query(TechnicianSiteShift).get(shift_id)
     if not shift:
         raise HTTPException(status_code=404, detail="Shift not found")
 

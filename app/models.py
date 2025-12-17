@@ -153,8 +153,6 @@ class Branch(Base):
     operators = relationship("User", secondary=operator_branches, back_populates="assigned_branches")
     floors = relationship("Floor", back_populates="branch")
 
-    technician_shifts = relationship("TechnicianBranchShift", back_populates="branch", cascade="all, delete-orphan")
-
 class Project(Base):
     """Project under a site"""
     __tablename__ = "projects"
@@ -377,19 +375,18 @@ class Technician(Base):
     company = relationship("Company")
     assigned_device = relationship("HandHeldDevice", back_populates="assigned_technician", uselist=False)
     assigned_devices = relationship("HandHeldDevice", secondary="handheld_device_technicians", back_populates="assigned_technicians")
-    branch_shifts = relationship("TechnicianBranchShift", back_populates="technician", cascade="all, delete-orphan")
+    site_shifts = relationship("TechnicianSiteShift", back_populates="technician", cascade="all, delete-orphan")
 
-class TechnicianBranchShift(Base):
-    __tablename__ = "technician_branch_shifts"
+class TechnicianSiteShift(Base):
+    __tablename__ = "technician_site_shifts"
 
     id = Column(Integer, primary_key=True)
 
     technician_id = Column(Integer, ForeignKey("technicians.id"), nullable=False, index=True)
 
-    branch_id = Column(Integer, ForeignKey("branches.id"), nullable=False, index=True)
+    site_id = Column(Integer, ForeignKey("sites.id"), nullable=False, index=True)
 
-    day_of_week = Column(Integer, nullable=False)  
-    # 0 = Monday, 6 = Sunday (choose and document)
+    day_of_week = Column(Integer, nullable=False)  # 0 = Monday, 6 = Sunday
 
     start_time = Column(Time, nullable=False)
     end_time = Column(Time, nullable=False)
@@ -399,8 +396,8 @@ class TechnicianBranchShift(Base):
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
 
-    technician = relationship("Technician", back_populates="branch_shifts")
-    branch = relationship("Branch", back_populates="technician_shifts")
+    technician = relationship("Technician", back_populates="site_shifts")
+    site = relationship("Site", back_populates="technician_shifts")
 
 
 class HandHeldDevice(Base):
@@ -1567,6 +1564,9 @@ class Site(Base):
     operators = relationship("User", secondary=operator_sites, backref="assigned_sites")
     contracts = relationship("Contract", secondary=contract_sites, back_populates="sites")
     projects = relationship("Project", back_populates="site", cascade="all, delete-orphan")
+    technician_shifts = relationship("TechnicianSiteShift", back_populates="site", cascade="all, delete-orphan"
+)
+
 
 
 class Block(Base):
