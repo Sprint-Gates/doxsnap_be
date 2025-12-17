@@ -3,7 +3,6 @@ from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.database import Base
 
-
 # Association table for Operator-Branch many-to-many relationship
 operator_branches = Table(
     'operator_branches',
@@ -153,7 +152,6 @@ class Branch(Base):
     client = relationship("Client", back_populates="branches")
     operators = relationship("User", secondary=operator_branches, back_populates="assigned_branches")
     floors = relationship("Floor", back_populates="branch")
-
 
 class Project(Base):
     """Project under a site"""
@@ -377,6 +375,29 @@ class Technician(Base):
     company = relationship("Company")
     assigned_device = relationship("HandHeldDevice", back_populates="assigned_technician", uselist=False)
     assigned_devices = relationship("HandHeldDevice", secondary="handheld_device_technicians", back_populates="assigned_technicians")
+    site_shifts = relationship("TechnicianSiteShift", back_populates="technician", cascade="all, delete-orphan")
+
+class TechnicianSiteShift(Base):
+    __tablename__ = "technician_site_shifts"
+
+    id = Column(Integer, primary_key=True)
+
+    technician_id = Column(Integer, ForeignKey("technicians.id"), nullable=False, index=True)
+
+    site_id = Column(Integer, ForeignKey("sites.id"), nullable=False, index=True)
+
+    day_of_week = Column(Integer, nullable=False)  # 0 = Monday, 6 = Sunday
+
+    start_time = Column(Time, nullable=False)
+    end_time = Column(Time, nullable=False)
+
+    is_active = Column(Boolean, default=True)
+
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    technician = relationship("Technician", back_populates="site_shifts")
+    site = relationship("Site", back_populates="technician_shifts")
 
 
 class HandHeldDevice(Base):
@@ -1543,6 +1564,9 @@ class Site(Base):
     operators = relationship("User", secondary=operator_sites, backref="assigned_sites")
     contracts = relationship("Contract", secondary=contract_sites, back_populates="sites")
     projects = relationship("Project", back_populates="site", cascade="all, delete-orphan")
+    technician_shifts = relationship("TechnicianSiteShift", back_populates="site", cascade="all, delete-orphan"
+)
+
 
 
 class Block(Base):
