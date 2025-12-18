@@ -6,7 +6,8 @@ from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable, Image
+import os
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -290,6 +291,56 @@ class WorkOrderReportService:
             act = work_order.get('actual_total_cost', 0) or 0
             elements.append(Spacer(1, 8))
             elements.append(Paragraph(f"COSTS  <font color='#64748b'>Est: ${est:.2f}  |  Actual: ${act:.2f}</font>", section_style))
+
+        # === CLIENT COMPLETION (RATING, COMMENTS, SIGNATURE) ===
+        completion = work_order.get('completion')
+        if completion:
+            elements.append(Spacer(1, 8))
+            elements.append(HRFlowable(width="100%", thickness=1, color=border))
+            elements.append(Spacer(1, 6))
+            elements.append(Paragraph("CLIENT SIGN-OFF", section_style))
+
+            # Rating with stars
+            rating = completion.get('rating')
+            if rating:
+                stars = '★' * rating + '☆' * (5 - rating)
+                rating_color = success if rating >= 4 else (colors.HexColor('#eab308') if rating >= 3 else colors.HexColor('#ef4444'))
+                elements.append(Paragraph(f"<b>Rating:</b>  <font color='{rating_color}'>{stars}</font>  ({rating}/5)", value_style))
+                elements.append(Spacer(1, 4))
+
+            # Client comments
+            comments = completion.get('comments')
+            if comments:
+                elements.append(Paragraph("<b>Client Comments:</b>", label_style))
+                elements.append(Paragraph(comments, value_style))
+                elements.append(Spacer(1, 4))
+
+            # Signature section
+            signed_by = completion.get('signed_by_name')
+            signed_at = completion.get('signed_at')
+            signature_path = completion.get('signature_path')
+
+            if signed_by or signature_path:
+                elements.append(Spacer(1, 4))
+
+                # Try to include signature image
+                if signature_path and os.path.exists(signature_path):
+                    try:
+                        sig_img = Image(signature_path, width=2*inch, height=0.75*inch)
+                        sig_img.hAlign = 'LEFT'
+                        elements.append(sig_img)
+                    except Exception as e:
+                        elements.append(Paragraph("<i>Signature on file</i>", small_style))
+
+                # Signature info
+                sig_info_parts = []
+                if signed_by:
+                    sig_info_parts.append(f"<b>Signed by:</b> {signed_by}")
+                if signed_at:
+                    sig_info_parts.append(f"<b>Date:</b> {self._format_datetime(signed_at)}")
+
+                if sig_info_parts:
+                    elements.append(Paragraph("  |  ".join(sig_info_parts), small_style))
 
         # === FOOTER ===
         elements.append(Spacer(1, 12))

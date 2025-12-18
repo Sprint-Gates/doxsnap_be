@@ -840,6 +840,7 @@ class WorkOrder(Base):
     time_entries = relationship("WorkOrderTimeEntry", back_populates="work_order", cascade="all, delete-orphan")
     checklist_items = relationship("WorkOrderChecklistItem", back_populates="work_order", cascade="all, delete-orphan", order_by="WorkOrderChecklistItem.item_number")
     snapshots = relationship("WorkOrderSnapshot", back_populates="work_order", cascade="all, delete-orphan")
+    completion = relationship("WorkOrderCompletion", back_populates="work_order", uselist=False, cascade="all, delete-orphan")
 
 
 class WorkOrderSparePart(Base):
@@ -949,6 +950,39 @@ class WorkOrderSnapshot(Base):
     # Relationships
     work_order = relationship("WorkOrder", back_populates="snapshots")
     photographer = relationship("User", foreign_keys=[taken_by])
+
+
+class WorkOrderCompletion(Base):
+    """Client rating, comments, and signature for work order completion"""
+    __tablename__ = "work_order_completions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    work_order_id = Column(Integer, ForeignKey("work_orders.id", ondelete="CASCADE"), nullable=False, unique=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+
+    # Client rating (1-5 stars)
+    rating = Column(Integer, nullable=True)  # 1-5 scale
+
+    # Client comments
+    comments = Column(Text, nullable=True)
+
+    # Signature file info
+    signature_filename = Column(String, nullable=True)  # Stored filename (UUID-based)
+    signature_path = Column(String, nullable=True)  # Full path to signature file
+
+    # Who signed and when
+    signed_by_name = Column(String(255), nullable=True)  # Client name who signed
+    signed_at = Column(DateTime, nullable=True)
+
+    # Audit
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)  # HHD user who captured this
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    # Relationships
+    work_order = relationship("WorkOrder", back_populates="completion")
+    company = relationship("Company")
+    creator = relationship("User", foreign_keys=[created_by])
 
 
 # ============================================================================

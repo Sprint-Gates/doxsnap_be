@@ -18,7 +18,7 @@ import shutil
 from app.database import get_db
 from app.models import (
     User, WorkOrder, WorkOrderTimeEntry, WorkOrderChecklistItem, WorkOrderSnapshot,
-    Technician, Equipment, SubEquipment,
+    WorkOrderCompletion, Technician, Equipment, SubEquipment,
     Branch, Floor, Room, Project, work_order_technicians, HandHeldDevice,
     ItemMaster, ItemStock, ItemLedger
 )
@@ -2125,6 +2125,19 @@ async def export_work_order_pdf(
     # Add issued items from ledger
     wo_data["issued_items"] = get_issued_items_for_report(db, wo_id)
 
+    # Add completion data (rating, comments, signature)
+    completion = db.query(WorkOrderCompletion).filter(
+        WorkOrderCompletion.work_order_id == wo_id
+    ).first()
+    if completion:
+        wo_data["completion"] = {
+            "rating": completion.rating,
+            "comments": completion.comments,
+            "signature_path": completion.signature_path,
+            "signed_by_name": completion.signed_by_name,
+            "signed_at": completion.signed_at.isoformat() if completion.signed_at else None
+        }
+
     # Generate PDF
     from app.services.work_order_report import WorkOrderReportService
     report_service = WorkOrderReportService()
@@ -2178,6 +2191,19 @@ async def email_work_order(
 
     # Add issued items from ledger
     wo_data["issued_items"] = get_issued_items_for_report(db, wo_id)
+
+    # Add completion data (rating, comments, signature)
+    completion = db.query(WorkOrderCompletion).filter(
+        WorkOrderCompletion.work_order_id == wo_id
+    ).first()
+    if completion:
+        wo_data["completion"] = {
+            "rating": completion.rating,
+            "comments": completion.comments,
+            "signature_path": completion.signature_path,
+            "signed_by_name": completion.signed_by_name,
+            "signed_at": completion.signed_at.isoformat() if completion.signed_at else None
+        }
 
     # Generate PDF
     from app.services.work_order_report import WorkOrderReportService
@@ -2429,3 +2455,295 @@ async def delete_work_order_snapshot(
     db.commit()
 
     return {"success": True, "message": "Snapshot deleted"}
+
+
+# ============================================================================
+# Work Order Completion (Rating, Comments, Signature) API
+# ============================================================================
+
+SIGNATURES_UPLOAD_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "uploads", "work_order_signatures")
+
+# Ensure upload directory exists
+os.makedirs(SIGNATURES_UPLOAD_DIR, exist_ok=True)
+
+
+class WorkOrderCompletionCreate(BaseModel):
+    """Schema for creating work order completion data"""
+    rating: Optional[int] = None  # 1-5 stars
+    comments: Optional[str] = None
+    signed_by_name: Optional[str] = None
+
+
+class WorkOrderCompletionResponse(BaseModel):
+    """Schema for work order completion response"""
+    id: int
+    work_order_id: int
+    rating: Optional[int] = None
+    comments: Optional[str] = None
+    signature_filename: Optional[str] = None
+    signed_by_name: Optional[str] = None
+    signed_at: Optional[str] = None
+    created_at: Optional[str] = None
+
+
+def completion_to_response(completion: WorkOrderCompletion) -> dict:
+    """Convert WorkOrderCompletion to response dict"""
+    return {
+        "id": completion.id,
+        "work_order_id": completion.work_order_id,
+        "rating": completion.rating,
+        "comments": completion.comments,
+        "signature_filename": completion.signature_filename,
+        "signed_by_name": completion.signed_by_name,
+        "signed_at": completion.signed_at.isoformat() if completion.signed_at else None,
+        "created_at": completion.created_at.isoformat() if completion.created_at else None,
+        "updated_at": completion.updated_at.isoformat() if completion.updated_at else None
+    }
+
+
+@router.get("/work-orders/{wo_id}/completion")
+async def get_work_order_completion(
+    wo_id: int,
+    user = Depends(get_current_user_or_hhd),
+    db: Session = Depends(get_db)
+):
+    """Get work order completion data (rating, comments, signature info)"""
+    company_id = user.company_id
+
+    # Verify work order exists and belongs to company
+    wo = db.query(WorkOrder).filter(
+        WorkOrder.id == wo_id,
+        WorkOrder.company_id == company_id
+    ).first()
+    if not wo:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Work order not found")
+
+    completion = db.query(WorkOrderCompletion).filter(
+        WorkOrderCompletion.work_order_id == wo_id
+    ).first()
+
+    if not completion:
+        return None
+
+    return completion_to_response(completion)
+
+
+@router.post("/work-orders/{wo_id}/completion")
+async def create_or_update_work_order_completion(
+    wo_id: int,
+    data: WorkOrderCompletionCreate,
+    user = Depends(get_current_user_or_hhd),
+    db: Session = Depends(get_db)
+):
+    """Create or update work order completion (rating and comments)"""
+    company_id = user.company_id
+
+    # Verify work order exists and belongs to company
+    wo = db.query(WorkOrder).filter(
+        WorkOrder.id == wo_id,
+        WorkOrder.company_id == company_id
+    ).first()
+    if not wo:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Work order not found")
+
+    # Validate rating if provided
+    if data.rating is not None and (data.rating < 1 or data.rating > 5):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Rating must be between 1 and 5"
+        )
+
+    # Get existing completion or create new one
+    completion = db.query(WorkOrderCompletion).filter(
+        WorkOrderCompletion.work_order_id == wo_id
+    ).first()
+
+    if completion:
+        # Update existing
+        if data.rating is not None:
+            completion.rating = data.rating
+        if data.comments is not None:
+            completion.comments = data.comments
+        if data.signed_by_name is not None:
+            completion.signed_by_name = data.signed_by_name
+    else:
+        # Create new
+        completion = WorkOrderCompletion(
+            work_order_id=wo_id,
+            company_id=company_id,
+            rating=data.rating,
+            comments=data.comments,
+            signed_by_name=data.signed_by_name,
+            created_by=user.id if hasattr(user, 'id') else None
+        )
+        db.add(completion)
+
+    db.commit()
+    db.refresh(completion)
+
+    return completion_to_response(completion)
+
+
+@router.post("/work-orders/{wo_id}/completion/signature")
+async def upload_work_order_signature(
+    wo_id: int,
+    file: UploadFile = File(...),
+    signed_by_name: Optional[str] = Form(None),
+    user = Depends(get_current_user_or_hhd),
+    db: Session = Depends(get_db)
+):
+    """Upload signature image for work order completion"""
+    company_id = user.company_id
+
+    # Verify work order exists and belongs to company
+    wo = db.query(WorkOrder).filter(
+        WorkOrder.id == wo_id,
+        WorkOrder.company_id == company_id
+    ).first()
+    if not wo:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Work order not found")
+
+    # Validate file type (PNG is typical for signature pads)
+    allowed_types = ["image/png", "image/jpeg", "image/webp"]
+    if file.content_type not in allowed_types:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid file type. Allowed: {', '.join(allowed_types)}"
+        )
+
+    # Generate unique filename
+    file_ext = os.path.splitext(file.filename)[1] if file.filename else ".png"
+    unique_filename = f"{uuid.uuid4()}{file_ext}"
+
+    # Create company-specific subdirectory
+    company_dir = os.path.join(SIGNATURES_UPLOAD_DIR, str(company_id))
+    os.makedirs(company_dir, exist_ok=True)
+
+    file_path = os.path.join(company_dir, unique_filename)
+
+    try:
+        # Save file
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+
+        # Get or create completion record
+        completion = db.query(WorkOrderCompletion).filter(
+            WorkOrderCompletion.work_order_id == wo_id
+        ).first()
+
+        # Delete old signature file if exists
+        if completion and completion.signature_path and os.path.exists(completion.signature_path):
+            try:
+                os.remove(completion.signature_path)
+            except Exception as e:
+                logger.warning(f"Failed to delete old signature file: {e}")
+
+        if completion:
+            # Update existing
+            completion.signature_filename = unique_filename
+            completion.signature_path = file_path
+            completion.signed_at = datetime.utcnow()
+            if signed_by_name:
+                completion.signed_by_name = signed_by_name
+        else:
+            # Create new
+            completion = WorkOrderCompletion(
+                work_order_id=wo_id,
+                company_id=company_id,
+                signature_filename=unique_filename,
+                signature_path=file_path,
+                signed_by_name=signed_by_name,
+                signed_at=datetime.utcnow(),
+                created_by=user.id if hasattr(user, 'id') else None
+            )
+            db.add(completion)
+
+        db.commit()
+        db.refresh(completion)
+
+        return completion_to_response(completion)
+
+    except Exception as e:
+        # Clean up file if database operation fails
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to upload signature: {str(e)}"
+        )
+
+
+@router.get("/work-orders/{wo_id}/completion/signature/image")
+async def get_signature_image(
+    wo_id: int,
+    token: str = Query(...),
+    db: Session = Depends(get_db)
+):
+    """Get signature image file (requires token in query param for img src)"""
+    # Verify token
+    payload = verify_token_payload(token)
+    if not payload:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+
+    # Get company_id from payload (works for both user and HHD tokens)
+    company_id = payload.get("company_id")
+    if not company_id:
+        # For regular user tokens, we need to look up the user
+        sub = payload.get("sub")
+        if sub and not sub.startswith("hhd:"):
+            user = db.query(User).filter(User.email == sub).first()
+            if user:
+                company_id = user.company_id
+
+    if not company_id:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+
+    # Get completion with signature
+    completion = db.query(WorkOrderCompletion).filter(
+        WorkOrderCompletion.work_order_id == wo_id,
+        WorkOrderCompletion.company_id == company_id
+    ).first()
+
+    if not completion or not completion.signature_path:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Signature not found")
+
+    if not os.path.exists(completion.signature_path):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Signature file not found")
+
+    return FileResponse(
+        completion.signature_path,
+        media_type="image/png",
+        filename=completion.signature_filename
+    )
+
+
+@router.delete("/work-orders/{wo_id}/completion")
+async def delete_work_order_completion(
+    wo_id: int,
+    user = Depends(get_current_user_or_hhd),
+    db: Session = Depends(get_db)
+):
+    """Delete work order completion data"""
+    company_id = user.company_id
+
+    completion = db.query(WorkOrderCompletion).filter(
+        WorkOrderCompletion.work_order_id == wo_id,
+        WorkOrderCompletion.company_id == company_id
+    ).first()
+
+    if not completion:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Completion data not found")
+
+    # Delete signature file if exists
+    if completion.signature_path and os.path.exists(completion.signature_path):
+        try:
+            os.remove(completion.signature_path)
+        except Exception as e:
+            logger.warning(f"Failed to delete signature file: {e}")
+
+    # Delete record
+    db.delete(completion)
+    db.commit()
+
+    return {"success": True, "message": "Completion data deleted"}
