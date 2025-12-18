@@ -11,7 +11,9 @@ from decimal import Decimal
 from app.database import get_db
 from app.models import (
     User, WorkOrder, Technician, WorkOrderTimeEntry, Branch,
-    work_order_technicians, WorkOrderSparePart, Contract, Client
+    work_order_technicians, WorkOrderSparePart, Contract, Client,
+    Vendor, ProcessedImage, ItemMaster, ItemStock, ItemTransfer,
+    ItemLedger, Warehouse
 )
 from app.api.auth import get_current_user
 
@@ -363,4 +365,256 @@ async def get_accounting_dashboard(
             "totalBudget": decimal_to_float(contracts_stats.total_budget) or 0
         },
         "workOrderBreakdown": work_order_breakdown
+    }
+
+
+@router.get("/dashboard/procurement")
+async def get_procurement_dashboard(
+    month: int = Query(..., ge=1, le=12),
+    year: int = Query(..., ge=2020, le=2100),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get procurement dashboard statistics for a specific month/year"""
+    if not user.company_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No company associated")
+
+    company_id = user.company_id
+
+    # Build date range for the month
+    start_date = datetime(year, month, 1)
+    if month == 12:
+        end_date = datetime(year + 1, 1, 1)
+    else:
+        end_date = datetime(year, month + 1, 1)
+
+    # ===== VENDOR STATISTICS =====
+    vendor_stats = db.query(
+        func.count(Vendor.id).label('total_vendors'),
+        func.sum(case((Vendor.is_active == True, 1), else_=0)).label('active_vendors')
+    ).filter(
+        Vendor.company_id == company_id
+    ).first()
+
+    # ===== INVOICE STATISTICS =====
+    invoice_stats = db.query(
+        func.count(ProcessedImage.id).label('total_invoices'),
+        func.sum(case((ProcessedImage.processing_status == 'pending', 1), else_=0)).label('pending'),
+        func.sum(case((ProcessedImage.processing_status == 'completed', 1), else_=0)).label('completed'),
+        func.sum(case((ProcessedImage.processing_status == 'failed', 1), else_=0)).label('failed')
+    ).join(
+        User, User.id == ProcessedImage.user_id
+    ).filter(
+        User.company_id == company_id,
+        ProcessedImage.created_at >= start_date,
+        ProcessedImage.created_at < end_date
+    ).first()
+
+    # ===== INVENTORY STATISTICS =====
+    # Total items in master
+    item_master_stats = db.query(
+        func.count(ItemMaster.id).label('total_items'),
+        func.sum(case((ItemMaster.is_active == True, 1), else_=0)).label('active_items')
+    ).filter(
+        ItemMaster.company_id == company_id
+    ).first()
+
+    # Stock levels
+    stock_stats = db.query(
+        func.coalesce(func.sum(ItemStock.quantity_on_hand), 0).label('total_on_hand'),
+        func.coalesce(func.sum(ItemStock.quantity_reserved), 0).label('total_reserved'),
+        func.coalesce(func.sum(ItemStock.quantity_on_order), 0).label('total_on_order'),
+        func.coalesce(func.sum(ItemStock.quantity_on_hand * ItemStock.last_cost), 0).label('total_value')
+    ).filter(
+        ItemStock.company_id == company_id
+    ).first()
+
+    # Low stock items count (items below reorder point)
+    low_stock_count = db.query(func.count(ItemStock.id)).join(
+        ItemMaster, ItemMaster.id == ItemStock.item_id
+    ).filter(
+        ItemStock.company_id == company_id,
+        ItemStock.quantity_on_hand < ItemMaster.reorder_point,
+        ItemMaster.reorder_point > 0
+    ).scalar() or 0
+
+    # ===== TRANSFER STATISTICS =====
+    transfer_stats = db.query(
+        func.count(ItemTransfer.id).label('total_transfers'),
+        func.sum(case((ItemTransfer.status == 'draft', 1), else_=0)).label('draft'),
+        func.sum(case((ItemTransfer.status == 'pending', 1), else_=0)).label('pending'),
+        func.sum(case((ItemTransfer.status == 'completed', 1), else_=0)).label('completed'),
+        func.sum(case((ItemTransfer.status == 'cancelled', 1), else_=0)).label('cancelled')
+    ).filter(
+        ItemTransfer.company_id == company_id,
+        ItemTransfer.transfer_date >= start_date,
+        ItemTransfer.transfer_date < end_date
+    ).first()
+
+    # ===== WAREHOUSE STATISTICS =====
+    warehouse_stats = db.query(
+        func.count(Warehouse.id).label('total_warehouses'),
+        func.sum(case((Warehouse.is_active == True, 1), else_=0)).label('active_warehouses')
+    ).filter(
+        Warehouse.company_id == company_id
+    ).first()
+
+    # Stock by warehouse
+    stock_by_warehouse = db.query(
+        Warehouse.id,
+        Warehouse.name,
+        func.coalesce(func.sum(ItemStock.quantity_on_hand), 0).label('quantity'),
+        func.coalesce(func.sum(ItemStock.quantity_on_hand * ItemStock.last_cost), 0).label('value')
+    ).outerjoin(
+        ItemStock, ItemStock.warehouse_id == Warehouse.id
+    ).filter(
+        Warehouse.company_id == company_id,
+        Warehouse.is_active == True
+    ).group_by(Warehouse.id, Warehouse.name).all()
+
+    # ===== TRANSACTION ACTIVITY (Last 6 months) =====
+    monthly_trend = []
+    for i in range(5, -1, -1):
+        trend_month = month - i
+        trend_year = year
+        if trend_month <= 0:
+            trend_month += 12
+            trend_year -= 1
+
+        trend_start = datetime(trend_year, trend_month, 1)
+        if trend_month == 12:
+            trend_end = datetime(trend_year + 1, 1, 1)
+        else:
+            trend_end = datetime(trend_year, trend_month + 1, 1)
+
+        # Count invoices and transfers for this month
+        month_invoices = db.query(func.count(ProcessedImage.id)).join(
+            User, User.id == ProcessedImage.user_id
+        ).filter(
+            User.company_id == company_id,
+            ProcessedImage.created_at >= trend_start,
+            ProcessedImage.created_at < trend_end
+        ).scalar() or 0
+
+        month_transfers = db.query(func.count(ItemTransfer.id)).filter(
+            ItemTransfer.company_id == company_id,
+            ItemTransfer.transfer_date >= trend_start,
+            ItemTransfer.transfer_date < trend_end
+        ).scalar() or 0
+
+        # Get ledger transaction value for this month
+        month_ledger = db.query(
+            func.coalesce(func.sum(case(
+                (ItemLedger.transaction_type.in_(['RECEIVE_INVOICE', 'RECEIVE_MANUAL']), ItemLedger.total_value),
+                else_=0
+            )), 0).label('received_value'),
+            func.coalesce(func.sum(case(
+                (ItemLedger.transaction_type.in_(['ISSUE_WORK_ORDER', 'ISSUE_MANUAL']), ItemLedger.total_value),
+                else_=0
+            )), 0).label('issued_value')
+        ).filter(
+            ItemLedger.company_id == company_id,
+            ItemLedger.transaction_date >= trend_start,
+            ItemLedger.transaction_date < trend_end
+        ).first()
+
+        monthly_trend.append({
+            "month": trend_month,
+            "year": trend_year,
+            "monthName": datetime(trend_year, trend_month, 1).strftime("%b"),
+            "invoices": month_invoices,
+            "transfers": month_transfers,
+            "receivedValue": decimal_to_float(month_ledger.received_value) or 0,
+            "issuedValue": decimal_to_float(month_ledger.issued_value) or 0
+        })
+
+    # ===== TOP VENDORS BY INVOICE COUNT =====
+    top_vendors = db.query(
+        Vendor.id,
+        Vendor.name,
+        func.count(ProcessedImage.id).label('invoice_count')
+    ).outerjoin(
+        ProcessedImage, ProcessedImage.vendor_id == Vendor.id
+    ).filter(
+        Vendor.company_id == company_id,
+        Vendor.is_active == True
+    ).group_by(Vendor.id, Vendor.name).order_by(
+        func.count(ProcessedImage.id).desc()
+    ).limit(5).all()
+
+    # ===== TOP ITEMS BY MOVEMENT =====
+    top_items = db.query(
+        ItemMaster.id,
+        ItemMaster.item_number,
+        ItemMaster.description,
+        func.count(ItemLedger.id).label('transaction_count'),
+        func.coalesce(func.sum(func.abs(ItemLedger.quantity)), 0).label('total_movement')
+    ).join(
+        ItemLedger, ItemLedger.item_id == ItemMaster.id
+    ).filter(
+        ItemMaster.company_id == company_id,
+        ItemLedger.transaction_date >= start_date,
+        ItemLedger.transaction_date < end_date
+    ).group_by(ItemMaster.id, ItemMaster.item_number, ItemMaster.description).order_by(
+        func.sum(func.abs(ItemLedger.quantity)).desc()
+    ).limit(5).all()
+
+    return {
+        "month": month,
+        "year": year,
+        "vendors": {
+            "total": vendor_stats.total_vendors or 0,
+            "active": vendor_stats.active_vendors or 0
+        },
+        "invoices": {
+            "total": invoice_stats.total_invoices or 0,
+            "pending": invoice_stats.pending or 0,
+            "completed": invoice_stats.completed or 0,
+            "failed": invoice_stats.failed or 0
+        },
+        "inventory": {
+            "totalItems": item_master_stats.total_items or 0,
+            "activeItems": item_master_stats.active_items or 0,
+            "quantityOnHand": decimal_to_float(stock_stats.total_on_hand) or 0,
+            "quantityReserved": decimal_to_float(stock_stats.total_reserved) or 0,
+            "quantityOnOrder": decimal_to_float(stock_stats.total_on_order) or 0,
+            "totalValue": decimal_to_float(stock_stats.total_value) or 0,
+            "lowStockCount": low_stock_count
+        },
+        "transfers": {
+            "total": transfer_stats.total_transfers or 0,
+            "draft": transfer_stats.draft or 0,
+            "pending": transfer_stats.pending or 0,
+            "completed": transfer_stats.completed or 0,
+            "cancelled": transfer_stats.cancelled or 0
+        },
+        "warehouses": {
+            "total": warehouse_stats.total_warehouses or 0,
+            "active": warehouse_stats.active_warehouses or 0,
+            "stockByWarehouse": [
+                {
+                    "id": row.id,
+                    "name": row.name,
+                    "quantity": decimal_to_float(row.quantity) or 0,
+                    "value": decimal_to_float(row.value) or 0
+                } for row in stock_by_warehouse
+            ]
+        },
+        "monthlyTrend": monthly_trend,
+        "topVendors": [
+            {
+                "id": row.id,
+                "name": row.name,
+                "invoiceCount": row.invoice_count
+            } for row in top_vendors
+        ],
+        "topItems": [
+            {
+                "id": row.id,
+                "itemNumber": row.item_number,
+                "description": row.description[:50] + "..." if len(row.description) > 50 else row.description,
+                "transactionCount": row.transaction_count,
+                "totalMovement": decimal_to_float(row.total_movement) or 0
+            } for row in top_items
+        ]
     }
