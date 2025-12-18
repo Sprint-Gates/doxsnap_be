@@ -2188,3 +2188,67 @@ class TechnicianEvaluation(Base):
     company = relationship("Company", backref="technician_evaluations")
     technician = relationship("Technician", backref="evaluations")
     evaluator = relationship("User", foreign_keys=[evaluated_by], backref="conducted_evaluations")
+
+
+# ============================================================================
+# Net Promoter Score (NPS) Models
+# ============================================================================
+
+class NPSSurvey(Base):
+    """
+    Net Promoter Score Survey for measuring client satisfaction.
+    NPS Score: 0-10 scale
+    - Promoters (9-10): Loyal enthusiasts
+    - Passives (7-8): Satisfied but unenthusiastic
+    - Detractors (0-6): Unhappy customers
+    NPS = % Promoters - % Detractors
+    """
+    __tablename__ = "nps_surveys"
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+    client_id = Column(Integer, ForeignKey("clients.id"), nullable=False)
+
+    # Survey details
+    survey_date = Column(Date, nullable=False)
+    survey_type = Column(String(50), default="general")  # general, post_service, quarterly, annual
+
+    # NPS Score (0-10)
+    score = Column(Integer, nullable=False)  # 0-10 scale
+
+    # Classification (calculated from score)
+    category = Column(String(20), nullable=False)  # promoter, passive, detractor
+
+    # Feedback
+    feedback = Column(Text, nullable=True)  # Open-ended feedback
+    would_recommend_reason = Column(Text, nullable=True)  # Why they would/wouldn't recommend
+
+    # Context - optional link to work order or service
+    work_order_id = Column(Integer, ForeignKey("work_orders.id"), nullable=True)
+    site_id = Column(Integer, ForeignKey("sites.id"), nullable=True)
+
+    # Contact info
+    respondent_name = Column(String(255), nullable=True)
+    respondent_email = Column(String(255), nullable=True)
+    respondent_phone = Column(String(50), nullable=True)
+    respondent_role = Column(String(100), nullable=True)  # e.g., "Facility Manager", "Owner"
+
+    # Follow-up tracking
+    requires_follow_up = Column(Boolean, default=False)
+    follow_up_status = Column(String(50), nullable=True)  # pending, in_progress, completed, not_required
+    follow_up_notes = Column(Text, nullable=True)
+    followed_up_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    followed_up_at = Column(DateTime, nullable=True)
+
+    # Audit fields
+    collected_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    # Relationships
+    company = relationship("Company", backref="nps_surveys")
+    client = relationship("Client", backref="nps_surveys")
+    work_order = relationship("WorkOrder", backref="nps_surveys")
+    site = relationship("Site", backref="nps_surveys")
+    collector = relationship("User", foreign_keys=[collected_by], backref="collected_nps_surveys")
+    follow_up_user = relationship("User", foreign_keys=[followed_up_by], backref="followed_up_nps_surveys")
