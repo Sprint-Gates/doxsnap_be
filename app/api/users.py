@@ -42,7 +42,7 @@ class UserCreate(BaseModel):
     email: EmailStr
     password: str
     name: str
-    role: str = "operator"  # admin, operator, accounting, procurement
+    role: str = "operator"  # admin, operator, accounting, procurement, general_manager
     phone: Optional[str] = None
 
 
@@ -120,7 +120,7 @@ async def create_user(
 ):
     """Create a new user in the company"""
     # Validate role
-    valid_roles = ["admin", "operator", "accounting", "procurement"]
+    valid_roles = ["admin", "operator", "accounting", "procurement", "general_manager"]
     if data.role not in valid_roles:
         raise HTTPException(
             status_code=400,
@@ -177,7 +177,7 @@ async def update_user(
 
     # Validate role if provided
     if data.role:
-        valid_roles = ["admin", "operator", "accounting", "procurement"]
+        valid_roles = ["admin", "operator", "accounting", "procurement", "general_manager"]
         if data.role not in valid_roles:
             raise HTTPException(
                 status_code=400,
