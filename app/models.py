@@ -2129,3 +2129,62 @@ class ConditionReportImage(Base):
     condition_report = relationship("ConditionReport", back_populates="images")
     company = relationship("Company")
     uploader = relationship("User", foreign_keys=[uploaded_by])
+
+
+# ============================================================================
+# Technician Evaluation Models (HR Service)
+# ============================================================================
+
+class TechnicianEvaluation(Base):
+    """
+    Technician Performance Evaluation for HR purposes.
+    Tracks periodic performance assessments of technicians.
+    """
+    __tablename__ = "technician_evaluations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+    technician_id = Column(Integer, ForeignKey("technicians.id"), nullable=False)
+
+    # Evaluation period
+    evaluation_period = Column(String(50), nullable=False)  # monthly, quarterly, semi-annual, annual
+    period_start = Column(Date, nullable=False)
+    period_end = Column(Date, nullable=False)
+
+    # Performance Metrics (1-5 scale)
+    attendance_score = Column(Integer, nullable=True)  # Punctuality and attendance
+    quality_score = Column(Integer, nullable=True)  # Quality of work
+    productivity_score = Column(Integer, nullable=True)  # Work output/efficiency
+    teamwork_score = Column(Integer, nullable=True)  # Team collaboration
+    safety_score = Column(Integer, nullable=True)  # Safety compliance
+    communication_score = Column(Integer, nullable=True)  # Communication skills
+    initiative_score = Column(Integer, nullable=True)  # Proactiveness
+    technical_skills_score = Column(Integer, nullable=True)  # Technical competency
+
+    # Overall assessment
+    overall_score = Column(Numeric(3, 2), nullable=True)  # Calculated average
+    overall_rating = Column(String(20), nullable=True)  # excellent, good, satisfactory, needs_improvement, poor
+
+    # Detailed feedback
+    strengths = Column(Text, nullable=True)
+    areas_for_improvement = Column(Text, nullable=True)
+    goals_for_next_period = Column(Text, nullable=True)
+    evaluator_comments = Column(Text, nullable=True)
+    technician_comments = Column(Text, nullable=True)  # Self-assessment/response
+
+    # Status tracking
+    status = Column(String(50), default="draft")  # draft, submitted, acknowledged, finalized
+
+    # Audit fields
+    evaluated_by = Column(Integer, ForeignKey("users.id"), nullable=False)  # HR/Supervisor who created
+    evaluated_at = Column(DateTime, nullable=True)
+    acknowledged_by_technician = Column(Boolean, default=False)
+    acknowledged_at = Column(DateTime, nullable=True)
+
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    # Relationships
+    company = relationship("Company", backref="technician_evaluations")
+    technician = relationship("Technician", backref="evaluations")
+    evaluator = relationship("User", foreign_keys=[evaluated_by], backref="conducted_evaluations")
