@@ -2032,3 +2032,100 @@ class CalendarTemplate(Base):
     # Relationships
     company = relationship("Company", backref="calendar_templates")
     technician = relationship("Technician", backref="calendar_templates")
+
+
+# ============================================================================
+# Condition Report Models
+# ============================================================================
+
+class ConditionReport(Base):
+    """
+    Condition Report created by HHD users to document issues at client sites.
+    Contains issue description, classification, estimated cost, and images.
+    """
+    __tablename__ = "condition_reports"
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+    client_id = Column(Integer, ForeignKey("clients.id"), nullable=False)
+
+    # Report details
+    report_number = Column(String, nullable=True, index=True)  # Auto-generated: CR-YYYYMMDD-XXX
+    title = Column(String(255), nullable=False)
+    description = Column(Text, nullable=False)
+
+    # Classification
+    issue_class = Column(String(50), nullable=False)  # civil, mechanical, electrical, others
+
+    # Cost estimation
+    estimated_cost = Column(Numeric(12, 2), nullable=True)
+    currency = Column(String(3), default="USD")
+
+    # Location context (optional)
+    site_id = Column(Integer, ForeignKey("sites.id"), nullable=True)
+    building_id = Column(Integer, ForeignKey("buildings.id"), nullable=True)
+    floor_id = Column(Integer, ForeignKey("floors.id"), nullable=True)
+    space_id = Column(Integer, ForeignKey("spaces.id"), nullable=True)
+    location_notes = Column(Text, nullable=True)  # Additional location details
+
+    # Status tracking
+    status = Column(String(50), default="submitted")  # submitted, under_review, approved, rejected, resolved
+
+    # Priority
+    priority = Column(String(20), default="medium")  # low, medium, high, critical
+
+    # Audit fields
+    collected_by = Column(Integer, ForeignKey("users.id"), nullable=False)  # HHD user who created
+    collected_at = Column(DateTime, default=func.now())
+    reviewed_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    reviewed_at = Column(DateTime, nullable=True)
+    review_notes = Column(Text, nullable=True)
+
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    # Relationships
+    company = relationship("Company", backref="condition_reports")
+    client = relationship("Client", backref="condition_reports")
+    site = relationship("Site", backref="condition_reports")
+    building = relationship("Building", backref="condition_reports")
+    floor = relationship("Floor", backref="condition_reports")
+    space = relationship("Space", backref="condition_reports")
+    collector = relationship("User", foreign_keys=[collected_by], backref="collected_condition_reports")
+    reviewer = relationship("User", foreign_keys=[reviewed_by], backref="reviewed_condition_reports")
+    images = relationship("ConditionReportImage", back_populates="condition_report", cascade="all, delete-orphan")
+
+
+class ConditionReportImage(Base):
+    """
+    Images attached to a condition report.
+    Each condition report can have multiple images.
+    """
+    __tablename__ = "condition_report_images"
+
+    id = Column(Integer, primary_key=True, index=True)
+    condition_report_id = Column(Integer, ForeignKey("condition_reports.id", ondelete="CASCADE"), nullable=False)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+
+    # File info
+    filename = Column(String, nullable=False)  # Stored filename (UUID-based)
+    original_filename = Column(String, nullable=False)  # Original uploaded filename
+    file_path = Column(String, nullable=False)  # Full path or S3 key
+    file_size = Column(Integer, nullable=True)  # File size in bytes
+    mime_type = Column(String, nullable=True)  # MIME type (image/jpeg, etc.)
+
+    # Metadata
+    caption = Column(String(500), nullable=True)
+    sort_order = Column(Integer, default=0)
+
+    # Audit
+    uploaded_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    uploaded_at = Column(DateTime, default=func.now())
+
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    # Relationships
+    condition_report = relationship("ConditionReport", back_populates="images")
+    company = relationship("Company")
+    uploader = relationship("User", foreign_keys=[uploaded_by])
