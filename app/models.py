@@ -53,6 +53,20 @@ contract_sites = Table(
     Column('created_at', DateTime, default=func.now())
 )
 
+user_warehouses = Table(
+    "user_warehouses",
+    Base.metadata,
+    Column("user_id", Integer, ForeignKey("users.id"), primary_key=True),
+    Column("warehouse_id", Integer, ForeignKey("warehouses.id"), primary_key=True)
+)
+
+# Secondary table for many-to-many relationship: ExternalUserClient ↔ Sites
+external_user_client_sites = Table(
+    "external_user_client_sites",
+    Base.metadata,
+    Column("external_user_client_id", Integer, ForeignKey("external_user_clients.id"), primary_key=True),
+    Column("site_id", Integer, ForeignKey("sites.id"), primary_key=True)
+)
 
 class Plan(Base):
     """Subscription plans for document management"""
@@ -122,6 +136,7 @@ class Company(Base):
     plan = relationship("Plan", back_populates="companies")
     users = relationship("User", back_populates="company")
     clients = relationship("Client", back_populates="company")
+    external_user_clients = relationship("ExternalUserClient", back_populates="company")
 
 
 class Client(Base):
@@ -152,6 +167,8 @@ class Client(Base):
     # DEPRECATED: branches relationship - use Sites instead
     # branches = relationship("Branch", back_populates="client")
     address_book = relationship("AddressBook", backref="client")
+    external_user_clients = relationship("ExternalUserClient", back_populates="client", cascade="all, delete-orphan"
+    )
 
 
 # DEPRECATED: Branch model - Use Site model instead
@@ -247,7 +264,31 @@ class User(Base):
     # DEPRECATED: Use assigned_sites via operator_sites table instead
     # assigned_branches = relationship("Branch", secondary=operator_branches, back_populates="operators")
     address_book = relationship("AddressBook", foreign_keys=[address_book_id], backref="user_account")
+    external_user_clients = relationship(
+    "ExternalUserClient",
+    back_populates="user",
+    cascade="all, delete-orphan"
+    )
+    warehouses = relationship(
+    "Warehouse",
+    secondary=user_warehouses,
+    back_populates="managers"
+    )
+    role_obj = relationship("Role", back_populates="users")
 
+class ExternalUserClient(Base):
+    __tablename__ = "external_user_clients"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    client_id = Column(Integer, ForeignKey("clients.id"), nullable=False)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+
+    # Relationships
+    user = relationship("User", backref="external_user_clients")
+    client = relationship("Client", backref="external_user_clients")
+    company = relationship("Company", backref="external_user_clients")
+    sites = relationship("Site", secondary=external_user_client_sites, backref="external_user_clients")
 
 class SuperAdmin(Base):
     """Platform super admin for managing all companies and subscriptions"""
@@ -371,6 +412,11 @@ class Warehouse(Base):
     # Relationships
     company = relationship("Company", backref="warehouses")
     business_unit = relationship("BusinessUnit", backref="warehouses")
+    managers = relationship(
+        "User",
+        secondary=user_warehouses,
+        back_populates="warehouses"
+    )
 
 
 class OTPCode(Base):
