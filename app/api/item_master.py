@@ -4,7 +4,7 @@ Manages items, categories, stock levels, transfers, and ledger entries
 """
 from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import and_, or_, func
+from sqlalchemy import and_, or_, func, case
 from pydantic import BaseModel
 from typing import Optional, List
 from datetime import datetime
@@ -2861,4 +2861,353 @@ async def bulk_import_items(
         "skipped": skipped,
         "errors": len(errors),
         "error_details": errors[:10] if errors else []
+    }
+
+
+# ============ Slow Moving / Non-Moving Items ============
+
+@router.get("/item-stock/slow-moving/")
+async def get_slow_moving_items(
+    days_threshold: int = Query(90, description="Items not moved for this many days are slow-moving"),
+    non_moving_days: int = Query(180, description="Items not moved for this many days are non-moving"),
+    include_zero_stock: bool = Query(False, description="Include items with zero stock"),
+    warehouse_id: Optional[int] = Query(None, description="Filter by warehouse"),
+    category_id: Optional[int] = Query(None, description="Filter by category"),
+    search: Optional[str] = Query(None, description="Search in item number or description"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    user_or_hhd=Depends(get_current_user_or_hhd),
+    db: Session = Depends(get_db)
+):
+    """
+    Get slow-moving and non-moving inventory items.
+    - Slow-moving: Items with stock that haven't moved for X days (default 90)
+    - Non-moving: Items with stock that haven't moved for Y days (default 180)
+    """
+    from datetime import timedelta
+
+    company_id = user_or_hhd.company_id
+    today = datetime.utcnow()
+    slow_moving_date = today - timedelta(days=days_threshold)
+    non_moving_date = today - timedelta(days=non_moving_days)
+
+    # Base query - join ItemStock with ItemMaster
+    query = db.query(
+        ItemStock.id,
+        ItemStock.item_id,
+        ItemStock.warehouse_id,
+        ItemStock.quantity_on_hand,
+        ItemStock.quantity_reserved,
+        ItemStock.average_cost,
+        ItemStock.last_cost,
+        ItemStock.last_movement_date,
+        ItemMaster.item_number,
+        ItemMaster.description,
+        ItemMaster.unit,
+        ItemMaster.category_id,
+        Warehouse.name.label('warehouse_name'),
+        ItemCategory.name.label('category_name')
+    ).join(
+        ItemMaster, ItemMaster.id == ItemStock.item_id
+    ).outerjoin(
+        Warehouse, Warehouse.id == ItemStock.warehouse_id
+    ).outerjoin(
+        ItemCategory, ItemCategory.id == ItemMaster.category_id
+    ).filter(
+        ItemStock.company_id == company_id,
+        ItemStock.warehouse_id.isnot(None),  # Only warehouse stock, not HHD
+        ItemMaster.is_active == True
+    )
+
+    # Filter: Only items that haven't moved recently (slow-moving threshold)
+    query = query.filter(
+        or_(
+            ItemStock.last_movement_date.is_(None),
+            ItemStock.last_movement_date < slow_moving_date
+        )
+    )
+
+    # Filter: Include or exclude zero stock items
+    if not include_zero_stock:
+        query = query.filter(ItemStock.quantity_on_hand > 0)
+
+    # Filter by warehouse
+    if warehouse_id:
+        query = query.filter(ItemStock.warehouse_id == warehouse_id)
+
+    # Filter by category
+    if category_id:
+        query = query.filter(ItemMaster.category_id == category_id)
+
+    # Search filter
+    if search:
+        search_term = f"%{search}%"
+        query = query.filter(
+            or_(
+                ItemMaster.item_number.ilike(search_term),
+                ItemMaster.description.ilike(search_term)
+            )
+        )
+
+    # Get total count for pagination
+    total = query.count()
+
+    # Order by last movement date (oldest first), then by value
+    query = query.order_by(
+        ItemStock.last_movement_date.asc().nullsfirst(),
+        (ItemStock.quantity_on_hand * ItemStock.last_cost).desc().nullslast()
+    )
+
+    # Pagination
+    offset = (page - 1) * page_size
+    items = query.offset(offset).limit(page_size).all()
+
+    # Calculate summary statistics
+    summary_query = db.query(
+        func.count(ItemStock.id).label('total_items'),
+        func.coalesce(func.sum(ItemStock.quantity_on_hand), 0).label('total_quantity'),
+        func.coalesce(func.sum(ItemStock.quantity_on_hand * ItemStock.last_cost), 0).label('total_value'),
+        func.sum(
+            case(
+                (or_(ItemStock.last_movement_date.is_(None), ItemStock.last_movement_date < non_moving_date), 1),
+                else_=0
+            )
+        ).label('non_moving_count'),
+        func.sum(
+            case(
+                (and_(
+                    ItemStock.last_movement_date.isnot(None),
+                    ItemStock.last_movement_date >= non_moving_date,
+                    ItemStock.last_movement_date < slow_moving_date
+                ), 1),
+                else_=0
+            )
+        ).label('slow_moving_count')
+    ).join(
+        ItemMaster, ItemMaster.id == ItemStock.item_id
+    ).filter(
+        ItemStock.company_id == company_id,
+        ItemStock.warehouse_id.isnot(None),
+        ItemMaster.is_active == True,
+        or_(
+            ItemStock.last_movement_date.is_(None),
+            ItemStock.last_movement_date < slow_moving_date
+        )
+    )
+
+    if not include_zero_stock:
+        summary_query = summary_query.filter(ItemStock.quantity_on_hand > 0)
+    if warehouse_id:
+        summary_query = summary_query.filter(ItemStock.warehouse_id == warehouse_id)
+    if category_id:
+        summary_query = summary_query.filter(ItemMaster.category_id == category_id)
+
+    summary = summary_query.first()
+
+    # Format results
+    result_items = []
+    for item in items:
+        days_since_movement = None
+        movement_status = "non_moving"
+
+        if item.last_movement_date:
+            days_since_movement = (today - item.last_movement_date).days
+            if days_since_movement >= non_moving_days:
+                movement_status = "non_moving"
+            else:
+                movement_status = "slow_moving"
+        else:
+            movement_status = "non_moving"
+            days_since_movement = None  # Never moved
+
+        stock_value = float(item.quantity_on_hand or 0) * float(item.last_cost or 0)
+
+        result_items.append({
+            "id": item.id,
+            "item_id": item.item_id,
+            "item_number": item.item_number,
+            "description": item.description,
+            "unit": item.unit,
+            "category_id": item.category_id,
+            "category_name": item.category_name,
+            "warehouse_id": item.warehouse_id,
+            "warehouse_name": item.warehouse_name,
+            "quantity_on_hand": float(item.quantity_on_hand or 0),
+            "quantity_reserved": float(item.quantity_reserved or 0),
+            "average_cost": float(item.average_cost or 0),
+            "last_cost": float(item.last_cost or 0),
+            "stock_value": round(stock_value, 2),
+            "last_movement_date": item.last_movement_date.isoformat() if item.last_movement_date else None,
+            "days_since_movement": days_since_movement,
+            "movement_status": movement_status
+        })
+
+    return {
+        "items": result_items,
+        "pagination": {
+            "page": page,
+            "page_size": page_size,
+            "total": total,
+            "total_pages": (total + page_size - 1) // page_size
+        },
+        "summary": {
+            "total_items": summary.total_items or 0,
+            "total_quantity": float(summary.total_quantity or 0),
+            "total_value": round(float(summary.total_value or 0), 2),
+            "non_moving_count": summary.non_moving_count or 0,
+            "slow_moving_count": summary.slow_moving_count or 0
+        },
+        "thresholds": {
+            "slow_moving_days": days_threshold,
+            "non_moving_days": non_moving_days
+        }
+    }
+
+
+@router.get("/item-stock/movement-analysis/")
+async def get_movement_analysis(
+    warehouse_id: Optional[int] = Query(None, description="Filter by warehouse"),
+    user_or_hhd=Depends(get_current_user_or_hhd),
+    db: Session = Depends(get_db)
+):
+    """
+    Get an overview of inventory movement analysis - categorized by movement status.
+    Returns counts and values for each movement category.
+    """
+    from datetime import timedelta
+
+    company_id = user_or_hhd.company_id
+    today = datetime.utcnow()
+
+    # Define thresholds
+    fast_moving_days = 30
+    normal_moving_days = 90
+    slow_moving_days = 180
+
+    fast_date = today - timedelta(days=fast_moving_days)
+    normal_date = today - timedelta(days=normal_moving_days)
+    slow_date = today - timedelta(days=slow_moving_days)
+
+    # Base filter
+    base_filter = [
+        ItemStock.company_id == company_id,
+        ItemStock.warehouse_id.isnot(None),
+        ItemStock.quantity_on_hand > 0,
+        ItemMaster.is_active == True
+    ]
+
+    if warehouse_id:
+        base_filter.append(ItemStock.warehouse_id == warehouse_id)
+
+    # Query for each category
+    def get_category_stats(date_from, date_to=None):
+        query = db.query(
+            func.count(ItemStock.id).label('count'),
+            func.coalesce(func.sum(ItemStock.quantity_on_hand), 0).label('quantity'),
+            func.coalesce(func.sum(ItemStock.quantity_on_hand * ItemStock.last_cost), 0).label('value')
+        ).join(
+            ItemMaster, ItemMaster.id == ItemStock.item_id
+        ).filter(*base_filter)
+
+        if date_from and date_to:
+            query = query.filter(
+                ItemStock.last_movement_date >= date_from,
+                ItemStock.last_movement_date < date_to
+            )
+        elif date_from:
+            query = query.filter(ItemStock.last_movement_date >= date_from)
+        elif date_to:
+            query = query.filter(
+                or_(
+                    ItemStock.last_movement_date.is_(None),
+                    ItemStock.last_movement_date < date_to
+                )
+            )
+
+        return query.first()
+
+    # Non-moving: never moved or > 180 days
+    non_moving = db.query(
+        func.count(ItemStock.id).label('count'),
+        func.coalesce(func.sum(ItemStock.quantity_on_hand), 0).label('quantity'),
+        func.coalesce(func.sum(ItemStock.quantity_on_hand * ItemStock.last_cost), 0).label('value')
+    ).join(
+        ItemMaster, ItemMaster.id == ItemStock.item_id
+    ).filter(
+        *base_filter,
+        or_(
+            ItemStock.last_movement_date.is_(None),
+            ItemStock.last_movement_date < slow_date
+        )
+    ).first()
+
+    # Slow-moving: 90-180 days
+    slow_moving = get_category_stats(slow_date, normal_date)
+
+    # Normal-moving: 30-90 days
+    normal_moving = get_category_stats(normal_date, fast_date)
+
+    # Fast-moving: < 30 days
+    fast_moving = get_category_stats(fast_date, None)
+
+    # Total inventory
+    total = db.query(
+        func.count(ItemStock.id).label('count'),
+        func.coalesce(func.sum(ItemStock.quantity_on_hand), 0).label('quantity'),
+        func.coalesce(func.sum(ItemStock.quantity_on_hand * ItemStock.last_cost), 0).label('value')
+    ).join(
+        ItemMaster, ItemMaster.id == ItemStock.item_id
+    ).filter(*base_filter).first()
+
+    total_value = float(total.value or 0)
+
+    def calc_percentage(val):
+        if total_value == 0:
+            return 0
+        return round((float(val or 0) / total_value) * 100, 1)
+
+    return {
+        "categories": [
+            {
+                "name": "Fast Moving",
+                "description": f"Moved within last {fast_moving_days} days",
+                "days_threshold": fast_moving_days,
+                "count": fast_moving.count or 0,
+                "quantity": float(fast_moving.quantity or 0),
+                "value": round(float(fast_moving.value or 0), 2),
+                "value_percentage": calc_percentage(fast_moving.value)
+            },
+            {
+                "name": "Normal Moving",
+                "description": f"Moved within {fast_moving_days}-{normal_moving_days} days",
+                "days_threshold": normal_moving_days,
+                "count": normal_moving.count or 0,
+                "quantity": float(normal_moving.quantity or 0),
+                "value": round(float(normal_moving.value or 0), 2),
+                "value_percentage": calc_percentage(normal_moving.value)
+            },
+            {
+                "name": "Slow Moving",
+                "description": f"Moved within {normal_moving_days}-{slow_moving_days} days",
+                "days_threshold": slow_moving_days,
+                "count": slow_moving.count or 0,
+                "quantity": float(slow_moving.quantity or 0),
+                "value": round(float(slow_moving.value or 0), 2),
+                "value_percentage": calc_percentage(slow_moving.value)
+            },
+            {
+                "name": "Non-Moving",
+                "description": f"Not moved for over {slow_moving_days} days",
+                "days_threshold": None,
+                "count": non_moving.count or 0,
+                "quantity": float(non_moving.quantity or 0),
+                "value": round(float(non_moving.value or 0), 2),
+                "value_percentage": calc_percentage(non_moving.value)
+            }
+        ],
+        "total": {
+            "count": total.count or 0,
+            "quantity": float(total.quantity or 0),
+            "value": round(float(total.value or 0), 2)
+        }
     }

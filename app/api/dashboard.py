@@ -429,13 +429,13 @@ async def get_procurement_dashboard(
         ItemStock.company_id == company_id
     ).first()
 
-    # Low stock items count (items below reorder point)
+    # Low stock items count (items below minimum stock level)
     low_stock_count = db.query(func.count(ItemStock.id)).join(
         ItemMaster, ItemMaster.id == ItemStock.item_id
     ).filter(
         ItemStock.company_id == company_id,
-        ItemStock.quantity_on_hand < ItemMaster.reorder_point,
-        ItemMaster.reorder_point > 0
+        ItemStock.quantity_on_hand < ItemMaster.minimum_stock_level,
+        ItemMaster.minimum_stock_level > 0
     ).scalar() or 0
 
     # ===== TRANSFER STATISTICS =====
@@ -505,11 +505,11 @@ async def get_procurement_dashboard(
         # Get ledger transaction value for this month
         month_ledger = db.query(
             func.coalesce(func.sum(case(
-                (ItemLedger.transaction_type.in_(['RECEIVE_INVOICE', 'RECEIVE_MANUAL']), ItemLedger.total_value),
+                (ItemLedger.transaction_type.in_(['RECEIVE_INVOICE', 'RECEIVE_MANUAL']), ItemLedger.total_cost),
                 else_=0
             )), 0).label('received_value'),
             func.coalesce(func.sum(case(
-                (ItemLedger.transaction_type.in_(['ISSUE_WORK_ORDER', 'ISSUE_MANUAL']), ItemLedger.total_value),
+                (ItemLedger.transaction_type.in_(['ISSUE_WORK_ORDER', 'ISSUE_MANUAL']), ItemLedger.total_cost),
                 else_=0
             )), 0).label('issued_value')
         ).filter(
