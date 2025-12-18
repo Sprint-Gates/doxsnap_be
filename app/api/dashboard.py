@@ -11,7 +11,7 @@ from decimal import Decimal
 from app.database import get_db
 from app.models import (
     User, WorkOrder, Technician, WorkOrderTimeEntry, Branch,
-    work_order_technicians
+    work_order_technicians, WorkOrderSparePart, Contract, Client
 )
 from app.api.auth import get_current_user
 
@@ -146,4 +146,221 @@ async def get_dashboard_stats(
             "amount": decimal_to_float(billable_stats.amount) or 0
         },
         "technicianUtilization": technician_utilization
+    }
+
+
+@router.get("/dashboard/accounting")
+async def get_accounting_dashboard(
+    month: int = Query(..., ge=1, le=12),
+    year: int = Query(..., ge=2020, le=2100),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get accounting dashboard statistics for a specific month/year"""
+    if not user.company_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No company associated")
+
+    company_id = user.company_id
+
+    # Build date range for the month
+    start_date = datetime(year, month, 1)
+    if month == 12:
+        end_date = datetime(year + 1, 1, 1)
+    else:
+        end_date = datetime(year, month + 1, 1)
+
+    # ===== REVENUE METRICS =====
+    # Billable work orders by status
+    billable_stats = db.query(
+        func.count(WorkOrder.id).label('total_billable'),
+        func.coalesce(func.sum(WorkOrder.billable_amount), 0).label('total_amount'),
+        func.sum(case((WorkOrder.billing_status == 'pending', 1), else_=0)).label('pending_count'),
+        func.sum(case((WorkOrder.billing_status == 'pending', WorkOrder.billable_amount), else_=0)).label('pending_amount'),
+        func.sum(case((WorkOrder.billing_status == 'invoiced', 1), else_=0)).label('invoiced_count'),
+        func.sum(case((WorkOrder.billing_status == 'invoiced', WorkOrder.billable_amount), else_=0)).label('invoiced_amount'),
+        func.sum(case((WorkOrder.billing_status == 'paid', 1), else_=0)).label('paid_count'),
+        func.sum(case((WorkOrder.billing_status == 'paid', WorkOrder.billable_amount), else_=0)).label('paid_amount')
+    ).filter(
+        WorkOrder.company_id == company_id,
+        WorkOrder.is_billable == True,
+        WorkOrder.created_at >= start_date,
+        WorkOrder.created_at < end_date
+    ).first()
+
+    # ===== COST METRICS =====
+    cost_stats = db.query(
+        func.coalesce(func.sum(WorkOrder.actual_labor_cost), 0).label('total_labor_cost'),
+        func.coalesce(func.sum(WorkOrder.actual_parts_cost), 0).label('total_parts_cost'),
+        func.coalesce(func.sum(WorkOrder.actual_total_cost), 0).label('total_cost'),
+        func.coalesce(func.sum(WorkOrder.estimated_total_cost), 0).label('estimated_cost')
+    ).filter(
+        WorkOrder.company_id == company_id,
+        WorkOrder.created_at >= start_date,
+        WorkOrder.created_at < end_date
+    ).first()
+
+    # ===== LABOR HOURS & OVERTIME =====
+    labor_stats = db.query(
+        func.coalesce(func.sum(WorkOrderTimeEntry.hours_worked), 0).label('total_hours'),
+        func.sum(case((WorkOrderTimeEntry.is_overtime == True, WorkOrderTimeEntry.hours_worked), else_=0)).label('overtime_hours'),
+        func.coalesce(func.sum(WorkOrderTimeEntry.total_cost), 0).label('labor_cost_from_entries')
+    ).join(
+        WorkOrder, WorkOrder.id == WorkOrderTimeEntry.work_order_id
+    ).filter(
+        WorkOrder.company_id == company_id,
+        WorkOrderTimeEntry.start_time >= start_date,
+        WorkOrderTimeEntry.start_time < end_date
+    ).first()
+
+    # ===== PARTS COST =====
+    parts_stats = db.query(
+        func.coalesce(func.sum(WorkOrderSparePart.total_cost), 0).label('parts_cost'),
+        func.coalesce(func.sum(WorkOrderSparePart.total_price), 0).label('parts_revenue'),
+        func.count(WorkOrderSparePart.id).label('parts_issued')
+    ).join(
+        WorkOrder, WorkOrder.id == WorkOrderSparePart.work_order_id
+    ).filter(
+        WorkOrder.company_id == company_id,
+        WorkOrder.created_at >= start_date,
+        WorkOrder.created_at < end_date
+    ).first()
+
+    # ===== REVENUE BY CLIENT (TOP 5) =====
+    revenue_by_client = db.query(
+        Client.id,
+        Client.name,
+        func.count(WorkOrder.id).label('work_order_count'),
+        func.coalesce(func.sum(WorkOrder.billable_amount), 0).label('total_revenue')
+    ).join(
+        Branch, Branch.id == WorkOrder.branch_id
+    ).join(
+        Client, Client.id == Branch.client_id
+    ).filter(
+        WorkOrder.company_id == company_id,
+        WorkOrder.is_billable == True,
+        WorkOrder.created_at >= start_date,
+        WorkOrder.created_at < end_date
+    ).group_by(Client.id, Client.name).order_by(
+        func.sum(WorkOrder.billable_amount).desc()
+    ).limit(5).all()
+
+    # ===== MONTHLY TREND (Last 6 months) =====
+    monthly_trend = []
+    for i in range(5, -1, -1):
+        trend_month = month - i
+        trend_year = year
+        if trend_month <= 0:
+            trend_month += 12
+            trend_year -= 1
+
+        trend_start = datetime(trend_year, trend_month, 1)
+        if trend_month == 12:
+            trend_end = datetime(trend_year + 1, 1, 1)
+        else:
+            trend_end = datetime(trend_year, trend_month + 1, 1)
+
+        trend_stats = db.query(
+            func.coalesce(func.sum(WorkOrder.billable_amount), 0).label('revenue'),
+            func.coalesce(func.sum(WorkOrder.actual_total_cost), 0).label('cost')
+        ).filter(
+            WorkOrder.company_id == company_id,
+            WorkOrder.created_at >= trend_start,
+            WorkOrder.created_at < trend_end
+        ).first()
+
+        monthly_trend.append({
+            "month": trend_month,
+            "year": trend_year,
+            "monthName": datetime(trend_year, trend_month, 1).strftime("%b"),
+            "revenue": decimal_to_float(trend_stats.revenue) or 0,
+            "cost": decimal_to_float(trend_stats.cost) or 0
+        })
+
+    # ===== ACTIVE CONTRACTS VALUE =====
+    contracts_stats = db.query(
+        func.count(Contract.id).label('active_contracts'),
+        func.coalesce(func.sum(Contract.contract_value), 0).label('total_contract_value'),
+        func.coalesce(func.sum(Contract.budget), 0).label('total_budget')
+    ).filter(
+        Contract.company_id == company_id,
+        Contract.status == 'active'
+    ).first()
+
+    # ===== WORK ORDER STATUS BREAKDOWN =====
+    wo_status_stats = db.query(
+        WorkOrder.status,
+        func.count(WorkOrder.id).label('count'),
+        func.coalesce(func.sum(WorkOrder.billable_amount), 0).label('amount')
+    ).filter(
+        WorkOrder.company_id == company_id,
+        WorkOrder.created_at >= start_date,
+        WorkOrder.created_at < end_date
+    ).group_by(WorkOrder.status).all()
+
+    work_order_breakdown = {
+        row.status: {
+            "count": row.count,
+            "amount": decimal_to_float(row.amount) or 0
+        } for row in wo_status_stats
+    }
+
+    # Calculate profit margin
+    total_revenue = decimal_to_float(billable_stats.total_amount) or 0
+    total_cost = decimal_to_float(cost_stats.total_cost) or 0
+    profit = total_revenue - total_cost
+    profit_margin = (profit / total_revenue * 100) if total_revenue > 0 else 0
+
+    return {
+        "month": month,
+        "year": year,
+        "revenue": {
+            "total": decimal_to_float(billable_stats.total_amount) or 0,
+            "pending": {
+                "count": billable_stats.pending_count or 0,
+                "amount": decimal_to_float(billable_stats.pending_amount) or 0
+            },
+            "invoiced": {
+                "count": billable_stats.invoiced_count or 0,
+                "amount": decimal_to_float(billable_stats.invoiced_amount) or 0
+            },
+            "paid": {
+                "count": billable_stats.paid_count or 0,
+                "amount": decimal_to_float(billable_stats.paid_amount) or 0
+            }
+        },
+        "costs": {
+            "labor": decimal_to_float(cost_stats.total_labor_cost) or 0,
+            "parts": decimal_to_float(cost_stats.total_parts_cost) or 0,
+            "total": total_cost,
+            "estimated": decimal_to_float(cost_stats.estimated_cost) or 0
+        },
+        "labor": {
+            "totalHours": decimal_to_float(labor_stats.total_hours) or 0,
+            "overtimeHours": decimal_to_float(labor_stats.overtime_hours) or 0,
+            "laborCost": decimal_to_float(labor_stats.labor_cost_from_entries) or 0
+        },
+        "parts": {
+            "cost": decimal_to_float(parts_stats.parts_cost) or 0,
+            "revenue": decimal_to_float(parts_stats.parts_revenue) or 0,
+            "itemsIssued": parts_stats.parts_issued or 0
+        },
+        "profit": {
+            "amount": round(profit, 2),
+            "margin": round(profit_margin, 1)
+        },
+        "topClients": [
+            {
+                "id": row.id,
+                "name": row.name,
+                "workOrderCount": row.work_order_count,
+                "revenue": decimal_to_float(row.total_revenue) or 0
+            } for row in revenue_by_client
+        ],
+        "monthlyTrend": monthly_trend,
+        "contracts": {
+            "activeCount": contracts_stats.active_contracts or 0,
+            "totalValue": decimal_to_float(contracts_stats.total_contract_value) or 0,
+            "totalBudget": decimal_to_float(contracts_stats.total_budget) or 0
+        },
+        "workOrderBreakdown": work_order_breakdown
     }
