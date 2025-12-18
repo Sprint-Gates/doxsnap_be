@@ -266,6 +266,49 @@ async def get_condition_reports(
     return [report_to_response(r) for r in reports]
 
 
+@router.get("/stats/summary")
+async def get_condition_reports_stats(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    client_id: Optional[int] = Query(None, description="Filter by client")
+):
+    """Get summary statistics for condition reports"""
+    base_query = db.query(ConditionReport).filter(
+        ConditionReport.company_id == current_user.company_id
+    )
+
+    if client_id:
+        base_query = base_query.filter(ConditionReport.client_id == client_id)
+
+    # Count by status
+    status_counts = {}
+    for s in VALID_STATUSES:
+        status_counts[s] = base_query.filter(ConditionReport.status == s).count()
+
+    # Count by issue class
+    class_counts = {}
+    for c in VALID_ISSUE_CLASSES:
+        class_counts[c] = base_query.filter(ConditionReport.issue_class == c).count()
+
+    # Count by priority
+    priority_counts = {}
+    for p in VALID_PRIORITIES:
+        priority_counts[p] = base_query.filter(ConditionReport.priority == p).count()
+
+    # Total estimated cost
+    total_cost = base_query.with_entities(
+        func.sum(ConditionReport.estimated_cost)
+    ).scalar() or 0
+
+    return {
+        "total": base_query.count(),
+        "by_status": status_counts,
+        "by_class": class_counts,
+        "by_priority": priority_counts,
+        "total_estimated_cost": float(total_cost)
+    }
+
+
 @router.get("/{report_id}", response_model=ConditionReportResponse)
 async def get_condition_report(
     report_id: int,
@@ -727,48 +770,3 @@ async def delete_condition_report_image(
     return {"success": True, "message": "Image deleted"}
 
 
-# ============================================================================
-# Stats Endpoint
-# ============================================================================
-
-@router.get("/stats/summary")
-async def get_condition_reports_stats(
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-    client_id: Optional[int] = Query(None, description="Filter by client")
-):
-    """Get summary statistics for condition reports"""
-    base_query = db.query(ConditionReport).filter(
-        ConditionReport.company_id == current_user.company_id
-    )
-
-    if client_id:
-        base_query = base_query.filter(ConditionReport.client_id == client_id)
-
-    # Count by status
-    status_counts = {}
-    for s in VALID_STATUSES:
-        status_counts[s] = base_query.filter(ConditionReport.status == s).count()
-
-    # Count by issue class
-    class_counts = {}
-    for c in VALID_ISSUE_CLASSES:
-        class_counts[c] = base_query.filter(ConditionReport.issue_class == c).count()
-
-    # Count by priority
-    priority_counts = {}
-    for p in VALID_PRIORITIES:
-        priority_counts[p] = base_query.filter(ConditionReport.priority == p).count()
-
-    # Total estimated cost
-    total_cost = base_query.with_entities(
-        func.sum(ConditionReport.estimated_cost)
-    ).scalar() or 0
-
-    return {
-        "total": base_query.count(),
-        "by_status": status_counts,
-        "by_class": class_counts,
-        "by_priority": priority_counts,
-        "total_estimated_cost": float(total_cost)
-    }
