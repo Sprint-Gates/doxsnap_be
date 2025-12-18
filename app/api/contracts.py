@@ -9,7 +9,7 @@ from app.database import get_db
 from app.models import (
     Contract, ContractScope, Scope, Site, Client, User, contract_sites,
     WorkOrder, WorkOrderTimeEntry, WorkOrderSparePart, Equipment, Building, Block, Floor, Room, Unit,
-    Technician
+    Technician, PettyCashTransaction
 )
 from app.utils.security import verify_token
 from app.schemas import (
@@ -1011,6 +1011,23 @@ async def get_contract_cost_center(
             "total_cost": site_labor_cost + site_parts_cost
         })
 
+    # Get petty cash transactions linked to this contract
+    petty_cash_stats = db.query(
+        func.count(PettyCashTransaction.id).label('transaction_count'),
+        func.coalesce(func.sum(PettyCashTransaction.amount), 0).label('total_amount')
+    ).filter(
+        PettyCashTransaction.company_id == current_user.company_id,
+        PettyCashTransaction.contract_id == contract_id,
+        PettyCashTransaction.status == 'approved'
+    ).first()
+
+    petty_cash_cost = decimal_to_float(petty_cash_stats.total_amount) if petty_cash_stats else 0
+
+    # Update total cost to include petty cash
+    total_cost_with_petty = total_cost + petty_cash_cost
+    budget_remaining_with_petty = (budget - total_cost_with_petty) if budget else None
+    budget_used_percent_with_petty = round((total_cost_with_petty / budget * 100), 1) if budget and budget > 0 else None
+
     return {
         "contract": {
             "id": contract.id,
@@ -1031,11 +1048,16 @@ async def get_contract_cost_center(
             "total_labor_hours": decimal_to_float(labor_stats.total_hours) if labor_stats else 0,
             "labor_cost": total_labor_cost,
             "parts_cost": total_parts_cost,
-            "total_cost": total_cost,
+            "petty_cash_cost": petty_cash_cost,
+            "total_cost": total_cost_with_petty,
             "billable_amount": total_billable_amount,
-            "budget_used": total_cost,
-            "budget_remaining": budget_remaining,
-            "budget_used_percent": budget_used_percent
+            "budget_used": total_cost_with_petty,
+            "budget_remaining": budget_remaining_with_petty,
+            "budget_used_percent": budget_used_percent_with_petty
+        },
+        "petty_cash": {
+            "transaction_count": petty_cash_stats.transaction_count or 0 if petty_cash_stats else 0,
+            "total_amount": petty_cash_cost
         },
         "sites_breakdown": sites_breakdown,
         "labor_by_technician": labor_by_technician,

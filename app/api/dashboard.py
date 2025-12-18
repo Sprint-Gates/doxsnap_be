@@ -13,7 +13,7 @@ from app.models import (
     User, WorkOrder, Technician, WorkOrderTimeEntry, Branch,
     work_order_technicians, WorkOrderSparePart, Contract, Client,
     Vendor, ProcessedImage, ItemMaster, ItemStock, ItemTransfer,
-    ItemLedger, Warehouse
+    ItemLedger, Warehouse, PettyCashFund, PettyCashTransaction
 )
 from app.api.auth import get_current_user
 
@@ -312,6 +312,40 @@ async def get_accounting_dashboard(
     profit = total_revenue - total_cost
     profit_margin = (profit / total_revenue * 100) if total_revenue > 0 else 0
 
+    # ===== PETTY CASH STATISTICS =====
+    petty_cash_stats = db.query(
+        func.count(PettyCashTransaction.id).label('total_transactions'),
+        func.coalesce(func.sum(case(
+            (PettyCashTransaction.status == 'approved', PettyCashTransaction.amount),
+            else_=0
+        )), 0).label('total_spent'),
+        func.sum(case((PettyCashTransaction.status == 'pending', 1), else_=0)).label('pending_count'),
+        func.coalesce(func.sum(case(
+            (PettyCashTransaction.status == 'pending', PettyCashTransaction.amount),
+            else_=0
+        )), 0).label('pending_amount')
+    ).filter(
+        PettyCashTransaction.company_id == company_id,
+        PettyCashTransaction.transaction_date >= start_date,
+        PettyCashTransaction.transaction_date < end_date
+    ).first()
+
+    # Get total funds allocated
+    fund_stats = db.query(
+        func.count(PettyCashFund.id).label('total_funds'),
+        func.sum(case((PettyCashFund.status == 'active', 1), else_=0)).label('active_funds'),
+        func.coalesce(func.sum(case(
+            (PettyCashFund.status == 'active', PettyCashFund.fund_limit),
+            else_=0
+        )), 0).label('total_allocated'),
+        func.coalesce(func.sum(case(
+            (PettyCashFund.status == 'active', PettyCashFund.current_balance),
+            else_=0
+        )), 0).label('total_balance')
+    ).filter(
+        PettyCashFund.company_id == company_id
+    ).first()
+
     return {
         "month": month,
         "year": year,
@@ -364,7 +398,16 @@ async def get_accounting_dashboard(
             "totalValue": decimal_to_float(contracts_stats.total_contract_value) or 0,
             "totalBudget": decimal_to_float(contracts_stats.total_budget) or 0
         },
-        "workOrderBreakdown": work_order_breakdown
+        "workOrderBreakdown": work_order_breakdown,
+        "pettyCash": {
+            "totalTransactions": petty_cash_stats.total_transactions or 0,
+            "totalSpent": decimal_to_float(petty_cash_stats.total_spent) or 0,
+            "pendingCount": petty_cash_stats.pending_count or 0,
+            "pendingAmount": decimal_to_float(petty_cash_stats.pending_amount) or 0,
+            "activeFunds": fund_stats.active_funds or 0,
+            "totalAllocated": decimal_to_float(fund_stats.total_allocated) or 0,
+            "totalBalance": decimal_to_float(fund_stats.total_balance) or 0
+        }
     }
 
 

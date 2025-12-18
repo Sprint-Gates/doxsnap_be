@@ -2252,3 +2252,174 @@ class NPSSurvey(Base):
     site = relationship("Site", backref="nps_surveys")
     collector = relationship("User", foreign_keys=[collected_by], backref="collected_nps_surveys")
     follow_up_user = relationship("User", foreign_keys=[followed_up_by], backref="followed_up_nps_surveys")
+
+
+# ============================================================================
+# Petty Cash Models
+# ============================================================================
+
+class PettyCashFund(Base):
+    """
+    Petty Cash Fund - Allocated fund for each technician.
+    Tracks fund limit, current balance, and replenishment history.
+    Each technician can have one active petty cash fund.
+    """
+    __tablename__ = "petty_cash_funds"
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+    technician_id = Column(Integer, ForeignKey("technicians.id"), nullable=False)
+
+    # Fund details
+    fund_limit = Column(Numeric(12, 2), nullable=False, default=500.00)  # Maximum allocated amount
+    current_balance = Column(Numeric(12, 2), nullable=False, default=0)  # Current available balance
+    currency = Column(String(3), default="USD")
+
+    # Status
+    status = Column(String(20), default="active")  # active, suspended, closed
+
+    # Thresholds for approval workflow
+    auto_approve_threshold = Column(Numeric(12, 2), default=50.00)  # Transactions below this are auto-approved
+
+    # Audit
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    # Relationships
+    company = relationship("Company", backref="petty_cash_funds")
+    technician = relationship("Technician", backref=backref("petty_cash_fund", uselist=False))
+    creator = relationship("User", foreign_keys=[created_by], backref="created_petty_cash_funds")
+    transactions = relationship("PettyCashTransaction", back_populates="fund", cascade="all, delete-orphan")
+    replenishments = relationship("PettyCashReplenishment", back_populates="fund", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        UniqueConstraint('technician_id', name='uq_technician_petty_cash_fund'),
+    )
+
+
+class PettyCashTransaction(Base):
+    """
+    Petty Cash Transaction - Individual expense entry.
+    Tracks expense details, receipt images, and approval status.
+    """
+    __tablename__ = "petty_cash_transactions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+    fund_id = Column(Integer, ForeignKey("petty_cash_funds.id"), nullable=False)
+
+    # Transaction identification
+    transaction_number = Column(String(50), nullable=False, index=True)  # Auto-generated: PCT-YYYYMMDD-XXX
+    transaction_date = Column(DateTime, nullable=False, default=func.now())
+
+    # Expense details
+    amount = Column(Numeric(12, 2), nullable=False)
+    currency = Column(String(3), default="USD")
+    description = Column(String(500), nullable=False)
+    category = Column(String(50), nullable=True)  # supplies, tools, transport, meals, materials, services, other
+    merchant_name = Column(String(200), nullable=True)
+
+    # Optional linking to work order/contract for cost tracking
+    work_order_id = Column(Integer, ForeignKey("work_orders.id"), nullable=True)
+    contract_id = Column(Integer, ForeignKey("contracts.id"), nullable=True)
+
+    # Approval workflow
+    status = Column(String(20), default="pending")  # pending, approved, rejected, reimbursed
+    auto_approved = Column(Boolean, default=False)  # True if below threshold
+
+    # Approval details
+    approved_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    approved_at = Column(DateTime, nullable=True)
+    rejection_reason = Column(Text, nullable=True)
+
+    # Notes
+    notes = Column(Text, nullable=True)
+
+    # Balance tracking
+    balance_before = Column(Numeric(12, 2), nullable=True)
+    balance_after = Column(Numeric(12, 2), nullable=True)
+
+    # Audit
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=False)  # Technician who created
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    # Relationships
+    company = relationship("Company", backref="petty_cash_transactions")
+    fund = relationship("PettyCashFund", back_populates="transactions")
+    work_order = relationship("WorkOrder", backref="petty_cash_transactions")
+    contract = relationship("Contract", backref="petty_cash_transactions")
+    approver = relationship("User", foreign_keys=[approved_by], backref="approved_petty_cash_transactions")
+    creator = relationship("User", foreign_keys=[created_by], backref="created_petty_cash_transactions")
+    receipts = relationship("PettyCashReceipt", back_populates="transaction", cascade="all, delete-orphan")
+
+
+class PettyCashReceipt(Base):
+    """
+    Receipt images attached to petty cash transactions.
+    """
+    __tablename__ = "petty_cash_receipts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    transaction_id = Column(Integer, ForeignKey("petty_cash_transactions.id", ondelete="CASCADE"), nullable=False)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+
+    # File info
+    filename = Column(String, nullable=False)  # Stored filename (UUID-based)
+    original_filename = Column(String, nullable=False)  # Original uploaded filename
+    file_path = Column(String, nullable=False)  # Full path or S3 key
+    file_size = Column(Integer, nullable=True)  # File size in bytes
+    mime_type = Column(String, nullable=True)  # MIME type (image/jpeg, etc.)
+
+    # Metadata
+    caption = Column(String(500), nullable=True)
+
+    # Audit
+    uploaded_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    uploaded_at = Column(DateTime, default=func.now())
+
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    # Relationships
+    transaction = relationship("PettyCashTransaction", back_populates="receipts")
+    company = relationship("Company", backref="petty_cash_receipts")
+    uploader = relationship("User", foreign_keys=[uploaded_by], backref="uploaded_petty_cash_receipts")
+
+
+class PettyCashReplenishment(Base):
+    """
+    Petty Cash Replenishment - Records when funds are replenished.
+    """
+    __tablename__ = "petty_cash_replenishments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+    fund_id = Column(Integer, ForeignKey("petty_cash_funds.id"), nullable=False)
+
+    # Replenishment details
+    replenishment_number = Column(String(50), nullable=False, index=True)  # Auto-generated: PCR-YYYYMMDD-XXX
+    replenishment_date = Column(DateTime, nullable=False, default=func.now())
+    amount = Column(Numeric(12, 2), nullable=False)
+    currency = Column(String(3), default="USD")
+
+    # Method (for reconciliation)
+    method = Column(String(50), nullable=True)  # cash, transfer, check
+    reference_number = Column(String(100), nullable=True)  # Check number, transfer reference
+
+    # Balance tracking
+    balance_before = Column(Numeric(12, 2), nullable=True)
+    balance_after = Column(Numeric(12, 2), nullable=True)
+
+    # Notes
+    notes = Column(Text, nullable=True)
+
+    # Audit
+    processed_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    created_at = Column(DateTime, default=func.now())
+
+    # Relationships
+    company = relationship("Company", backref="petty_cash_replenishments")
+    fund = relationship("PettyCashFund", back_populates="replenishments")
+    processor = relationship("User", foreign_keys=[processed_by], backref="processed_petty_cash_replenishments")
