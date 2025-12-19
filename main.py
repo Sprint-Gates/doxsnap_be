@@ -5,7 +5,7 @@ import os
 import logging
 import google.generativeai as genai
 
-from app.api import auth, images, otp, admin, document_types, technician_site_shifts, vendors, plans, companies, clients, branches, projects, operators, technicians, handheld_devices, assets, attendance, work_orders, warehouses, pm_checklists, pm_work_orders, dashboard, item_master, cycle_count, dummy, hhd_auth, users, sites, contracts, tickets, calendar, condition_reports, technician_evaluations, nps, petty_cash
+from app.api import auth, images, otp, admin, document_types, technician_site_shifts, vendors, plans, companies, clients, branches, projects, operators, technicians, handheld_devices, assets, attendance, work_orders, warehouses, pm_checklists, pm_work_orders, dashboard, item_master, cycle_count, dummy, hhd_auth, users, sites, contracts, tickets, calendar, condition_reports, technician_evaluations, nps, petty_cash, docs
 from app.database import engine
 from app.models import Base, User, ProcessedImage, DocumentType, Vendor, Warehouse, Plan, Company, Client, Branch, Project, Technician, HandHeldDevice, Floor, Room, Equipment, SubEquipment, TechnicianAttendance, SparePart, WorkOrder, WorkOrderSparePart, WorkOrderTimeEntry, PMSchedule, ItemCategory, ItemMaster, ItemStock, ItemLedger, ItemTransfer, ItemTransferLine, InvoiceItem, CycleCount, CycleCountItem, RefreshToken, Site, Building, Space, Scope, Contract, ContractScope, Ticket, CalendarSlot, WorkOrderSlotAssignment, CalendarTemplate
 from app.config import settings
@@ -116,6 +116,7 @@ app.include_router(condition_reports.router, prefix="/api/condition-reports", ta
 app.include_router(technician_evaluations.router, prefix="/api/technician-evaluations", tags=["Technician Evaluations"])
 app.include_router(nps.router, prefix="/api/nps", tags=["Net Promoter Score"])
 app.include_router(petty_cash.router, prefix="/api/petty-cash", tags=["Petty Cash"])
+app.include_router(docs.router, prefix="/api/docs", tags=["Documentation"])
 
 @app.get("/")
 async def root():

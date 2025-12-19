@@ -234,11 +234,11 @@ def process_invoice_line_items(
     Returns summary of processed items including items needing manual review.
     """
     if not structured_data:
-        return {"processed": 0, "matched": 0, "received": 0, "errors": [], "needs_review": []}
+        return {"processed": 0, "matched": 0, "received": 0, "errors": [], "needs_review": [], "warnings": []}
 
     line_items = structured_data.get("line_items", [])
     if not line_items:
-        return {"processed": 0, "matched": 0, "received": 0, "errors": [], "needs_review": []}
+        return {"processed": 0, "matched": 0, "received": 0, "errors": [], "needs_review": [], "warnings": []}
 
     # Get main warehouse for auto-receiving
     main_warehouse = db.query(Warehouse).filter(
@@ -251,7 +251,15 @@ def process_invoice_line_items(
     matched_count = 0
     received_count = 0
     errors = []
+    warnings = []
     needs_review = []  # Items that need manual linking
+
+    # Check if main warehouse is configured
+    if not main_warehouse:
+        warnings.append({
+            "type": "no_main_warehouse",
+            "message": "No main warehouse configured. Items will be matched but not auto-received to inventory. Please configure a main warehouse in Settings > Warehouses to enable automatic inventory updates."
+        })
 
     for idx, line_item in enumerate(line_items):
         try:
@@ -499,6 +507,7 @@ def process_invoice_line_items(
         "received": received_count,
         "main_warehouse": main_warehouse.name if main_warehouse else None,
         "needs_review": needs_review,  # Items needing manual linking
+        "warnings": warnings,
         "errors": errors[:10]  # Return first 10 errors
     }
 
@@ -602,7 +611,8 @@ async def get_all_invoices(
 ):
     """Get all processed invoices for the admin's company"""
 
-    from app.models import ProcessedImage, User as UserModel
+    from app.models import ProcessedImage, User as UserModel, InvoiceItem
+    from sqlalchemy import func
     import json
 
     # Filter invoices to only show those from users in the same company
@@ -616,7 +626,22 @@ async def get_all_invoices(
         query = query.filter(ProcessedImage.user_id == admin_user.id)
 
     processed_images = query.all()
-    
+
+    # Get unlinked items count for all invoices in one query
+    unlinked_counts = {}
+    if processed_images:
+        image_ids = [img.id for img in processed_images]
+        unlinked_query = db.query(
+            InvoiceItem.invoice_id,
+            func.count(InvoiceItem.id).label('count')
+        ).filter(
+            InvoiceItem.invoice_id.in_(image_ids),
+            InvoiceItem.item_id == None  # Unlinked items
+        ).group_by(InvoiceItem.invoice_id).all()
+
+        for invoice_id, count in unlinked_query:
+            unlinked_counts[invoice_id] = count
+
     invoices = []
     for image in processed_images:
         # Parse structured data from database if available, otherwise use fallback
@@ -668,6 +693,7 @@ async def get_all_invoices(
             "user_email": image.user.email if image.user else "unknown@example.com",
             "original_filename": image.original_filename or f"invoice_{image.id}.jpg",
             "document_type": getattr(image, 'document_type', 'invoice'),
+            "invoice_category": getattr(image, 'invoice_category', None),
             "created_at": image.created_at.isoformat() if image.created_at else "",
             "processing_method": getattr(image, 'processing_method', None) or 'STANDARD',
             "extraction_confidence": getattr(image, 'extraction_confidence', None) or 0.0,
@@ -675,7 +701,8 @@ async def get_all_invoices(
             "ocr_stats": {
                 "words_extracted": getattr(image, 'ocr_extracted_words', None) or 0,
                 "average_confidence": getattr(image, 'ocr_average_confidence', None) or 0.0
-            }
+            },
+            "unlinked_items_count": unlinked_counts.get(image.id, 0)
         }
         invoices.append(invoice_data)
     
@@ -688,8 +715,8 @@ async def get_admin_stats(
 ):
     """Get admin statistics for the admin's company"""
 
-    from app.models import ProcessedImage, User as UserModel
-    from sqlalchemy import func
+    from app.models import ProcessedImage, User as UserModel, InvoiceItem
+    from sqlalchemy import func, and_
     from datetime import datetime, timedelta
 
     # Build base queries filtered by company
@@ -709,6 +736,19 @@ async def get_admin_stats(
     total_invoices = invoice_query.count()
     total_users = user_query.count()
 
+    # Count spare parts invoices with unlinked items
+    spare_parts_query = invoice_query.filter(ProcessedImage.invoice_category == 'spare_parts')
+    spare_parts_ids = [img.id for img in spare_parts_query.all()]
+
+    unlinked_invoices_count = 0
+    if spare_parts_ids:
+        # Get invoices that have at least one unlinked item
+        invoices_with_unlinked = db.query(InvoiceItem.invoice_id).filter(
+            InvoiceItem.invoice_id.in_(spare_parts_ids),
+            InvoiceItem.item_id == None
+        ).distinct().count()
+        unlinked_invoices_count = invoices_with_unlinked
+
     # Get processing methods distribution (mock for now)
     processing_methods = {
         "gemini": max(1, int(total_invoices * 0.6)) if total_invoices > 0 else 0,
@@ -726,6 +766,7 @@ async def get_admin_stats(
     return {
         "total_invoices": total_invoices,
         "total_users": total_users,
+        "unlinked_invoices_count": unlinked_invoices_count,
         "processing_methods": processing_methods,
         "recent_activity": recent_activity
     }
