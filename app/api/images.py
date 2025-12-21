@@ -236,6 +236,160 @@ async def upload_image(
         )
 
 
+# Pydantic models for manual document creation
+from pydantic import BaseModel
+from typing import Optional, List
+from decimal import Decimal
+
+class ManualLineItem(BaseModel):
+    """Line item for manual document entry"""
+    description: str
+    item_number: Optional[str] = None
+    quantity: Optional[float] = None
+    unit: Optional[str] = None
+    unit_price: Optional[float] = None
+    total_price: Optional[float] = None
+
+class ManualDocumentCreate(BaseModel):
+    """Request body for creating a manual document"""
+    document_type: str = "invoice"  # invoice, receipt, purchase_order, etc.
+    invoice_category: Optional[str] = None  # service, spare_parts
+    vendor_id: Optional[int] = None
+    site_id: Optional[int] = None
+    contract_id: Optional[int] = None
+
+    # Document details
+    document_number: Optional[str] = None  # Invoice/Receipt number
+    document_date: Optional[str] = None  # YYYY-MM-DD format
+    due_date: Optional[str] = None
+    currency: Optional[str] = "USD"
+
+    # Amounts
+    subtotal: Optional[float] = None
+    tax_amount: Optional[float] = None
+    discount_amount: Optional[float] = None
+    total_amount: Optional[float] = None
+
+    # Line items
+    line_items: Optional[List[ManualLineItem]] = []
+
+    # Notes
+    notes: Optional[str] = None
+
+
+@router.post("/manual", response_model=ProcessedImage)
+async def create_manual_document(
+    document: ManualDocumentCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Create a document manually without scanning/OCR.
+    This allows users to enter invoice/receipt data directly.
+    """
+    import json
+    from datetime import datetime
+
+    # Validate document type
+    valid_types = ['invoice', 'receipt', 'purchase_order', 'bill_of_lading', 'packing_slip', 'contract', 'delivery_note', 'tax_document', 'other']
+    if document.document_type not in valid_types:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid document type. Must be one of: {', '.join(valid_types)}"
+        )
+
+    # Build structured data from the manual entry
+    structured_data = {
+        "supplier_name": None,
+        "invoice_number": document.document_number,
+        "invoice_date": document.document_date,
+        "due_date": document.due_date,
+        "currency": document.currency,
+        "subtotal": document.subtotal,
+        "tax": document.tax_amount,
+        "discount": document.discount_amount,
+        "total": document.total_amount,
+        "notes": document.notes,
+        "line_items": []
+    }
+
+    # Get vendor name if vendor_id provided
+    if document.vendor_id:
+        from app.models import Vendor
+        vendor = db.query(Vendor).filter(Vendor.id == document.vendor_id).first()
+        if vendor:
+            structured_data["supplier_name"] = vendor.display_name or vendor.name
+
+    # Add line items
+    for item in document.line_items or []:
+        structured_data["line_items"].append({
+            "description": item.description,
+            "item_number": item.item_number,
+            "quantity": item.quantity,
+            "unit": item.unit,
+            "unit_price": item.unit_price,
+            "total": item.total_price
+        })
+
+    # Create document title based on type and number
+    doc_title = f"Manual {document.document_type.replace('_', ' ').title()}"
+    if document.document_number:
+        doc_title += f" - {document.document_number}"
+
+    try:
+        # Create the ProcessedImage record (this is the main document record)
+        db_image = ProcessedImageModel(
+            user_id=current_user.id,
+            original_filename=doc_title,
+            s3_key=None,  # No file uploaded for manual entry
+            s3_url=None,
+            processing_status="completed",  # Manual entry is always "completed"
+            document_type=document.document_type,
+            invoice_category=document.invoice_category if document.document_type == "invoice" else None,
+            site_id=document.site_id,
+            contract_id=document.contract_id,
+            vendor_id=document.vendor_id,
+            ocr_extracted_words=0,
+            ocr_average_confidence=1.0,  # Manual entry has perfect "confidence"
+            ocr_preprocessing_methods=0,
+            patterns_detected=0,
+            has_structured_data=True,
+            structured_data=json.dumps(structured_data),
+            extraction_confidence=1.0,  # Manual entry has perfect confidence
+            processing_method="manual"  # Mark as manually created
+        )
+
+        db.add(db_image)
+        db.commit()
+        db.refresh(db_image)
+
+        # Create InvoiceItem records for line items
+        if document.line_items and document.document_type in ["invoice", "receipt", "purchase_order"]:
+            for item in document.line_items:
+                invoice_item = InvoiceItem(
+                    invoice_id=db_image.id,
+                    item_description=item.description,
+                    item_number=item.item_number,
+                    quantity=item.quantity,
+                    unit=item.unit,
+                    unit_price=item.unit_price,
+                    total_price=item.total_price,
+                    receive_status="pending"
+                )
+                db.add(invoice_item)
+
+            db.commit()
+
+        return db_image
+
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error creating manual document: {str(e)}"
+        )
+
+
 @router.get("/", response_model=ProcessedImageList)
 async def get_user_images(
     response: Response,
