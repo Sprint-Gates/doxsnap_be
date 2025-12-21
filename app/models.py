@@ -219,6 +219,12 @@ class ProcessedImage(Base):
     # Project linkage for multi-tenant structure
     project_id = Column(Integer, ForeignKey("projects.id"), nullable=True)
 
+    # Site linkage
+    site_id = Column(Integer, ForeignKey("sites.id"), nullable=True)
+
+    # Contract linkage
+    contract_id = Column(Integer, ForeignKey("contracts.id"), nullable=True)
+
     # Vendor linkage
     vendor_id = Column(Integer, ForeignKey("vendors.id"), nullable=True)
 
@@ -238,6 +244,8 @@ class ProcessedImage(Base):
     # Relationships
     user = relationship("User", back_populates="processed_images")
     project = relationship("Project", back_populates="invoices")
+    site = relationship("Site", backref="invoices")
+    contract = relationship("Contract", backref="invoices")
     vendor = relationship("Vendor", back_populates="invoices")
 
 
@@ -2423,3 +2431,402 @@ class PettyCashReplenishment(Base):
     company = relationship("Company", backref="petty_cash_replenishments")
     fund = relationship("PettyCashFund", back_populates="replenishments")
     processor = relationship("User", foreign_keys=[processed_by], backref="processed_petty_cash_replenishments")
+
+
+# ============================================================================
+# Invoice Allocation Models
+# ============================================================================
+
+class InvoiceAllocation(Base):
+    """
+    Invoice Allocation - Links subcontractor invoices to contracts, sites, or projects with cost distribution settings.
+    Allows spreading invoice costs over duration (monthly, quarterly, etc.)
+    """
+    __tablename__ = "invoice_allocations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    invoice_id = Column(Integer, ForeignKey("processed_images.id", ondelete="CASCADE"), nullable=False, unique=True)
+
+    # Allocation target - exactly one must be set
+    contract_id = Column(Integer, ForeignKey("contracts.id", ondelete="CASCADE"), nullable=True)
+    site_id = Column(Integer, ForeignKey("sites.id", ondelete="CASCADE"), nullable=True)
+    project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=True)
+    allocation_type = Column(String(20), default="contract")  # contract, site, project
+
+    # Allocation settings
+    total_amount = Column(Numeric(14, 2), nullable=False)  # Total invoice amount to allocate
+    distribution_type = Column(String(20), nullable=False, default="one_time")  # one_time, monthly, quarterly, custom
+
+    # For distributed allocations
+    start_date = Column(Date, nullable=True)  # Start of distribution period
+    end_date = Column(Date, nullable=True)    # End of distribution period
+    number_of_periods = Column(Integer, default=1)  # Number of periods to distribute over
+
+    # Status and audit
+    status = Column(String(20), default="active")  # active, cancelled, completed
+    notes = Column(Text, nullable=True)
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    # Relationships
+    invoice = relationship("ProcessedImage", backref="allocation")
+    contract = relationship("Contract", backref="allocations")
+    site = relationship("Site", backref="allocations")
+    project = relationship("Project", backref="allocations")
+    creator = relationship("User", foreign_keys=[created_by], backref="created_allocations")
+    periods = relationship("AllocationPeriod", back_populates="allocation", cascade="all, delete-orphan")
+
+
+class AllocationPeriod(Base):
+    """
+    Allocation Period - Individual period amounts for distributed invoice costs.
+    Each period represents a portion of the total invoice amount allocated to a specific time period.
+    """
+    __tablename__ = "allocation_periods"
+
+    id = Column(Integer, primary_key=True, index=True)
+    allocation_id = Column(Integer, ForeignKey("invoice_allocations.id", ondelete="CASCADE"), nullable=False)
+
+    # Period details
+    period_start = Column(Date, nullable=False)
+    period_end = Column(Date, nullable=False)
+    period_number = Column(Integer, nullable=False)  # 1, 2, 3, etc.
+
+    # Amount for this period
+    amount = Column(Numeric(14, 2), nullable=False)
+
+    # Recognition status
+    is_recognized = Column(Boolean, default=False)  # Whether this period's cost has been recognized
+    recognized_at = Column(DateTime, nullable=True)
+
+    # Recognition tracking (for audit trail)
+    recognition_number = Column(String(20), nullable=True, index=True)  # Auto-generated: REC-2025-0001
+    recognition_reference = Column(String(100), nullable=True)  # External ref (payment voucher, check #)
+    recognition_notes = Column(Text, nullable=True)  # Comments/reason
+    recognized_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+
+    created_at = Column(DateTime, default=func.now())
+
+    # Relationships
+    allocation = relationship("InvoiceAllocation", back_populates="periods")
+    recognized_by_user = relationship("User", foreign_keys=[recognized_by])
+
+
+class RecognitionLog(Base):
+    """
+    Recognition Log - Audit trail for all recognition actions.
+    Tracks when periods are recognized, unrecognized, or modified.
+    """
+    __tablename__ = "recognition_log"
+
+    id = Column(Integer, primary_key=True, index=True)
+    period_id = Column(Integer, ForeignKey("allocation_periods.id", ondelete="CASCADE"), nullable=False)
+
+    action = Column(String(20), nullable=False)  # 'recognized', 'unrecognized', 'modified'
+    recognition_number = Column(String(20), nullable=True)
+    previous_status = Column(Boolean, nullable=True)
+    new_status = Column(Boolean, nullable=True)
+    reference = Column(String(100), nullable=True)
+    notes = Column(Text, nullable=True)
+
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=func.now())
+
+    # Relationships
+    period = relationship("AllocationPeriod")
+    user = relationship("User")
+
+
+# ============================================================================
+# Accounting Ledger Models
+# ============================================================================
+
+class AccountType(Base):
+    """
+    Account Type - Classification of accounts (Asset, Liability, Equity, Revenue, Expense)
+    """
+    __tablename__ = "account_types"
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+    code = Column(String(10), nullable=False)  # ASSET, LIABILITY, EQUITY, REVENUE, EXPENSE
+    name = Column(String(100), nullable=False)
+    normal_balance = Column(String(10), nullable=False)  # debit or credit
+    display_order = Column(Integer, default=0)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=func.now())
+
+    # Unique constraint per company
+    __table_args__ = (
+        UniqueConstraint('company_id', 'code', name='uq_account_type_company_code'),
+    )
+
+    # Relationships
+    company = relationship("Company", backref="account_types")
+    accounts = relationship("Account", back_populates="account_type")
+
+
+class Account(Base):
+    """
+    Chart of Accounts - Hierarchical account structure for double-entry bookkeeping.
+    Accounts can be site-specific for cost center tracking.
+    """
+    __tablename__ = "accounts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+
+    # Account identification
+    code = Column(String(20), nullable=False, index=True)  # e.g., "5110", "1100"
+    name = Column(String(200), nullable=False)
+    description = Column(Text, nullable=True)
+
+    # Classification
+    account_type_id = Column(Integer, ForeignKey("account_types.id"), nullable=False)
+    parent_id = Column(Integer, ForeignKey("accounts.id"), nullable=True)  # For hierarchy
+
+    # Behavior
+    is_site_specific = Column(Boolean, default=False)  # If true, tracks by site as cost center
+    is_header = Column(Boolean, default=False)  # Header accounts can't have transactions
+    is_bank_account = Column(Boolean, default=False)  # Cash/bank accounts
+    is_control_account = Column(Boolean, default=False)  # Sub-ledger control (AP, AR)
+
+    # Status
+    is_active = Column(Boolean, default=True)
+    is_system = Column(Boolean, default=False)  # System accounts can't be deleted
+
+    # Audit
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+
+    # Unique constraint per company
+    __table_args__ = (
+        UniqueConstraint('company_id', 'code', name='uq_account_company_code'),
+    )
+
+    # Relationships
+    company = relationship("Company", backref="accounts")
+    account_type = relationship("AccountType", back_populates="accounts")
+    parent = relationship("Account", remote_side=[id], backref="children")
+    creator = relationship("User", foreign_keys=[created_by])
+    journal_lines = relationship("JournalEntryLine", back_populates="account")
+
+
+class FiscalPeriod(Base):
+    """
+    Fiscal Period - Defines accounting periods (months) within a fiscal year.
+    Used for period-end closing and financial reporting.
+    """
+    __tablename__ = "fiscal_periods"
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+
+    # Period identification
+    fiscal_year = Column(Integer, nullable=False)  # e.g., 2025
+    period_number = Column(Integer, nullable=False)  # 1-12 for months, 13 for adjustments
+    period_name = Column(String(50), nullable=False)  # e.g., "January 2025"
+
+    # Date range
+    start_date = Column(Date, nullable=False)
+    end_date = Column(Date, nullable=False)
+
+    # Status
+    status = Column(String(20), default="open")  # open, closed, locked
+    closed_at = Column(DateTime, nullable=True)
+    closed_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+
+    # Audit
+    created_at = Column(DateTime, default=func.now())
+
+    # Unique constraint
+    __table_args__ = (
+        UniqueConstraint('company_id', 'fiscal_year', 'period_number', name='uq_fiscal_period'),
+    )
+
+    # Relationships
+    company = relationship("Company", backref="fiscal_periods")
+    closer = relationship("User", foreign_keys=[closed_by])
+    journal_entries = relationship("JournalEntry", back_populates="fiscal_period")
+
+
+class JournalEntry(Base):
+    """
+    Journal Entry - Header for accounting transactions.
+    Each entry contains multiple lines that must balance (debits = credits).
+    """
+    __tablename__ = "journal_entries"
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+
+    # Entry identification
+    entry_number = Column(String(30), nullable=False, index=True)  # JE-2025-000001
+    entry_date = Column(Date, nullable=False, index=True)
+    fiscal_period_id = Column(Integer, ForeignKey("fiscal_periods.id"), nullable=True)
+
+    # Description
+    description = Column(Text, nullable=False)
+    reference = Column(String(100), nullable=True)  # External reference number
+
+    # Source tracking - what generated this entry
+    source_type = Column(String(50), nullable=True)  # invoice, work_order, petty_cash, manual, adjustment
+    source_id = Column(Integer, nullable=True)  # ID of source document
+    source_number = Column(String(50), nullable=True)  # Human-readable source ref
+
+    # Status
+    status = Column(String(20), default="draft")  # draft, posted, reversed
+    is_auto_generated = Column(Boolean, default=False)  # True if system-generated
+
+    # Totals (denormalized for quick access)
+    total_debit = Column(Numeric(14, 2), default=0)
+    total_credit = Column(Numeric(14, 2), default=0)
+
+    # Reversal tracking
+    is_reversal = Column(Boolean, default=False)
+    reversal_of_id = Column(Integer, ForeignKey("journal_entries.id"), nullable=True)
+    reversed_by_id = Column(Integer, ForeignKey("journal_entries.id"), nullable=True)
+
+    # Audit
+    posted_at = Column(DateTime, nullable=True)
+    posted_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+
+    # Unique constraint per company
+    __table_args__ = (
+        UniqueConstraint('company_id', 'entry_number', name='uq_journal_entry_number'),
+    )
+
+    # Relationships
+    company = relationship("Company", backref="journal_entries")
+    fiscal_period = relationship("FiscalPeriod", back_populates="journal_entries")
+    lines = relationship("JournalEntryLine", back_populates="journal_entry", cascade="all, delete-orphan")
+    poster = relationship("User", foreign_keys=[posted_by])
+    creator = relationship("User", foreign_keys=[created_by])
+    reversal_of = relationship("JournalEntry", foreign_keys=[reversal_of_id], remote_side=[id], backref="reversed_by_entry")
+
+
+class JournalEntryLine(Base):
+    """
+    Journal Entry Line - Individual debit/credit line within a journal entry.
+    Site is the primary cost center for tracking expenses by location.
+    """
+    __tablename__ = "journal_entry_lines"
+
+    id = Column(Integer, primary_key=True, index=True)
+    journal_entry_id = Column(Integer, ForeignKey("journal_entries.id", ondelete="CASCADE"), nullable=False)
+
+    # Account and amounts
+    account_id = Column(Integer, ForeignKey("accounts.id"), nullable=False)
+    debit = Column(Numeric(14, 2), default=0)
+    credit = Column(Numeric(14, 2), default=0)
+
+    # Line description
+    description = Column(Text, nullable=True)
+
+    # Cost center - Site is the primary dimension
+    site_id = Column(Integer, ForeignKey("sites.id"), nullable=True)
+
+    # Additional dimensions for drill-down reporting
+    contract_id = Column(Integer, ForeignKey("contracts.id"), nullable=True)
+    work_order_id = Column(Integer, ForeignKey("work_orders.id"), nullable=True)
+    vendor_id = Column(Integer, ForeignKey("vendors.id"), nullable=True)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=True)
+    technician_id = Column(Integer, ForeignKey("technicians.id"), nullable=True)
+
+    # Line ordering
+    line_number = Column(Integer, default=1)
+
+    # Audit
+    created_at = Column(DateTime, default=func.now())
+
+    # Relationships
+    journal_entry = relationship("JournalEntry", back_populates="lines")
+    account = relationship("Account", back_populates="journal_lines")
+    site = relationship("Site", backref="journal_lines")
+    contract = relationship("Contract", backref="journal_lines")
+    work_order = relationship("WorkOrder", backref="journal_lines")
+    vendor = relationship("Vendor", backref="journal_lines")
+    project = relationship("Project", backref="journal_lines")
+    technician = relationship("Technician", backref="journal_lines")
+
+
+class AccountBalance(Base):
+    """
+    Account Balance - Pre-computed balances by account, site, and period for fast reporting.
+    Updated when journal entries are posted.
+    """
+    __tablename__ = "account_balances"
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+    account_id = Column(Integer, ForeignKey("accounts.id"), nullable=False)
+    fiscal_period_id = Column(Integer, ForeignKey("fiscal_periods.id"), nullable=False)
+
+    # Cost center (optional - null means company-wide)
+    site_id = Column(Integer, ForeignKey("sites.id"), nullable=True)
+
+    # Period activity
+    period_debit = Column(Numeric(14, 2), default=0)
+    period_credit = Column(Numeric(14, 2), default=0)
+
+    # Running balance
+    opening_balance = Column(Numeric(14, 2), default=0)
+    closing_balance = Column(Numeric(14, 2), default=0)
+
+    # Audit
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    # Unique constraint
+    __table_args__ = (
+        UniqueConstraint('company_id', 'account_id', 'fiscal_period_id', 'site_id',
+                        name='uq_account_balance_period_site'),
+    )
+
+    # Relationships
+    company = relationship("Company", backref="account_balances")
+    account = relationship("Account", backref="balances")
+    fiscal_period = relationship("FiscalPeriod", backref="account_balances")
+    site = relationship("Site", backref="account_balances")
+
+
+class DefaultAccountMapping(Base):
+    """
+    Default Account Mapping - Maps transaction types to default accounts.
+    Used for auto-posting journal entries from source documents.
+    """
+    __tablename__ = "default_account_mappings"
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+
+    # Mapping identification
+    transaction_type = Column(String(50), nullable=False)  # invoice_expense, invoice_payable, wo_labor, wo_parts, etc.
+    category = Column(String(50), nullable=True)  # Sub-category (e.g., invoice_category: service, spare_parts)
+
+    # Default accounts
+    debit_account_id = Column(Integer, ForeignKey("accounts.id"), nullable=True)
+    credit_account_id = Column(Integer, ForeignKey("accounts.id"), nullable=True)
+
+    # Settings
+    is_active = Column(Boolean, default=True)
+    description = Column(Text, nullable=True)
+
+    # Audit
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    # Unique constraint
+    __table_args__ = (
+        UniqueConstraint('company_id', 'transaction_type', 'category',
+                        name='uq_default_account_mapping'),
+    )
+
+    # Relationships
+    company = relationship("Company", backref="account_mappings")
+    debit_account = relationship("Account", foreign_keys=[debit_account_id])
+    credit_account = relationship("Account", foreign_keys=[credit_account_id])

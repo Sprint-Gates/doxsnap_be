@@ -20,8 +20,9 @@ from app.models import (
     User, WorkOrder, WorkOrderTimeEntry, WorkOrderChecklistItem, WorkOrderSnapshot,
     WorkOrderCompletion, Technician, Equipment, SubEquipment,
     Branch, Floor, Room, Project, work_order_technicians, HandHeldDevice,
-    ItemMaster, ItemStock, ItemLedger
+    ItemMaster, ItemStock, ItemLedger, Account
 )
+from app.services.journal_posting import JournalPostingService
 from app.api.auth import verify_token
 from app.utils.security import verify_token as verify_token_raw
 from jose import jwt
@@ -819,8 +820,26 @@ async def update_work_order(
                 if not wo.billing_status:
                     wo.billing_status = "pending"
 
+            wo.completed_at = datetime.utcnow()
+
         db.commit()
         db.refresh(wo)
+
+        # Auto-post journal entry if work order completed and accounting is set up
+        if data.status == "completed" and auth_context.company_id:
+            try:
+                has_accounts = db.query(Account).filter(
+                    Account.company_id == auth_context.company_id
+                ).first()
+
+                if has_accounts:
+                    journal_service = JournalPostingService(db, auth_context.company_id, auth_context.id)
+                    journal_entry = journal_service.post_work_order_completion(wo, post_immediately=True)
+                    if journal_entry:
+                        logger.info(f"Auto-posted journal entry {journal_entry.entry_number} for work order {wo.wo_number}")
+            except Exception as e:
+                logger.warning(f"Failed to auto-post journal entry for work order {wo.id}: {e}")
+                # Don't fail the work order update if journal posting fails
 
         logger.info(f"Work order {wo.wo_number} updated by {auth_context.email}")
         return work_order_to_response(wo, include_details=True)

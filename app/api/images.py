@@ -67,6 +67,8 @@ async def upload_image(
     file: UploadFile = File(...),
     document_type: str = "invoice",
     invoice_category: str = None,
+    site_id: int = None,
+    contract_id: int = None,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -164,6 +166,8 @@ async def upload_image(
                 processing_status=processing_status,
                 document_type=document_type,
                 invoice_category=invoice_category if document_type == "invoice" else None,
+                site_id=site_id,
+                contract_id=contract_id,
                 ocr_extracted_words=int(invoice_results.get("total_words_extracted", 0)),
                 ocr_average_confidence=float(invoice_results.get("average_confidence", 0.0)),
                 ocr_preprocessing_methods=int(enhancement_features.get("multiple_preprocessing", 1)),

@@ -5,9 +5,9 @@ import os
 import logging
 import google.generativeai as genai
 
-from app.api import auth, images, otp, admin, document_types, technician_site_shifts, vendors, plans, companies, clients, branches, projects, operators, technicians, handheld_devices, assets, attendance, work_orders, warehouses, pm_checklists, pm_work_orders, dashboard, item_master, cycle_count, dummy, hhd_auth, users, sites, contracts, tickets, calendar, condition_reports, technician_evaluations, nps, petty_cash, docs
+from app.api import auth, images, otp, admin, document_types, technician_site_shifts, vendors, plans, companies, clients, branches, projects, operators, technicians, handheld_devices, assets, attendance, work_orders, warehouses, pm_checklists, pm_work_orders, dashboard, item_master, cycle_count, dummy, hhd_auth, users, sites, contracts, tickets, calendar, condition_reports, technician_evaluations, nps, petty_cash, docs, allocations, accounting
 from app.database import engine
-from app.models import Base, User, ProcessedImage, DocumentType, Vendor, Warehouse, Plan, Company, Client, Branch, Project, Technician, HandHeldDevice, Floor, Room, Equipment, SubEquipment, TechnicianAttendance, SparePart, WorkOrder, WorkOrderSparePart, WorkOrderTimeEntry, PMSchedule, ItemCategory, ItemMaster, ItemStock, ItemLedger, ItemTransfer, ItemTransferLine, InvoiceItem, CycleCount, CycleCountItem, RefreshToken, Site, Building, Space, Scope, Contract, ContractScope, Ticket, CalendarSlot, WorkOrderSlotAssignment, CalendarTemplate
+from app.models import Base, User, ProcessedImage, DocumentType, Vendor, Warehouse, Plan, Company, Client, Branch, Project, Technician, HandHeldDevice, Floor, Room, Equipment, SubEquipment, TechnicianAttendance, SparePart, WorkOrder, WorkOrderSparePart, WorkOrderTimeEntry, PMSchedule, ItemCategory, ItemMaster, ItemStock, ItemLedger, ItemTransfer, ItemTransferLine, InvoiceItem, CycleCount, CycleCountItem, RefreshToken, Site, Building, Space, Scope, Contract, ContractScope, Ticket, CalendarSlot, WorkOrderSlotAssignment, CalendarTemplate, InvoiceAllocation, AllocationPeriod, RecognitionLog, AccountType, Account, FiscalPeriod, JournalEntry, JournalEntryLine, AccountBalance, DefaultAccountMapping
 from app.config import settings
 from sqlalchemy import text
 
@@ -117,6 +117,8 @@ app.include_router(technician_evaluations.router, prefix="/api/technician-evalua
 app.include_router(nps.router, prefix="/api/nps", tags=["Net Promoter Score"])
 app.include_router(petty_cash.router, prefix="/api/petty-cash", tags=["Petty Cash"])
 app.include_router(docs.router, prefix="/api/docs", tags=["Documentation"])
+app.include_router(allocations.router, prefix="/api/allocations", tags=["Invoice Allocations"])
+app.include_router(accounting.router, prefix="/api/accounting", tags=["Accounting"])
 
 @app.get("/")
 async def root():

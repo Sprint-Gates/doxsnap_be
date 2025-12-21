@@ -9,8 +9,9 @@ from datetime import datetime, date
 from app.database import get_db
 from app.models import (
     PettyCashFund, PettyCashTransaction, PettyCashReceipt, PettyCashReplenishment,
-    User, Technician, WorkOrder, Contract
+    User, Technician, WorkOrder, Contract, Account
 )
+from app.services.journal_posting import JournalPostingService
 from app.api.auth import get_current_user
 from app.config import settings
 from jose import jwt
@@ -901,6 +902,21 @@ async def approve_petty_cash_transaction(
     db.commit()
     db.refresh(txn)
 
+    # Auto-post journal entry if accounting is set up
+    try:
+        has_accounts = db.query(Account).filter(
+            Account.company_id == current_user.company_id
+        ).first()
+
+        if has_accounts:
+            journal_service = JournalPostingService(db, current_user.company_id, current_user.id)
+            journal_entry = journal_service.post_petty_cash_transaction(txn, post_immediately=True)
+            if journal_entry:
+                logger.info(f"Auto-posted journal entry {journal_entry.entry_number} for petty cash transaction {txn.id}")
+    except Exception as e:
+        logger.warning(f"Failed to auto-post journal entry for petty cash transaction {txn.id}: {e}")
+        # Don't fail the approval if journal posting fails
+
     # Reload with relationships
     txn = db.query(PettyCashTransaction).options(
         joinedload(PettyCashTransaction.fund).joinedload(PettyCashFund.technician),
@@ -1248,6 +1264,21 @@ async def replenish_fund(
 
     db.commit()
     db.refresh(repl)
+
+    # Auto-post journal entry if accounting is set up
+    try:
+        has_accounts = db.query(Account).filter(
+            Account.company_id == current_user.company_id
+        ).first()
+
+        if has_accounts:
+            journal_service = JournalPostingService(db, current_user.company_id, current_user.id)
+            journal_entry = journal_service.post_petty_cash_replenishment(repl, post_immediately=True)
+            if journal_entry:
+                logger.info(f"Auto-posted journal entry {journal_entry.entry_number} for petty cash replenishment {repl.id}")
+    except Exception as e:
+        logger.warning(f"Failed to auto-post journal entry for petty cash replenishment {repl.id}: {e}")
+        # Don't fail the replenishment if journal posting fails
 
     # Reload with relationships
     repl = db.query(PettyCashReplenishment).options(

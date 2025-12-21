@@ -9,7 +9,8 @@ from app.database import get_db
 from app.models import (
     Contract, ContractScope, Scope, Site, Client, User, contract_sites,
     WorkOrder, WorkOrderTimeEntry, WorkOrderSparePart, Equipment, Building, Block, Floor, Room, Unit,
-    Technician, PettyCashTransaction
+    Technician, PettyCashTransaction, InvoiceAllocation, AllocationPeriod, ProcessedImage,
+    JournalEntry, JournalEntryLine, Account, AccountType
 )
 from app.utils.security import verify_token
 from app.schemas import (
@@ -1023,10 +1024,211 @@ async def get_contract_cost_center(
 
     petty_cash_cost = decimal_to_float(petty_cash_stats.total_amount) if petty_cash_stats else 0
 
-    # Update total cost to include petty cash
-    total_cost_with_petty = total_cost + petty_cash_cost
-    budget_remaining_with_petty = (budget - total_cost_with_petty) if budget else None
-    budget_used_percent_with_petty = round((total_cost_with_petty / budget * 100), 1) if budget and budget > 0 else None
+    # Get invoice allocations linked to this contract
+    allocations = db.query(InvoiceAllocation).filter(
+        InvoiceAllocation.contract_id == contract_id,
+        InvoiceAllocation.status == 'active'
+    ).options(joinedload(InvoiceAllocation.periods)).all()
+
+    total_allocated = Decimal("0")
+    total_recognized = Decimal("0")
+    total_pending = Decimal("0")
+    allocation_count = len(allocations)
+
+    allocation_details = []
+    monthly_distribution = {}  # {month_key: {recognized, pending}}
+
+    for allocation in allocations:
+        total_allocated += allocation.total_amount
+
+        # Get invoice info
+        invoice = db.query(ProcessedImage).filter(ProcessedImage.id == allocation.invoice_id).first()
+        invoice_number = None
+        vendor_name = None
+        if invoice and invoice.structured_data:
+            import json
+            try:
+                data = json.loads(invoice.structured_data)
+                invoice_number = data.get("invoice_number")
+                vendor_name = data.get("vendor_name") or data.get("vendor")
+            except:
+                pass
+
+        period_details = []
+        for period in allocation.periods:
+            if period.is_recognized:
+                total_recognized += period.amount
+            else:
+                total_pending += period.amount
+
+            # Track monthly distribution
+            month_key = period.period_start.strftime("%Y-%m")
+            if month_key not in monthly_distribution:
+                monthly_distribution[month_key] = {"recognized": Decimal("0"), "pending": Decimal("0")}
+            if period.is_recognized:
+                monthly_distribution[month_key]["recognized"] += period.amount
+            else:
+                monthly_distribution[month_key]["pending"] += period.amount
+
+            period_details.append({
+                "id": period.id,
+                "period_start": period.period_start.isoformat() if period.period_start else None,
+                "period_end": period.period_end.isoformat() if period.period_end else None,
+                "period_number": period.period_number,
+                "amount": decimal_to_float(period.amount),
+                "is_recognized": period.is_recognized
+            })
+
+        allocation_details.append({
+            "id": allocation.id,
+            "invoice_id": allocation.invoice_id,
+            "invoice_number": invoice_number,
+            "vendor_name": vendor_name,
+            "total_amount": decimal_to_float(allocation.total_amount),
+            "distribution_type": allocation.distribution_type,
+            "start_date": allocation.start_date.isoformat() if allocation.start_date else None,
+            "end_date": allocation.end_date.isoformat() if allocation.end_date else None,
+            "periods": period_details
+        })
+
+    # Convert monthly distribution to sorted list
+    monthly_breakdown = [
+        {
+            "month": month,
+            "recognized": decimal_to_float(amounts["recognized"]),
+            "pending": decimal_to_float(amounts["pending"]),
+            "total": decimal_to_float(amounts["recognized"] + amounts["pending"])
+        }
+        for month, amounts in sorted(monthly_distribution.items())
+    ]
+
+    subcontractor_cost = decimal_to_float(total_recognized)
+
+    # ========== ACCOUNTING LEDGER INTEGRATION ==========
+    # Get accounting data from journal entries for the contract's sites
+    ledger_summary = {
+        "total_debits": 0.0,
+        "total_credits": 0.0,
+        "revenue": 0.0,
+        "expenses": 0.0,
+        "net_income": 0.0,
+        "entries_by_account": [],
+        "recent_entries": []
+    }
+
+    if site_ids:
+        # Get account types for categorization
+        account_types_map = {}
+        account_types = db.query(AccountType).filter(
+            AccountType.company_id == current_user.company_id
+        ).all()
+        for at in account_types:
+            account_types_map[at.id] = at.code
+
+        # Get totals by account for these sites
+        account_totals = db.query(
+            Account.id,
+            Account.code,
+            Account.name,
+            Account.account_type_id,
+            func.coalesce(func.sum(JournalEntryLine.debit), 0).label('total_debit'),
+            func.coalesce(func.sum(JournalEntryLine.credit), 0).label('total_credit')
+        ).join(
+            JournalEntryLine, Account.id == JournalEntryLine.account_id
+        ).join(
+            JournalEntry, and_(
+                JournalEntryLine.journal_entry_id == JournalEntry.id,
+                JournalEntry.status == "posted"
+            )
+        ).filter(
+            Account.company_id == current_user.company_id,
+            JournalEntryLine.site_id.in_(site_ids)
+        ).group_by(
+            Account.id, Account.code, Account.name, Account.account_type_id
+        ).order_by(Account.code).all()
+
+        entries_by_account = []
+        total_ledger_debits = 0.0
+        total_ledger_credits = 0.0
+        total_revenue = 0.0
+        total_expenses = 0.0
+
+        for row in account_totals:
+            debit = decimal_to_float(row.total_debit) or 0.0
+            credit = decimal_to_float(row.total_credit) or 0.0
+            balance = debit - credit
+
+            account_type_code = account_types_map.get(row.account_type_id, "")
+
+            # Categorize by account type
+            if account_type_code == "REVENUE":
+                # Revenue has credit normal balance
+                total_revenue += credit - debit
+            elif account_type_code == "EXPENSE":
+                # Expense has debit normal balance
+                total_expenses += debit - credit
+
+            total_ledger_debits += debit
+            total_ledger_credits += credit
+
+            entries_by_account.append({
+                "account_id": row.id,
+                "account_code": row.code,
+                "account_name": row.name,
+                "account_type": account_type_code,
+                "total_debit": debit,
+                "total_credit": credit,
+                "balance": balance
+            })
+
+        # Get recent journal entries for these sites
+        recent_entries_query = db.query(JournalEntry).join(
+            JournalEntryLine
+        ).filter(
+            JournalEntry.company_id == current_user.company_id,
+            JournalEntry.status == "posted",
+            JournalEntryLine.site_id.in_(site_ids)
+        ).distinct().order_by(
+            JournalEntry.entry_date.desc()
+        ).limit(10).all()
+
+        recent_entries = []
+        for entry in recent_entries_query:
+            # Get lines for this entry that belong to the contract sites
+            entry_lines = db.query(JournalEntryLine).filter(
+                JournalEntryLine.journal_entry_id == entry.id,
+                JournalEntryLine.site_id.in_(site_ids)
+            ).all()
+
+            entry_debit = sum(decimal_to_float(line.debit) or 0 for line in entry_lines)
+            entry_credit = sum(decimal_to_float(line.credit) or 0 for line in entry_lines)
+
+            recent_entries.append({
+                "id": entry.id,
+                "entry_number": entry.entry_number,
+                "entry_date": entry.entry_date.isoformat() if entry.entry_date else None,
+                "description": entry.description,
+                "source_type": entry.source_type,
+                "source_number": entry.source_number,
+                "total_debit": entry_debit,
+                "total_credit": entry_credit
+            })
+
+        ledger_summary = {
+            "total_debits": total_ledger_debits,
+            "total_credits": total_ledger_credits,
+            "revenue": total_revenue,
+            "expenses": total_expenses,
+            "net_income": total_revenue - total_expenses,
+            "entries_by_account": entries_by_account,
+            "recent_entries": recent_entries
+        }
+    # ========== END ACCOUNTING LEDGER INTEGRATION ==========
+
+    # Update total cost to include petty cash and recognized subcontractor allocations
+    total_cost_with_all = total_cost + petty_cash_cost + subcontractor_cost
+    budget_remaining_with_all = (budget - total_cost_with_all) if budget else None
+    budget_used_percent_with_all = round((total_cost_with_all / budget * 100), 1) if budget and budget > 0 else None
 
     return {
         "contract": {
@@ -1049,17 +1251,27 @@ async def get_contract_cost_center(
             "labor_cost": total_labor_cost,
             "parts_cost": total_parts_cost,
             "petty_cash_cost": petty_cash_cost,
-            "total_cost": total_cost_with_petty,
+            "subcontractor_cost": subcontractor_cost,
+            "total_cost": total_cost_with_all,
             "billable_amount": total_billable_amount,
-            "budget_used": total_cost_with_petty,
-            "budget_remaining": budget_remaining_with_petty,
-            "budget_used_percent": budget_used_percent_with_petty
+            "budget_used": total_cost_with_all,
+            "budget_remaining": budget_remaining_with_all,
+            "budget_used_percent": budget_used_percent_with_all
         },
         "petty_cash": {
             "transaction_count": petty_cash_stats.transaction_count or 0 if petty_cash_stats else 0,
             "total_amount": petty_cash_cost
         },
+        "subcontractor_allocations": {
+            "allocation_count": allocation_count,
+            "total_allocated": decimal_to_float(total_allocated),
+            "total_recognized": decimal_to_float(total_recognized),
+            "total_pending": decimal_to_float(total_pending),
+            "monthly_breakdown": monthly_breakdown,
+            "allocations": allocation_details
+        },
         "sites_breakdown": sites_breakdown,
         "labor_by_technician": labor_by_technician,
-        "work_orders": wo_details
+        "work_orders": wo_details,
+        "ledger": ledger_summary
     }

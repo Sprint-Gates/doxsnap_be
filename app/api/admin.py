@@ -611,8 +611,9 @@ async def get_all_invoices(
 ):
     """Get all processed invoices for the admin's company"""
 
-    from app.models import ProcessedImage, User as UserModel, InvoiceItem
+    from app.models import ProcessedImage, User as UserModel, InvoiceItem, InvoiceAllocation, Contract, Site, Project, Client
     from sqlalchemy import func
+    from sqlalchemy.orm import joinedload
     import json
 
     # Filter invoices to only show those from users in the same company
@@ -641,6 +642,34 @@ async def get_all_invoices(
 
         for invoice_id, count in unlinked_query:
             unlinked_counts[invoice_id] = count
+
+    # Get allocations for all invoices
+    allocations_map = {}
+    if processed_images:
+        image_ids = [img.id for img in processed_images]
+        allocations = db.query(InvoiceAllocation).filter(
+            InvoiceAllocation.invoice_id.in_(image_ids)
+        ).all()
+
+        for alloc in allocations:
+            target_name = None
+            if alloc.contract_id:
+                contract = db.query(Contract).filter(Contract.id == alloc.contract_id).first()
+                target_name = contract.name if contract else f"Contract #{alloc.contract_id}"
+            elif alloc.site_id:
+                site = db.query(Site).filter(Site.id == alloc.site_id).first()
+                target_name = site.name if site else f"Site #{alloc.site_id}"
+            elif alloc.project_id:
+                project = db.query(Project).filter(Project.id == alloc.project_id).first()
+                target_name = project.name if project else f"Project #{alloc.project_id}"
+
+            allocations_map[alloc.invoice_id] = {
+                "id": alloc.id,
+                "allocation_type": alloc.allocation_type or "contract",
+                "target_name": target_name or "Unknown",
+                "total_amount": float(alloc.total_amount) if alloc.total_amount else 0,
+                "status": alloc.status or "active"
+            }
 
     invoices = []
     for image in processed_images:
@@ -702,10 +731,11 @@ async def get_all_invoices(
                 "words_extracted": getattr(image, 'ocr_extracted_words', None) or 0,
                 "average_confidence": getattr(image, 'ocr_average_confidence', None) or 0.0
             },
-            "unlinked_items_count": unlinked_counts.get(image.id, 0)
+            "unlinked_items_count": unlinked_counts.get(image.id, 0),
+            "allocation": allocations_map.get(image.id, None)
         }
         invoices.append(invoice_data)
-    
+
     return invoices
 
 @router.get("/admin/stats")
@@ -736,15 +766,14 @@ async def get_admin_stats(
     total_invoices = invoice_query.count()
     total_users = user_query.count()
 
-    # Count spare parts invoices with unlinked items
-    spare_parts_query = invoice_query.filter(ProcessedImage.invoice_category == 'spare_parts')
-    spare_parts_ids = [img.id for img in spare_parts_query.all()]
+    # Count all invoices with unlinked items (across all categories)
+    all_invoice_ids = [img.id for img in invoice_query.all()]
 
     unlinked_invoices_count = 0
-    if spare_parts_ids:
-        # Get invoices that have at least one unlinked item
+    if all_invoice_ids:
+        # Get count of invoices that have at least one unlinked item
         invoices_with_unlinked = db.query(InvoiceItem.invoice_id).filter(
-            InvoiceItem.invoice_id.in_(spare_parts_ids),
+            InvoiceItem.invoice_id.in_(all_invoice_ids),
             InvoiceItem.item_id == None
         ).distinct().count()
         unlinked_invoices_count = invoices_with_unlinked
@@ -972,6 +1001,7 @@ async def delete_admin_image(
 
 
 class InvoiceUpdateData(BaseModel):
+    invoice_category: Optional[str] = None
     document_info: Optional[dict] = None
     supplier: Optional[dict] = None
     customer: Optional[dict] = None
@@ -991,6 +1021,17 @@ async def update_admin_invoice(
     image = get_company_image(image_id, admin_user, db)
 
     try:
+        # Update invoice_category if provided (can be set to empty string to clear)
+        if update_data.invoice_category is not None:
+            # Allow empty string to clear category, or validate against allowed values
+            allowed_categories = ['', 'service', 'spare_parts', 'expense', 'equipment', 'utilities']
+            if update_data.invoice_category not in allowed_categories:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Invalid invoice category. Allowed values: {', '.join(allowed_categories)}"
+                )
+            image.invoice_category = update_data.invoice_category if update_data.invoice_category else None
+
         # Parse existing structured data
         structured_data = {}
         if image.structured_data:
@@ -1208,6 +1249,8 @@ async def admin_upload_image(
     file: UploadFile = File(...),
     document_type: str = "invoice",
     invoice_category: str = None,
+    site_id: int = None,
+    contract_id: int = None,
     admin_user: User = Depends(get_current_admin),
     db: Session = Depends(get_db)
 ):
@@ -1319,6 +1362,8 @@ async def admin_upload_image(
             processing_status=processing_status,
             document_type=document_type,
             invoice_category=invoice_category if document_type == "invoice" else None,
+            site_id=site_id,
+            contract_id=contract_id,
             ocr_extracted_words=int(invoice_results.get("total_words_extracted", 0)),
             ocr_average_confidence=float(invoice_results.get("average_confidence", 0.0)),
             ocr_preprocessing_methods=int(enhancement_features.get("multiple_preprocessing", 1)),
