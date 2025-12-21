@@ -5,9 +5,9 @@ import os
 import logging
 import google.generativeai as genai
 
-from app.api import auth, images, otp, admin, document_types, technician_site_shifts, vendors, plans, companies, clients, branches, projects, operators, technicians, handheld_devices, assets, attendance, work_orders, warehouses, pm_checklists, pm_work_orders, dashboard, item_master, cycle_count, dummy, hhd_auth, users, sites, contracts, tickets, calendar, condition_reports, technician_evaluations, nps, petty_cash, docs, allocations, accounting
+from app.api import auth, images, otp, admin, document_types, technician_site_shifts, vendors, plans, companies, clients, branches, projects, operators, technicians, handheld_devices, assets, attendance, work_orders, warehouses, pm_checklists, pm_work_orders, dashboard, item_master, cycle_count, dummy, hhd_auth, users, sites, contracts, tickets, calendar, condition_reports, technician_evaluations, nps, petty_cash, docs, allocations, accounting, exchange_rates, purchase_requests, purchase_orders
 from app.database import engine
-from app.models import Base, User, ProcessedImage, DocumentType, Vendor, Warehouse, Plan, Company, Client, Branch, Project, Technician, HandHeldDevice, Floor, Room, Equipment, SubEquipment, TechnicianAttendance, SparePart, WorkOrder, WorkOrderSparePart, WorkOrderTimeEntry, PMSchedule, ItemCategory, ItemMaster, ItemStock, ItemLedger, ItemTransfer, ItemTransferLine, InvoiceItem, CycleCount, CycleCountItem, RefreshToken, Site, Building, Space, Scope, Contract, ContractScope, Ticket, CalendarSlot, WorkOrderSlotAssignment, CalendarTemplate, InvoiceAllocation, AllocationPeriod, RecognitionLog, AccountType, Account, FiscalPeriod, JournalEntry, JournalEntryLine, AccountBalance, DefaultAccountMapping
+from app.models import Base, User, ProcessedImage, DocumentType, Vendor, Warehouse, Plan, Company, Client, Branch, Project, Technician, HandHeldDevice, Floor, Room, Equipment, SubEquipment, TechnicianAttendance, SparePart, WorkOrder, WorkOrderSparePart, WorkOrderTimeEntry, PMSchedule, ItemCategory, ItemMaster, ItemStock, ItemLedger, ItemTransfer, ItemTransferLine, InvoiceItem, CycleCount, CycleCountItem, RefreshToken, Site, Building, Space, Scope, Contract, ContractScope, Ticket, CalendarSlot, WorkOrderSlotAssignment, CalendarTemplate, InvoiceAllocation, AllocationPeriod, RecognitionLog, AccountType, Account, FiscalPeriod, JournalEntry, JournalEntryLine, AccountBalance, DefaultAccountMapping, ExchangeRate, ExchangeRateLog, PurchaseRequest, PurchaseRequestLine, PurchaseOrder, PurchaseOrderLine, PurchaseOrderInvoice
 from app.config import settings
 from sqlalchemy import text
 
@@ -24,6 +24,8 @@ def run_migrations():
         ("clients", "code", "ALTER TABLE clients ADD COLUMN IF NOT EXISTS code VARCHAR"),
         # Add mobile_pin column to handheld_devices table
         ("handheld_devices", "mobile_pin", "ALTER TABLE handheld_devices ADD COLUMN IF NOT EXISTS mobile_pin VARCHAR"),
+        # Add primary_currency column to companies table
+        ("companies", "primary_currency", "ALTER TABLE companies ADD COLUMN IF NOT EXISTS primary_currency VARCHAR(3) DEFAULT 'USD'"),
     ]
 
     with engine.connect() as conn:
@@ -119,6 +121,9 @@ app.include_router(petty_cash.router, prefix="/api/petty-cash", tags=["Petty Cas
 app.include_router(docs.router, prefix="/api/docs", tags=["Documentation"])
 app.include_router(allocations.router, prefix="/api/allocations", tags=["Invoice Allocations"])
 app.include_router(accounting.router, prefix="/api/accounting", tags=["Accounting"])
+app.include_router(exchange_rates.router, prefix="/api", tags=["Exchange Rates"])
+app.include_router(purchase_requests.router, prefix="/api/purchase-requests", tags=["Purchase Requests"])
+app.include_router(purchase_orders.router, prefix="/api/purchase-orders", tags=["Purchase Orders"])
 
 @app.get("/")
 async def root():

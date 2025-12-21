@@ -84,6 +84,7 @@ class Company(Base):
     registration_number = Column(String, nullable=True)
     website = Column(String, nullable=True)
     logo_url = Column(String, nullable=True)
+    primary_currency = Column(String(3), default='USD')  # ISO 4217 currency code
     industry = Column(String, nullable=True)
     size = Column(String, nullable=True)  # "1-10", "11-50", "51-200", etc.
 
@@ -2830,3 +2831,273 @@ class DefaultAccountMapping(Base):
     company = relationship("Company", backref="account_mappings")
     debit_account = relationship("Account", foreign_keys=[debit_account_id])
     credit_account = relationship("Account", foreign_keys=[credit_account_id])
+
+
+class ExchangeRate(Base):
+    """
+    Exchange Rate - Stores current exchange rates per company.
+    Rates can be fetched from API or set manually.
+    """
+    __tablename__ = "exchange_rates"
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+
+    from_currency = Column(String(3), nullable=False)  # ISO 4217 currency code (e.g., USD)
+    to_currency = Column(String(3), nullable=False)    # ISO 4217 currency code (e.g., LBP)
+    rate = Column(Numeric(18, 8), nullable=False)      # Exchange rate (1 from_currency = rate to_currency)
+    source = Column(String(20), default='api')         # 'api' or 'manual'
+    effective_date = Column(Date, default=func.current_date())
+
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    # Unique constraint: one active rate per currency pair per company
+    __table_args__ = (
+        UniqueConstraint('company_id', 'from_currency', 'to_currency',
+                        name='uq_exchange_rate_pair'),
+    )
+
+    # Relationships
+    company = relationship("Company", backref="exchange_rates")
+
+
+class ExchangeRateLog(Base):
+    """
+    Exchange Rate Log - Historical log of all exchange rate fetches and changes.
+    Used for auditing and tracking rate history.
+    """
+    __tablename__ = "exchange_rate_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+
+    from_currency = Column(String(3), nullable=False)
+    to_currency = Column(String(3), nullable=False)
+    rate = Column(Numeric(18, 8), nullable=False)
+    source = Column(String(20), nullable=False)  # 'api', 'manual', 'api_fallback'
+    fetched_at = Column(DateTime, default=func.now())
+
+    # Optional: store API response details
+    api_provider = Column(String(50), nullable=True)  # e.g., 'exchangerate-api.com'
+    raw_response = Column(Text, nullable=True)        # JSON response for debugging
+
+    # Relationships
+    company = relationship("Company", backref="exchange_rate_logs")
+
+
+# ============================================================================
+# Purchase Request & Purchase Order Models (Procurement Workflow)
+# ============================================================================
+
+class PurchaseRequest(Base):
+    """
+    Purchase Request - Request for purchasing items/services.
+    Workflow: draft → submitted → approved → rejected → ordered → cancelled
+    """
+    __tablename__ = "purchase_requests"
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+    pr_number = Column(String(50), unique=True, index=True)  # PR-2025-00001
+
+    # Status workflow
+    status = Column(String(20), default='draft')  # draft, submitted, approved, rejected, ordered, cancelled
+
+    # Source linkage (optional)
+    work_order_id = Column(Integer, ForeignKey("work_orders.id"), nullable=True)
+    contract_id = Column(Integer, ForeignKey("contracts.id"), nullable=True)
+
+    # Vendor (can be specified or left for PO stage)
+    vendor_id = Column(Integer, ForeignKey("vendors.id"), nullable=True)
+
+    # Details
+    title = Column(String(200), nullable=False)
+    description = Column(Text, nullable=True)
+    required_date = Column(Date, nullable=True)  # When items are needed
+    priority = Column(String(20), default='normal')  # low, normal, high, urgent
+
+    # Totals (calculated from line items)
+    estimated_total = Column(Numeric(12, 2), default=0)
+    currency = Column(String(3), default='USD')
+
+    # Audit
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    # Submission
+    submitted_at = Column(DateTime, nullable=True)
+    submitted_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+
+    # Approval
+    approved_at = Column(DateTime, nullable=True)
+    approved_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    rejection_reason = Column(Text, nullable=True)
+    rejected_at = Column(DateTime, nullable=True)
+    rejected_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+
+    notes = Column(Text, nullable=True)
+
+    # Relationships
+    company = relationship("Company", backref="purchase_requests")
+    work_order = relationship("WorkOrder", backref="purchase_requests")
+    contract = relationship("Contract", backref="purchase_requests")
+    vendor = relationship("Vendor", backref="purchase_requests")
+    creator = relationship("User", foreign_keys=[created_by], backref="created_purchase_requests")
+    submitter = relationship("User", foreign_keys=[submitted_by])
+    approver = relationship("User", foreign_keys=[approved_by])
+    rejector = relationship("User", foreign_keys=[rejected_by])
+    lines = relationship("PurchaseRequestLine", back_populates="purchase_request", cascade="all, delete-orphan")
+    purchase_orders = relationship("PurchaseOrder", back_populates="purchase_request")
+
+
+class PurchaseRequestLine(Base):
+    """
+    Purchase Request Line Item - Individual items requested in a PR.
+    """
+    __tablename__ = "purchase_request_lines"
+
+    id = Column(Integer, primary_key=True, index=True)
+    purchase_request_id = Column(Integer, ForeignKey("purchase_requests.id", ondelete="CASCADE"), nullable=False)
+
+    # Item reference (optional - can be free text)
+    item_id = Column(Integer, ForeignKey("item_master.id"), nullable=True)
+
+    # Item details
+    item_number = Column(String(100), nullable=True)  # From item master or manual
+    description = Column(String(500), nullable=False)
+
+    # Quantities
+    quantity_requested = Column(Numeric(10, 2), nullable=False)
+    quantity_approved = Column(Numeric(10, 2), nullable=True)  # Set during approval
+    unit = Column(String(20), default='EA')
+
+    # Costs
+    estimated_unit_cost = Column(Numeric(12, 2), nullable=True)
+    estimated_total = Column(Numeric(12, 2), nullable=True)
+
+    notes = Column(Text, nullable=True)
+
+    # Relationships
+    purchase_request = relationship("PurchaseRequest", back_populates="lines")
+    item = relationship("ItemMaster")
+
+
+class PurchaseOrder(Base):
+    """
+    Purchase Order - Order sent to vendor for purchasing items/services.
+    Workflow: draft → sent → acknowledged → partial → received → cancelled
+    """
+    __tablename__ = "purchase_orders"
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+    po_number = Column(String(50), unique=True, index=True)  # PO-2025-00001
+
+    # Link to PR (optional - PO can exist without PR)
+    purchase_request_id = Column(Integer, ForeignKey("purchase_requests.id"), nullable=True)
+
+    # Status: draft → sent → acknowledged → partial → received → cancelled
+    status = Column(String(20), default='draft')
+
+    # Vendor (required for PO)
+    vendor_id = Column(Integer, ForeignKey("vendors.id"), nullable=False)
+
+    # Source linkage (inherited from PR or set directly)
+    work_order_id = Column(Integer, ForeignKey("work_orders.id"), nullable=True)
+    contract_id = Column(Integer, ForeignKey("contracts.id"), nullable=True)
+
+    # Dates
+    order_date = Column(Date, nullable=True)
+    expected_date = Column(Date, nullable=True)
+
+    # Totals
+    subtotal = Column(Numeric(12, 2), default=0)
+    tax_amount = Column(Numeric(12, 2), default=0)
+    total_amount = Column(Numeric(12, 2), default=0)
+    currency = Column(String(3), default='USD')
+
+    # Terms
+    payment_terms = Column(String(100), nullable=True)  # Net 30, etc.
+    shipping_address = Column(Text, nullable=True)
+
+    # Audit
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    notes = Column(Text, nullable=True)
+
+    # Relationships
+    company = relationship("Company", backref="purchase_orders")
+    purchase_request = relationship("PurchaseRequest", back_populates="purchase_orders")
+    vendor = relationship("Vendor", backref="purchase_orders")
+    work_order = relationship("WorkOrder", backref="purchase_orders")
+    contract = relationship("Contract", backref="purchase_orders")
+    creator = relationship("User", foreign_keys=[created_by], backref="created_purchase_orders")
+    lines = relationship("PurchaseOrderLine", back_populates="purchase_order", cascade="all, delete-orphan")
+    linked_invoices = relationship("PurchaseOrderInvoice", back_populates="purchase_order", cascade="all, delete-orphan")
+
+
+class PurchaseOrderLine(Base):
+    """
+    Purchase Order Line Item - Individual items ordered in a PO.
+    """
+    __tablename__ = "purchase_order_lines"
+
+    id = Column(Integer, primary_key=True, index=True)
+    purchase_order_id = Column(Integer, ForeignKey("purchase_orders.id", ondelete="CASCADE"), nullable=False)
+
+    # Link to PR line (if converted from PR)
+    pr_line_id = Column(Integer, ForeignKey("purchase_request_lines.id"), nullable=True)
+
+    # Item reference
+    item_id = Column(Integer, ForeignKey("item_master.id"), nullable=True)
+    item_number = Column(String(100), nullable=True)
+    description = Column(String(500), nullable=False)
+
+    # Quantities
+    quantity_ordered = Column(Numeric(10, 2), nullable=False)
+    quantity_received = Column(Numeric(10, 2), default=0)
+    unit = Column(String(20), default='EA')
+
+    # Pricing
+    unit_price = Column(Numeric(12, 2), nullable=False)
+    total_price = Column(Numeric(12, 2), nullable=False)
+
+    # Status: pending → partial → received → cancelled
+    receive_status = Column(String(20), default='pending')
+
+    notes = Column(Text, nullable=True)
+
+    # Relationships
+    purchase_order = relationship("PurchaseOrder", back_populates="lines")
+    pr_line = relationship("PurchaseRequestLine")
+    item = relationship("ItemMaster")
+
+
+class PurchaseOrderInvoice(Base):
+    """
+    Purchase Order Invoice Link - Links invoices to purchase orders for 3-way matching.
+    """
+    __tablename__ = "purchase_order_invoices"
+
+    id = Column(Integer, primary_key=True, index=True)
+    purchase_order_id = Column(Integer, ForeignKey("purchase_orders.id", ondelete="CASCADE"), nullable=False)
+    invoice_id = Column(Integer, ForeignKey("processed_images.id"), nullable=False)
+
+    linked_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    linked_at = Column(DateTime, default=func.now())
+    notes = Column(Text, nullable=True)
+
+    # Unique constraint: one link per PO-Invoice pair
+    __table_args__ = (
+        UniqueConstraint('purchase_order_id', 'invoice_id', name='uq_po_invoice_link'),
+    )
+
+    # Relationships
+    purchase_order = relationship("PurchaseOrder", back_populates="linked_invoices")
+    invoice = relationship("ProcessedImage")
+    linker = relationship("User", foreign_keys=[linked_by])

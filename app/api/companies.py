@@ -1,8 +1,8 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
-from typing import Optional
+from typing import Optional, List
 from datetime import datetime, timedelta
 from app.database import get_db
 from app.models import Company, User, Plan
@@ -10,6 +10,8 @@ from app.utils.security import get_password_hash, create_access_token, verify_to
 from app.utils.pm_seed import seed_pm_checklists_for_company
 import re
 import logging
+import os
+import uuid
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +105,25 @@ class CompanyUpdate(BaseModel):
     website: Optional[str] = None
     industry: Optional[str] = None
     size: Optional[str] = None
+    primary_currency: Optional[str] = None  # ISO 4217 currency code
+
+
+# Supported currencies for the application
+SUPPORTED_CURRENCIES = [
+    {"code": "USD", "name": "US Dollar", "symbol": "$"},
+    {"code": "EUR", "name": "Euro", "symbol": "€"},
+    {"code": "GBP", "name": "British Pound", "symbol": "£"},
+    {"code": "LBP", "name": "Lebanese Pound", "symbol": "ل.ل"},
+    {"code": "SYP", "name": "Syrian Pound", "symbol": "ل.س"},
+    {"code": "AED", "name": "UAE Dirham", "symbol": "د.إ"},
+    {"code": "SAR", "name": "Saudi Riyal", "symbol": "ر.س"},
+    {"code": "QAR", "name": "Qatari Riyal", "symbol": "ر.ق"},
+    {"code": "KWD", "name": "Kuwaiti Dinar", "symbol": "د.ك"},
+    {"code": "BHD", "name": "Bahraini Dinar", "symbol": "د.ب"},
+    {"code": "OMR", "name": "Omani Rial", "symbol": "ر.ع"},
+    {"code": "JOD", "name": "Jordanian Dinar", "symbol": "د.أ"},
+    {"code": "EGP", "name": "Egyptian Pound", "symbol": "ج.م"},
+]
 
 
 @router.post("/companies/register")
@@ -254,6 +275,8 @@ async def get_my_company(user: User = Depends(get_current_user), db: Session = D
         "tax_number": company.tax_number,
         "registration_number": company.registration_number,
         "website": company.website,
+        "logo_url": company.logo_url,
+        "primary_currency": company.primary_currency or "USD",
         "industry": company.industry,
         "size": company.size,
         "subscription_status": company.subscription_status,
@@ -365,3 +388,137 @@ async def get_company_stats(user: User = Depends(get_current_user), db: Session 
         "documents_limit": company.plan.documents_max if company.plan else 0,
         "subscription_status": company.subscription_status
     }
+
+
+@router.get("/companies/currencies")
+async def get_supported_currencies():
+    """Get list of supported currencies"""
+    return {
+        "currencies": SUPPORTED_CURRENCIES
+    }
+
+
+@router.post("/companies/logo")
+async def upload_company_logo(
+    file: UploadFile = File(...),
+    user: User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """Upload company logo (admin only)"""
+    if not user.company_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No company associated with this user"
+        )
+
+    company = db.query(Company).filter(Company.id == user.company_id).first()
+    if not company:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Company not found"
+        )
+
+    # Validate file type
+    allowed_types = ["image/jpeg", "image/png", "image/gif", "image/webp"]
+    if file.content_type not in allowed_types:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid file type. Allowed types: {', '.join(allowed_types)}"
+        )
+
+    # Validate file size (max 5MB)
+    file_content = await file.read()
+    if len(file_content) > 5 * 1024 * 1024:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="File size exceeds 5MB limit"
+        )
+
+    try:
+        # Create uploads directory if it doesn't exist
+        upload_dir = "uploads/logos"
+        os.makedirs(upload_dir, exist_ok=True)
+
+        # Generate unique filename
+        file_ext = os.path.splitext(file.filename)[1] if file.filename else ".png"
+        unique_filename = f"company_{company.id}_{uuid.uuid4().hex[:8]}{file_ext}"
+        file_path = os.path.join(upload_dir, unique_filename)
+
+        # Delete old logo if exists
+        if company.logo_url:
+            old_path = company.logo_url.lstrip("/")
+            if os.path.exists(old_path):
+                try:
+                    os.remove(old_path)
+                except Exception as e:
+                    logger.warning(f"Failed to delete old logo: {e}")
+
+        # Save new file
+        with open(file_path, "wb") as f:
+            f.write(file_content)
+
+        # Update company logo_url
+        company.logo_url = f"/{file_path}"
+        db.commit()
+
+        logger.info(f"Company logo uploaded for company {company.id} by {user.email}")
+
+        return {
+            "success": True,
+            "message": "Logo uploaded successfully",
+            "logo_url": company.logo_url
+        }
+
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error uploading company logo: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error uploading logo: {str(e)}"
+        )
+
+
+@router.delete("/companies/logo")
+async def delete_company_logo(
+    user: User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """Delete company logo (admin only)"""
+    if not user.company_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No company associated with this user"
+        )
+
+    company = db.query(Company).filter(Company.id == user.company_id).first()
+    if not company:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Company not found"
+        )
+
+    try:
+        # Delete file if exists
+        if company.logo_url:
+            old_path = company.logo_url.lstrip("/")
+            if os.path.exists(old_path):
+                os.remove(old_path)
+
+        # Clear logo_url
+        company.logo_url = None
+        db.commit()
+
+        logger.info(f"Company logo deleted for company {company.id} by {user.email}")
+
+        return {
+            "success": True,
+            "message": "Logo deleted successfully"
+        }
+
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error deleting company logo: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error deleting logo: {str(e)}"
+        )

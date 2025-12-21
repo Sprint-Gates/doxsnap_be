@@ -1307,3 +1307,279 @@ class AutoPostRequest(BaseModel):
     source_type: str  # invoice, work_order, petty_cash
     source_id: int
     post_immediately: bool = False
+
+
+# ============================================================================
+# Purchase Request Schemas
+# ============================================================================
+
+class PurchaseRequestLineCreate(BaseModel):
+    item_id: Optional[int] = None
+    item_number: Optional[str] = None
+    description: str
+    quantity_requested: float
+    unit: str = "EA"
+    estimated_unit_cost: Optional[float] = None
+    notes: Optional[str] = None
+
+
+class PurchaseRequestLineUpdate(BaseModel):
+    item_id: Optional[int] = None
+    item_number: Optional[str] = None
+    description: Optional[str] = None
+    quantity_requested: Optional[float] = None
+    quantity_approved: Optional[float] = None
+    unit: Optional[str] = None
+    estimated_unit_cost: Optional[float] = None
+    notes: Optional[str] = None
+
+
+class PurchaseRequestLine(BaseModel):
+    id: int
+    purchase_request_id: int
+    item_id: Optional[int] = None
+    item_number: Optional[str] = None
+    description: str
+    quantity_requested: float
+    quantity_approved: Optional[float] = None
+    unit: str
+    estimated_unit_cost: Optional[float] = None
+    estimated_total: Optional[float] = None
+    notes: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class PurchaseRequestCreate(BaseModel):
+    title: str
+    description: Optional[str] = None
+    work_order_id: Optional[int] = None
+    contract_id: Optional[int] = None
+    vendor_id: Optional[int] = None
+    required_date: Optional[date] = None
+    priority: str = "normal"
+    currency: str = "USD"
+    notes: Optional[str] = None
+    lines: Optional[List[PurchaseRequestLineCreate]] = None
+
+
+class PurchaseRequestUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    work_order_id: Optional[int] = None
+    contract_id: Optional[int] = None
+    vendor_id: Optional[int] = None
+    required_date: Optional[date] = None
+    priority: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class PurchaseRequest(BaseModel):
+    id: int
+    company_id: int
+    pr_number: str
+    status: str
+    work_order_id: Optional[int] = None
+    contract_id: Optional[int] = None
+    vendor_id: Optional[int] = None
+    title: str
+    description: Optional[str] = None
+    required_date: Optional[date] = None
+    priority: str
+    estimated_total: float
+    currency: str
+    created_by: int
+    created_at: datetime
+    updated_at: datetime
+    submitted_at: Optional[datetime] = None
+    submitted_by: Optional[int] = None
+    approved_at: Optional[datetime] = None
+    approved_by: Optional[int] = None
+    rejection_reason: Optional[str] = None
+    rejected_at: Optional[datetime] = None
+    rejected_by: Optional[int] = None
+    notes: Optional[str] = None
+    lines: List[PurchaseRequestLine] = []
+
+    class Config:
+        from_attributes = True
+
+
+class PurchaseRequestList(BaseModel):
+    id: int
+    pr_number: str
+    status: str
+    title: str
+    priority: str
+    estimated_total: float
+    currency: str
+    required_date: Optional[date] = None
+    vendor_name: Optional[str] = None
+    work_order_number: Optional[str] = None
+    contract_number: Optional[str] = None
+    created_by_name: str
+    created_at: datetime
+    line_count: int = 0
+
+    class Config:
+        from_attributes = True
+
+
+class PurchaseRequestApproval(BaseModel):
+    line_approvals: Optional[dict] = None  # {line_id: approved_quantity}
+    notes: Optional[str] = None
+
+
+class PurchaseRequestRejection(BaseModel):
+    reason: str
+
+
+# ============================================================================
+# Purchase Order Schemas
+# ============================================================================
+
+class PurchaseOrderLineCreate(BaseModel):
+    pr_line_id: Optional[int] = None
+    item_id: Optional[int] = None
+    item_number: Optional[str] = None
+    description: str
+    quantity_ordered: float
+    unit: str = "EA"
+    unit_price: float
+    notes: Optional[str] = None
+
+
+class PurchaseOrderLineUpdate(BaseModel):
+    item_id: Optional[int] = None
+    item_number: Optional[str] = None
+    description: Optional[str] = None
+    quantity_ordered: Optional[float] = None
+    unit: Optional[str] = None
+    unit_price: Optional[float] = None
+    notes: Optional[str] = None
+
+
+class PurchaseOrderLineReceive(BaseModel):
+    quantity_received: float
+
+
+class PurchaseOrderLine(BaseModel):
+    id: int
+    purchase_order_id: int
+    pr_line_id: Optional[int] = None
+    item_id: Optional[int] = None
+    item_number: Optional[str] = None
+    description: str
+    quantity_ordered: float
+    quantity_received: float
+    unit: str
+    unit_price: float
+    total_price: float
+    receive_status: str
+    notes: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class PurchaseOrderCreate(BaseModel):
+    purchase_request_id: Optional[int] = None
+    vendor_id: int
+    work_order_id: Optional[int] = None
+    contract_id: Optional[int] = None
+    order_date: Optional[date] = None
+    expected_date: Optional[date] = None
+    payment_terms: Optional[str] = None
+    shipping_address: Optional[str] = None
+    currency: str = "USD"
+    notes: Optional[str] = None
+    lines: Optional[List[PurchaseOrderLineCreate]] = None
+
+
+class PurchaseOrderUpdate(BaseModel):
+    vendor_id: Optional[int] = None
+    work_order_id: Optional[int] = None
+    contract_id: Optional[int] = None
+    order_date: Optional[date] = None
+    expected_date: Optional[date] = None
+    payment_terms: Optional[str] = None
+    shipping_address: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class PurchaseOrder(BaseModel):
+    id: int
+    company_id: int
+    po_number: str
+    purchase_request_id: Optional[int] = None
+    status: str
+    vendor_id: int
+    work_order_id: Optional[int] = None
+    contract_id: Optional[int] = None
+    order_date: Optional[date] = None
+    expected_date: Optional[date] = None
+    subtotal: float
+    tax_amount: float
+    total_amount: float
+    currency: str
+    payment_terms: Optional[str] = None
+    shipping_address: Optional[str] = None
+    created_by: int
+    created_at: datetime
+    updated_at: datetime
+    notes: Optional[str] = None
+    lines: List[PurchaseOrderLine] = []
+
+    class Config:
+        from_attributes = True
+
+
+class PurchaseOrderList(BaseModel):
+    id: int
+    po_number: str
+    pr_number: Optional[str] = None
+    status: str
+    vendor_name: str
+    total_amount: float
+    currency: str
+    order_date: Optional[date] = None
+    expected_date: Optional[date] = None
+    work_order_number: Optional[str] = None
+    contract_number: Optional[str] = None
+    created_by_name: str
+    created_at: datetime
+    line_count: int = 0
+    invoices_linked: int = 0
+
+    class Config:
+        from_attributes = True
+
+
+class POInvoiceLink(BaseModel):
+    invoice_id: int
+    notes: Optional[str] = None
+
+
+class PurchaseOrderInvoice(BaseModel):
+    id: int
+    purchase_order_id: int
+    invoice_id: int
+    linked_by: int
+    linked_at: datetime
+    notes: Optional[str] = None
+    invoice_number: Optional[str] = None
+    invoice_vendor_name: Optional[str] = None
+    invoice_total: Optional[float] = None
+
+    class Config:
+        from_attributes = True
+
+
+class ConvertToPORequest(BaseModel):
+    vendor_id: int
+    order_date: Optional[date] = None
+    expected_date: Optional[date] = None
+    payment_terms: Optional[str] = None
+    shipping_address: Optional[str] = None
+    line_prices: Optional[dict] = None  # {pr_line_id: unit_price}
