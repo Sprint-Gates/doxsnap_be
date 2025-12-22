@@ -4,12 +4,13 @@ User Management API - for managing company users
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, field_validator
 from typing import Optional, List
 from datetime import datetime
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.database import get_db
-from app.models import User
+from app.models import User, Client, Site, ExternalUserClient
 from app.utils.security import get_password_hash, verify_token
 from app.utils.limits import check_user_limit, enforce_user_limit
 
@@ -38,18 +39,30 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
 
     return user
 
-
 class UserCreate(BaseModel):
     email: EmailStr
     password: str
     name: str
-<<<<<<< HEAD
-    role: str = "operator"  # admin, operator, accounting, procurement, general_manager
-=======
-    role: str = "operator"  # admin, operator, accounting, external-user
->>>>>>> de31d53 (WIP: external users changes)
+    role: str = "operator" # admin, operator, accounting, procurement, general_manager, external-user
     phone: Optional[str] = None
 
+    # External user only
+    client_id: Optional[int] = None
+    site_ids: Optional[List[int]] = None
+
+    @field_validator("client_id")
+    @classmethod
+    def validate_client_for_external(cls, v, info):
+        if info.data.get("role") == "external-user" and not v:
+            raise ValueError("client_id is required for external users")
+        return v
+
+    @field_validator("site_ids")
+    @classmethod
+    def validate_sites_for_external(cls, v, info):
+        if info.data.get("role") == "external-user" and not v:
+            raise ValueError("At least one site is required for external users")
+        return v
 
 class UserUpdate(BaseModel):
     name: Optional[str] = None
@@ -159,26 +172,67 @@ async def create_user(
         )
 
     # Check if email already exists
-    existing = db.query(User).filter(User.email == data.email).first()
-    if existing:
+    if db.query(User).filter(User.email == data.email).first():
         raise HTTPException(
             status_code=400,
             detail="A user with this email already exists"
         )
 
-    new_user = User(
-        email=data.email,
-        hashed_password=get_password_hash(data.password),
-        name=data.name,
-        role=data.role,
-        phone=data.phone,
-        company_id=user.company_id,
-        is_active=True
-    )
+    try:
+        # Start transaction
+        new_user = User(
+            email=data.email,
+            hashed_password=get_password_hash(data.password),
+            name=data.name,
+            role=data.role,
+            phone=data.phone,
+            company_id=user.company_id,
+            is_active=True
+        )
 
-    db.add(new_user)
-    db.commit()
-    db.refresh(new_user)
+        db.add(new_user)
+
+        # External user handling
+        if data.role == "external-user":
+            if not data.client_id:
+                raise HTTPException(status_code=400, detail="client_id is required for external users")
+            if not data.site_ids or len(data.site_ids) == 0:
+                raise HTTPException(status_code=400, detail="At least one site is required for external users")
+
+            # Validate client belongs to same company
+            client = db.query(Client).filter(
+                Client.id == data.client_id,
+                Client.company_id == user.company_id
+            ).first()
+            if not client:
+                raise HTTPException(status_code=400, detail="Invalid client")
+
+            # Validate sites belong to client
+            sites = db.query(Site).filter(
+                Site.id.in_(data.site_ids),
+                Site.client_id == client.id
+            ).all()
+            if len(sites) != len(data.site_ids):
+                raise HTTPException(
+                    status_code=400,
+                    detail="One or more sites do not belong to the selected client"
+                )
+
+            # Create ExternalUserClient entry
+            euc = ExternalUserClient(
+                user=new_user,
+                client=client,
+                company_id=user.company_id
+            )
+            euc.sites = sites
+            db.add(euc)
+
+        db.commit()
+        db.refresh(new_user)
+
+    except SQLAlchemyError as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Failed to create user") from e
 
     return new_user
 
@@ -212,11 +266,7 @@ async def update_user(
 
     # Validate role if provided
     if data.role:
-<<<<<<< HEAD
-        valid_roles = ["admin", "operator", "accounting", "procurement", "general_manager"]
-=======
-        valid_roles = ["admin", "operator", "accounting", "external-user"]
->>>>>>> de31d53 (WIP: external users changes)
+        valid_roles = ["admin", "operator", "accounting", "procurement", "general_manager", "external-user"]
         if data.role not in valid_roles:
             raise HTTPException(
                 status_code=400,

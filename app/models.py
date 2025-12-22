@@ -265,9 +265,9 @@ class User(Base):
     # assigned_branches = relationship("Branch", secondary=operator_branches, back_populates="operators")
     address_book = relationship("AddressBook", foreign_keys=[address_book_id], backref="user_account")
     external_user_clients = relationship(
-    "ExternalUserClient",
-    back_populates="user",
-    cascade="all, delete-orphan"
+        "ExternalUserClient",
+        back_populates="user",
+        cascade="all, delete-orphan"
     )
     warehouses = relationship(
     "Warehouse",
@@ -285,10 +285,14 @@ class ExternalUserClient(Base):
     company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
 
     # Relationships
-    user = relationship("User", backref="external_user_clients")
-    client = relationship("Client", backref="external_user_clients")
-    company = relationship("Company", backref="external_user_clients")
-    sites = relationship("Site", secondary=external_user_client_sites, backref="external_user_clients")
+    user = relationship("User", back_populates="external_user_clients")
+    client = relationship("Client", back_populates="external_user_clients")
+    company = relationship("Company", back_populates="external_user_clients")
+    sites = relationship(
+        "Site",
+        secondary=external_user_client_sites,
+        back_populates="external_user_clients"
+    )
 
 class SuperAdmin(Base):
     """Platform super admin for managing all companies and subscriptions"""
@@ -1770,8 +1774,12 @@ class Site(Base):
     operators = relationship("User", secondary=operator_sites, backref="assigned_sites")
     contracts = relationship("Contract", secondary=contract_sites, back_populates="sites")
     projects = relationship("Project", back_populates="site", cascade="all, delete-orphan")
-    technician_shifts = relationship("TechnicianSiteShift", back_populates="site", cascade="all, delete-orphan"
-)
+    technician_shifts = relationship("TechnicianSiteShift", back_populates="site", cascade="all, delete-orphan")
+    external_user_clients = relationship(
+        "ExternalUserClient",
+        secondary=external_user_client_sites,
+        back_populates="sites"
+    )
 
 
 

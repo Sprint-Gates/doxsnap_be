@@ -2918,3 +2918,6 @@ class ClientWorkOrderList(BaseModel):
     total: int
     page: int
     size: int
+    
+class CancelTicketRequest(BaseModel):
+    reason: Optional[str] = None
