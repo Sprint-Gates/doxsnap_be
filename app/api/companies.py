@@ -177,7 +177,7 @@ async def register_company(data: CompanyRegister, db: Session = Depends(get_db))
             plan_id=plan.id,
             subscription_status="trial",
             subscription_start=datetime.utcnow(),
-            subscription_end=datetime.utcnow() + timedelta(days=14),  # 14-day trial
+            subscription_end=datetime.utcnow() + timedelta(days=5),  # 5-day trial
             documents_used_this_month=0
         )
         db.add(company)

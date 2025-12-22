@@ -1,14 +1,18 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
+from datetime import datetime
 import os
 import logging
 import google.generativeai as genai
 
 from app.api import auth, images, otp, admin, document_types, technician_site_shifts, vendors, plans, companies, clients, branches, projects, operators, technicians, handheld_devices, assets, attendance, work_orders, warehouses, pm_checklists, pm_work_orders, dashboard, item_master, cycle_count, hhd_auth, users, sites, contracts, tickets, calendar, condition_reports, technician_evaluations, nps, petty_cash, docs, allocations, accounting, exchange_rates, purchase_requests, purchase_orders
-from app.database import engine
+from app.database import engine, get_db
 from app.models import Base, User, ProcessedImage, DocumentType, Vendor, Warehouse, Plan, Company, Client, Branch, Project, Technician, HandHeldDevice, Floor, Room, Equipment, SubEquipment, TechnicianAttendance, SparePart, WorkOrder, WorkOrderSparePart, WorkOrderTimeEntry, PMSchedule, ItemCategory, ItemMaster, ItemStock, ItemLedger, ItemTransfer, ItemTransferLine, InvoiceItem, CycleCount, CycleCountItem, RefreshToken, Site, Building, Space, Scope, Contract, ContractScope, Ticket, CalendarSlot, WorkOrderSlotAssignment, CalendarTemplate, InvoiceAllocation, AllocationPeriod, RecognitionLog, AccountType, Account, FiscalPeriod, JournalEntry, JournalEntryLine, AccountBalance, DefaultAccountMapping, ExchangeRate, ExchangeRateLog, PurchaseRequest, PurchaseRequestLine, PurchaseOrder, PurchaseOrderLine, PurchaseOrderInvoice
 from app.config import settings
+from app.utils.security import verify_token
 from sqlalchemy import text
 
 logging.basicConfig(level=logging.INFO)
@@ -67,6 +71,100 @@ def validate_google_api_key():
 google_api_valid = validate_google_api_key()
 
 app = FastAPI(title="Image Processor API", version="1.0.0")
+
+
+# Subscription enforcement middleware
+class SubscriptionEnforcementMiddleware(BaseHTTPMiddleware):
+    """Middleware to enforce subscription/trial period for protected API routes."""
+
+    # Routes that don't require subscription check
+    EXEMPT_PATHS = [
+        "/api/auth/",
+        "/api/plans",
+        "/api/companies/register",
+        "/api/health",
+        "/api/otp",
+        "/api/docs",
+        "/uploads/",
+        "/",
+    ]
+
+    async def dispatch(self, request: Request, call_next):
+        path = request.url.path
+
+        # Skip check for exempt paths
+        for exempt in self.EXEMPT_PATHS:
+            if path.startswith(exempt) or path == exempt.rstrip('/'):
+                return await call_next(request)
+
+        # Skip check for non-API routes
+        if not path.startswith("/api/"):
+            return await call_next(request)
+
+        # Skip OPTIONS requests (CORS preflight)
+        if request.method == "OPTIONS":
+            return await call_next(request)
+
+        # Get authorization header
+        auth_header = request.headers.get("Authorization")
+        if not auth_header or not auth_header.startswith("Bearer "):
+            # Let the route handler deal with missing auth
+            return await call_next(request)
+
+        token = auth_header.split(" ")[1]
+        email = verify_token(token)
+
+        if not email:
+            # Invalid token - let route handler deal with it
+            return await call_next(request)
+
+        # Check subscription status
+        db = next(get_db())
+        try:
+            user = db.query(User).filter(User.email == email).first()
+            if not user or not user.company_id:
+                return await call_next(request)
+
+            company = db.query(Company).filter(Company.id == user.company_id).first()
+            if not company:
+                return await call_next(request)
+
+            # Check subscription status
+            if company.subscription_status in ["cancelled", "suspended"]:
+                return JSONResponse(
+                    status_code=403,
+                    content={
+                        "detail": f"Subscription has been {company.subscription_status}. Please contact support.",
+                        "subscription_status": company.subscription_status
+                    }
+                )
+
+            # Check if trial/subscription has expired
+            if company.subscription_end and company.subscription_end < datetime.utcnow():
+                if company.subscription_status == "trial":
+                    return JSONResponse(
+                        status_code=403,
+                        content={
+                            "detail": "Your 5-day trial period has expired. Please upgrade to continue using the application.",
+                            "subscription_status": "trial_expired"
+                        }
+                    )
+                else:
+                    return JSONResponse(
+                        status_code=403,
+                        content={
+                            "detail": "Your subscription has expired. Please renew to continue.",
+                            "subscription_status": "expired"
+                        }
+                    )
+        finally:
+            db.close()
+
+        return await call_next(request)
+
+
+# Add subscription enforcement middleware
+app.add_middleware(SubscriptionEnforcementMiddleware)
 
 # CORS middleware - must be added after all other middlewares
 app.add_middleware(

@@ -11,10 +11,39 @@ from app.services.auth import create_user, authenticate_user, get_user_by_email,
 from app.utils.security import create_access_token, verify_token, get_password_hash, generate_refresh_token, get_refresh_token_expiry
 from app.config import settings
 from app.services.otp import OTPService
-from app.models import RefreshToken
+from app.models import RefreshToken, Company
 
 router = APIRouter()
 security = HTTPBearer()
+
+
+def check_subscription_active(user, db: Session) -> dict:
+    """
+    Check if user's company has an active subscription.
+    Returns dict with 'active' boolean and 'reason' string.
+    """
+    if not user.company_id:
+        return {"active": True, "reason": None}  # No company = no restriction
+
+    company = db.query(Company).filter(Company.id == user.company_id).first()
+    if not company:
+        return {"active": True, "reason": None}
+
+    # Check subscription status
+    if company.subscription_status == "cancelled":
+        return {"active": False, "reason": "Subscription has been cancelled"}
+
+    if company.subscription_status == "suspended":
+        return {"active": False, "reason": "Subscription has been suspended"}
+
+    # Check if trial or subscription has expired
+    if company.subscription_end and company.subscription_end < datetime.utcnow():
+        if company.subscription_status == "trial":
+            return {"active": False, "reason": "Trial period has expired. Please upgrade to continue."}
+        else:
+            return {"active": False, "reason": "Subscription has expired. Please renew to continue."}
+
+    return {"active": True, "reason": None}
 
 
 async def get_current_user(
@@ -26,14 +55,34 @@ async def get_current_user(
         detail="Could not validate credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
-    
+
     email = verify_token(credentials.credentials)
     if email is None:
         raise credentials_exception
-    
+
     user = get_user_by_email(db, email=email)
     if user is None:
         raise credentials_exception
+    return user
+
+
+async def get_current_active_user(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db)
+):
+    """
+    Get current user and verify their subscription is active.
+    Use this for protected routes that require an active subscription.
+    """
+    user = await get_current_user(credentials, db)
+
+    subscription_check = check_subscription_active(user, db)
+    if not subscription_check["active"]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=subscription_check["reason"]
+        )
+
     return user
 
 
