@@ -10,6 +10,7 @@ from app.models import Company, User, Plan
 from app.utils.security import get_password_hash, create_access_token, verify_token
 from app.utils.pm_seed import seed_pm_checklists_for_company
 from app.utils.company_seed import seed_company_defaults
+from app.utils.crm_seed import seed_crm_defaults
 import re
 import logging
 import os
@@ -219,6 +220,15 @@ async def register_company(data: CompanyRegister, db: Session = Depends(get_db))
         except Exception as pm_error:
             logger.warning(f"Failed to seed PM checklists for company {company.id}: {pm_error}")
             # Don't fail company registration if PM seed fails
+
+        # Seed CRM defaults (Lead Sources, Pipeline Stages)
+        try:
+            crm_stats = seed_crm_defaults(company.id, db)
+            db.commit()
+            logger.info(f"CRM defaults seeded for company {company.id}: {crm_stats}")
+        except Exception as crm_error:
+            logger.warning(f"Failed to seed CRM defaults for company {company.id}: {crm_error}")
+            # Don't fail company registration if CRM seed fails
 
         # Create access token
         access_token = create_access_token(data={"sub": admin_user.email})

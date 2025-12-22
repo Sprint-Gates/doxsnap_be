@@ -3101,3 +3101,327 @@ class PurchaseOrderInvoice(Base):
     purchase_order = relationship("PurchaseOrder", back_populates="linked_invoices")
     invoice = relationship("ProcessedImage")
     linker = relationship("User", foreign_keys=[linked_by])
+
+
+# =============================================================================
+# CRM MODELS
+# =============================================================================
+
+class LeadSource(Base):
+    """
+    Lead Source - Where leads come from (Website, Referral, Cold Call, etc.)
+    """
+    __tablename__ = "lead_sources"
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+    name = Column(String(100), nullable=False)
+    code = Column(String(20), nullable=True)
+    description = Column(Text, nullable=True)
+    is_active = Column(Boolean, default=True)
+    sort_order = Column(Integer, default=0)
+    created_at = Column(DateTime, default=func.now())
+
+    # Relationships
+    company = relationship("Company")
+    leads = relationship("Lead", back_populates="source")
+
+
+class PipelineStage(Base):
+    """
+    Pipeline Stage - Stages in the sales pipeline (New, Qualified, Proposal, Negotiation, Won, Lost)
+    """
+    __tablename__ = "pipeline_stages"
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+    name = Column(String(100), nullable=False)
+    code = Column(String(20), nullable=True)
+    color = Column(String(20), default="#6366f1")  # Hex color for UI
+    probability = Column(Integer, default=0)  # Win probability percentage (0-100)
+    is_won = Column(Boolean, default=False)  # Is this a "won" stage
+    is_lost = Column(Boolean, default=False)  # Is this a "lost" stage
+    is_active = Column(Boolean, default=True)
+    sort_order = Column(Integer, default=0)
+    created_at = Column(DateTime, default=func.now())
+
+    # Relationships
+    company = relationship("Company")
+    opportunities = relationship("Opportunity", back_populates="stage")
+
+
+class Lead(Base):
+    """
+    Lead - Potential customer/opportunity before qualification
+    """
+    __tablename__ = "leads"
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+
+    # Contact information
+    first_name = Column(String(100), nullable=False)
+    last_name = Column(String(100), nullable=True)
+    email = Column(String(255), nullable=True)
+    phone = Column(String(50), nullable=True)
+    mobile = Column(String(50), nullable=True)
+    job_title = Column(String(100), nullable=True)
+
+    # Company information
+    company_name = Column(String(255), nullable=True)
+    industry = Column(String(100), nullable=True)
+    website = Column(String(255), nullable=True)
+    employee_count = Column(String(50), nullable=True)  # "1-10", "11-50", etc.
+
+    # Address
+    address = Column(Text, nullable=True)
+    city = Column(String(100), nullable=True)
+    state = Column(String(100), nullable=True)
+    country = Column(String(100), nullable=True)
+    postal_code = Column(String(20), nullable=True)
+
+    # Lead details
+    source_id = Column(Integer, ForeignKey("lead_sources.id"), nullable=True)
+    status = Column(String(20), default="new")  # new, contacted, qualified, unqualified, converted
+    rating = Column(String(10), nullable=True)  # hot, warm, cold
+
+    # Value estimation
+    estimated_value = Column(Numeric(14, 2), nullable=True)
+    currency = Column(String(3), default="USD")
+
+    # Assignment
+    assigned_to = Column(Integer, ForeignKey("users.id"), nullable=True)
+
+    # Notes and description
+    description = Column(Text, nullable=True)
+    notes = Column(Text, nullable=True)
+
+    # Conversion tracking
+    converted_to_client_id = Column(Integer, ForeignKey("clients.id"), nullable=True)
+    converted_to_opportunity_id = Column(Integer, nullable=True)  # Will reference opportunities.id
+    converted_at = Column(DateTime, nullable=True)
+    converted_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+
+    # Audit
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    # Relationships
+    company = relationship("Company")
+    source = relationship("LeadSource", back_populates="leads")
+    assignee = relationship("User", foreign_keys=[assigned_to])
+    creator = relationship("User", foreign_keys=[created_by])
+    converter = relationship("User", foreign_keys=[converted_by])
+    converted_client = relationship("Client")
+    activities = relationship("CRMActivity", back_populates="lead", foreign_keys="CRMActivity.lead_id")
+
+
+class Opportunity(Base):
+    """
+    Opportunity - Qualified sales opportunity with pipeline tracking
+    """
+    __tablename__ = "opportunities"
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+
+    # Basic info
+    name = Column(String(255), nullable=False)
+    description = Column(Text, nullable=True)
+
+    # Related entities
+    client_id = Column(Integer, ForeignKey("clients.id"), nullable=True)
+    lead_id = Column(Integer, ForeignKey("leads.id"), nullable=True)  # If converted from lead
+    contact_name = Column(String(200), nullable=True)
+    contact_email = Column(String(255), nullable=True)
+    contact_phone = Column(String(50), nullable=True)
+
+    # Pipeline
+    stage_id = Column(Integer, ForeignKey("pipeline_stages.id"), nullable=True)
+    probability = Column(Integer, default=0)  # Win probability percentage
+
+    # Value
+    amount = Column(Numeric(14, 2), nullable=True)
+    currency = Column(String(3), default="USD")
+
+    # Dates
+    expected_close_date = Column(Date, nullable=True)
+    actual_close_date = Column(Date, nullable=True)
+
+    # Status
+    status = Column(String(20), default="open")  # open, won, lost
+    lost_reason = Column(Text, nullable=True)
+    competitor = Column(String(255), nullable=True)  # Who we lost to
+
+    # Assignment
+    assigned_to = Column(Integer, ForeignKey("users.id"), nullable=True)
+
+    # Notes
+    notes = Column(Text, nullable=True)
+    next_step = Column(Text, nullable=True)
+
+    # Conversion to contract
+    converted_to_contract_id = Column(Integer, ForeignKey("contracts.id"), nullable=True)
+    converted_at = Column(DateTime, nullable=True)
+
+    # Audit
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    # Relationships
+    company = relationship("Company")
+    client = relationship("Client")
+    lead = relationship("Lead")
+    stage = relationship("PipelineStage", back_populates="opportunities")
+    assignee = relationship("User", foreign_keys=[assigned_to])
+    creator = relationship("User", foreign_keys=[created_by])
+    converted_contract = relationship("Contract")
+    activities = relationship("CRMActivity", back_populates="opportunity", foreign_keys="CRMActivity.opportunity_id")
+
+
+class CRMActivity(Base):
+    """
+    CRM Activity - Interactions with leads/opportunities (calls, emails, meetings, tasks)
+    """
+    __tablename__ = "crm_activities"
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+
+    # Activity type
+    activity_type = Column(String(20), nullable=False)  # call, email, meeting, task, note
+    subject = Column(String(255), nullable=False)
+    description = Column(Text, nullable=True)
+
+    # Related to (one of these should be set)
+    lead_id = Column(Integer, ForeignKey("leads.id"), nullable=True)
+    opportunity_id = Column(Integer, ForeignKey("opportunities.id"), nullable=True)
+    client_id = Column(Integer, ForeignKey("clients.id"), nullable=True)
+
+    # Scheduling
+    due_date = Column(DateTime, nullable=True)
+    due_time = Column(Time, nullable=True)
+    duration_minutes = Column(Integer, nullable=True)
+
+    # Status
+    status = Column(String(20), default="planned")  # planned, completed, cancelled
+    priority = Column(String(10), default="normal")  # low, normal, high
+
+    # Outcome (for completed activities)
+    outcome = Column(Text, nullable=True)
+
+    # For calls
+    call_direction = Column(String(10), nullable=True)  # inbound, outbound
+    call_result = Column(String(20), nullable=True)  # answered, no_answer, voicemail, busy
+
+    # For meetings
+    location = Column(String(255), nullable=True)
+    attendees = Column(Text, nullable=True)  # JSON array of attendee names/emails
+
+    # Assignment
+    assigned_to = Column(Integer, ForeignKey("users.id"), nullable=True)
+    completed_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+
+    # Reminders
+    reminder_date = Column(DateTime, nullable=True)
+    reminder_sent = Column(Boolean, default=False)
+
+    # Audit
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    # Relationships
+    company = relationship("Company")
+    lead = relationship("Lead", back_populates="activities", foreign_keys=[lead_id])
+    opportunity = relationship("Opportunity", back_populates="activities", foreign_keys=[opportunity_id])
+    client = relationship("Client")
+    assignee = relationship("User", foreign_keys=[assigned_to])
+    completer = relationship("User", foreign_keys=[completed_by])
+    creator = relationship("User", foreign_keys=[created_by])
+
+
+class Campaign(Base):
+    """
+    Marketing Campaign - Track marketing efforts and their results
+    """
+    __tablename__ = "campaigns"
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+
+    # Basic info
+    name = Column(String(255), nullable=False)
+    code = Column(String(50), nullable=True)
+    description = Column(Text, nullable=True)
+
+    # Type and status
+    campaign_type = Column(String(50), nullable=True)  # email, social, event, webinar, advertising, etc.
+    status = Column(String(20), default="planned")  # planned, active, paused, completed, cancelled
+
+    # Dates
+    start_date = Column(Date, nullable=True)
+    end_date = Column(Date, nullable=True)
+
+    # Budget
+    budget = Column(Numeric(12, 2), nullable=True)
+    actual_cost = Column(Numeric(12, 2), nullable=True)
+    currency = Column(String(3), default="USD")
+
+    # Goals
+    expected_revenue = Column(Numeric(14, 2), nullable=True)
+    expected_response_rate = Column(Numeric(5, 2), nullable=True)  # Percentage
+    target_audience = Column(Text, nullable=True)
+
+    # Results
+    sent_count = Column(Integer, default=0)  # Number sent/reached
+    response_count = Column(Integer, default=0)  # Responses received
+    leads_generated = Column(Integer, default=0)
+    opportunities_created = Column(Integer, default=0)
+    revenue_generated = Column(Numeric(14, 2), default=0)
+
+    # Owner
+    owner_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+
+    # Notes
+    notes = Column(Text, nullable=True)
+
+    # Audit
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    # Relationships
+    company = relationship("Company")
+    owner = relationship("User", foreign_keys=[owner_id])
+    creator = relationship("User", foreign_keys=[created_by])
+    campaign_leads = relationship("CampaignLead", back_populates="campaign")
+
+
+class CampaignLead(Base):
+    """
+    Campaign Lead - Links leads to campaigns they originated from
+    """
+    __tablename__ = "campaign_leads"
+
+    id = Column(Integer, primary_key=True, index=True)
+    campaign_id = Column(Integer, ForeignKey("campaigns.id", ondelete="CASCADE"), nullable=False)
+    lead_id = Column(Integer, ForeignKey("leads.id", ondelete="CASCADE"), nullable=False)
+
+    status = Column(String(20), default="sent")  # sent, responded, converted
+    responded_at = Column(DateTime, nullable=True)
+    converted_at = Column(DateTime, nullable=True)
+    notes = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=func.now())
+
+    # Unique constraint
+    __table_args__ = (
+        UniqueConstraint('campaign_id', 'lead_id', name='uq_campaign_lead'),
+    )
+
+    # Relationships
+    campaign = relationship("Campaign", back_populates="campaign_leads")
+    lead = relationship("Lead")
