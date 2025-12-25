@@ -16,6 +16,7 @@ from app.models import (
     ItemLedger, ItemCategory, Warehouse
 )
 from app.api.auth import verify_token
+from app.services.journal_posting import JournalPostingService
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 router = APIRouter()
@@ -597,6 +598,18 @@ async def complete_cycle_count(
                     created_by=user.id
                 )
                 db.add(ledger_entry)
+
+                # Auto-post journal entry for cycle count adjustment
+                try:
+                    adjustment_type = "plus" if cc_item.variance_quantity > 0 else "minus"
+                    journal_service = JournalPostingService(db, user.company_id, user.id)
+                    journal_entry = journal_service.post_cycle_count_adjustment(
+                        ledger_entry, cc_item.item, adjustment_type, cc.count_number
+                    )
+                    if journal_entry:
+                        logger.info(f"Auto-posted journal entry {journal_entry.entry_number} for cycle count")
+                except Exception as e:
+                    logger.warning(f"Failed to auto-post journal entry for cycle count: {e}")
 
                 # Update or create stock record
                 if stock:

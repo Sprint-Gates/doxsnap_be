@@ -20,6 +20,7 @@ from app.models import (
     Warehouse, HandHeldDevice, Vendor, WorkOrder
 )
 from app.api.auth import verify_token
+from app.services.journal_posting import JournalPostingService
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from jose import jwt
 from app.config import settings
@@ -1295,6 +1296,18 @@ async def adjust_stock(
             unit_cost=float(item.unit_cost) if item.unit_cost else None,
             notes=notes
         )
+
+        # Auto-post journal entry for stock adjustment
+        try:
+            adjustment_type = "plus" if data.quantity > 0 else "minus"
+            journal_service = JournalPostingService(db, user.company_id, user.id)
+            journal_entry = journal_service.post_stock_adjustment(
+                ledger_entry, item, adjustment_type, data.reason
+            )
+            if journal_entry:
+                logger.info(f"Auto-posted journal entry {journal_entry.entry_number} for stock adjustment")
+        except Exception as e:
+            logger.warning(f"Failed to auto-post journal entry for stock adjustment: {e}")
 
         db.commit()
 

@@ -4,13 +4,14 @@ Handles automatic creation of journal entries from source documents:
 - Invoice allocations (when periods are recognized)
 - Work orders (when completed)
 - Petty cash transactions (when approved)
+- Inventory transactions (PO receiving, adjustments, transfers)
 """
 
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import desc
 from datetime import datetime, date
 from decimal import Decimal
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, Dict, Any
 import json
 import logging
 
@@ -20,7 +21,8 @@ from app.models import (
     AccountBalance, DefaultAccountMapping,
     ProcessedImage, InvoiceAllocation, AllocationPeriod,
     WorkOrder, WorkOrderSparePart, WorkOrderTimeEntry,
-    PettyCashTransaction, PettyCashReplenishment
+    PettyCashTransaction, PettyCashReplenishment,
+    PurchaseOrder, PurchaseOrderLine, ItemLedger, ItemMaster, ExchangeRate
 )
 
 logger = logging.getLogger(__name__)
@@ -620,5 +622,623 @@ class JournalPostingService:
 
         self.db.commit()
         logger.info(f"Created journal entry {entry.entry_number} for replenishment {replenishment.id}")
+
+        return entry
+
+    def _get_exchange_rate(self, from_currency: str, to_currency: str) -> Decimal:
+        """
+        Get exchange rate between two currencies.
+        Returns 1 if same currency or rate not found (fallback).
+        """
+        if from_currency.upper() == to_currency.upper():
+            return Decimal("1")
+
+        # Check for manual rate in database
+        rate = self.db.query(ExchangeRate).filter(
+            ExchangeRate.company_id == self.company_id,
+            ExchangeRate.from_currency == from_currency.upper(),
+            ExchangeRate.to_currency == to_currency.upper(),
+            ExchangeRate.is_active == True
+        ).first()
+
+        if rate:
+            return rate.rate
+
+        # Fallback to 1 if no rate found
+        logger.warning(f"No exchange rate found for {from_currency}/{to_currency}, using 1:1")
+        return Decimal("1")
+
+    def _get_company_currency(self) -> str:
+        """Get the company's primary currency"""
+        company = self.db.query(Company).filter(Company.id == self.company_id).first()
+        return company.primary_currency if company and company.primary_currency else "USD"
+
+    def post_po_receiving(
+        self,
+        po: PurchaseOrder,
+        line: PurchaseOrderLine,
+        quantity_received: Decimal,
+        ledger_entry: ItemLedger,
+        post_immediately: bool = True
+    ) -> Optional[JournalEntry]:
+        """
+        Create journal entry when goods are received from a Purchase Order.
+
+        Accounting entries:
+        - DR: Inventory (asset increases)
+        - CR: Accounts Payable or Goods Received Not Invoiced (liability)
+
+        Handles:
+        - Currency conversion if PO currency differs from company currency
+        - Tax/VAT if applicable
+        """
+        # Get account mapping
+        mapping = self._get_mapping("po_receive_inventory")
+        if not mapping:
+            # Try fallback mapping
+            mapping = self._get_mapping("inventory_increase")
+
+        if not mapping:
+            logger.warning("No account mapping for po_receive_inventory")
+            return None
+
+        # Calculate amounts
+        unit_cost = line.unit_price or Decimal("0")
+        line_total = quantity_received * unit_cost
+
+        # Currency conversion
+        company_currency = self._get_company_currency()
+        po_currency = po.currency or "USD"
+
+        if po_currency != company_currency:
+            exchange_rate = self._get_exchange_rate(po_currency, company_currency)
+            line_total_base = line_total * exchange_rate
+            exchange_gain_loss = line_total_base - line_total
+        else:
+            line_total_base = line_total
+            exchange_gain_loss = Decimal("0")
+
+        # Calculate proportional tax
+        tax_amount = Decimal("0")
+        if po.tax_amount and po.subtotal and po.subtotal > 0:
+            tax_rate = po.tax_amount / po.subtotal
+            tax_amount = line_total * tax_rate
+            if po_currency != company_currency:
+                tax_amount = tax_amount * exchange_rate
+
+        # Create journal entry
+        entry_date = date.today()
+        fiscal_period = self._get_fiscal_period(entry_date)
+
+        entry = JournalEntry(
+            company_id=self.company_id,
+            entry_number=self._generate_entry_number(),
+            entry_date=entry_date,
+            description=f"PO Receiving - {po.po_number} - {line.description or line.item_number}",
+            reference=ledger_entry.transaction_number,
+            source_type="po_receive",
+            source_id=ledger_entry.id,
+            source_number=po.po_number,
+            fiscal_period_id=fiscal_period.id if fiscal_period else None,
+            status="draft",
+            is_auto_generated=True,
+            created_by=self.user_id
+        )
+        self.db.add(entry)
+        self.db.flush()
+
+        lines = []
+        line_number = 1
+
+        # Debit: Inventory account (asset increases)
+        if mapping.debit_account_id:
+            inv_line = JournalEntryLine(
+                journal_entry_id=entry.id,
+                account_id=mapping.debit_account_id,
+                debit=float(line_total_base),
+                credit=0,
+                description=f"Inventory - {line.description or line.item_number} x {quantity_received}",
+                vendor_id=po.vendor_id,
+                work_order_id=po.work_order_id,
+                contract_id=po.contract_id,
+                line_number=line_number
+            )
+            self.db.add(inv_line)
+            lines.append(inv_line)
+            line_number += 1
+
+        # Debit: VAT Input (if applicable)
+        if tax_amount > 0:
+            vat_mapping = self._get_mapping("po_receive_vat")
+            if vat_mapping and vat_mapping.debit_account_id:
+                vat_line = JournalEntryLine(
+                    journal_entry_id=entry.id,
+                    account_id=vat_mapping.debit_account_id,
+                    debit=float(tax_amount),
+                    credit=0,
+                    description="VAT Input - PO Receiving",
+                    vendor_id=po.vendor_id,
+                    line_number=line_number
+                )
+                self.db.add(vat_line)
+                lines.append(vat_line)
+                line_number += 1
+
+        # Credit: Accounts Payable / Goods Received Not Invoiced
+        total_credit = float(line_total_base + tax_amount)
+        if mapping.credit_account_id:
+            payable_line = JournalEntryLine(
+                journal_entry_id=entry.id,
+                account_id=mapping.credit_account_id,
+                debit=0,
+                credit=total_credit,
+                description=f"Payable for PO {po.po_number}",
+                vendor_id=po.vendor_id,
+                line_number=line_number
+            )
+            self.db.add(payable_line)
+            lines.append(payable_line)
+            line_number += 1
+
+        # Handle exchange gain/loss if applicable
+        if exchange_gain_loss != Decimal("0"):
+            fx_mapping = self._get_mapping("exchange_gain_loss")
+            if fx_mapping:
+                fx_account_id = fx_mapping.debit_account_id if exchange_gain_loss > 0 else fx_mapping.credit_account_id
+                if fx_account_id:
+                    fx_line = JournalEntryLine(
+                        journal_entry_id=entry.id,
+                        account_id=fx_account_id,
+                        debit=float(exchange_gain_loss) if exchange_gain_loss > 0 else 0,
+                        credit=float(abs(exchange_gain_loss)) if exchange_gain_loss < 0 else 0,
+                        description=f"Exchange {'gain' if exchange_gain_loss > 0 else 'loss'} on PO {po.po_number}",
+                        line_number=line_number
+                    )
+                    self.db.add(fx_line)
+                    lines.append(fx_line)
+
+        # Update totals
+        entry.total_debit = sum(float(l.debit) for l in lines)
+        entry.total_credit = sum(float(l.credit) for l in lines)
+
+        if post_immediately:
+            entry.status = "posted"
+            entry.posted_at = datetime.utcnow()
+            entry.posted_by = self.user_id
+            self._update_account_balance(entry)
+
+        self.db.commit()
+        logger.info(f"Created journal entry {entry.entry_number} for PO receiving {po.po_number}")
+
+        return entry
+
+    def post_stock_adjustment(
+        self,
+        ledger_entry: ItemLedger,
+        item: ItemMaster,
+        adjustment_type: str,  # 'plus' or 'minus'
+        reason: Optional[str] = None,
+        post_immediately: bool = True
+    ) -> Optional[JournalEntry]:
+        """
+        Create journal entry for stock adjustment.
+
+        For ADJUSTMENT_PLUS (increase):
+        - DR: Inventory (asset increases)
+        - CR: Inventory Adjustment Expense/Income
+
+        For ADJUSTMENT_MINUS (decrease):
+        - DR: Inventory Adjustment Expense
+        - CR: Inventory (asset decreases)
+        """
+        mapping_type = "stock_adjustment_plus" if adjustment_type == "plus" else "stock_adjustment_minus"
+        mapping = self._get_mapping(mapping_type)
+
+        if not mapping:
+            # Try generic adjustment mapping
+            mapping = self._get_mapping("stock_adjustment")
+
+        if not mapping:
+            logger.warning(f"No account mapping for {mapping_type}")
+            return None
+
+        quantity = abs(float(ledger_entry.quantity))
+        unit_cost = float(ledger_entry.unit_cost or 0)
+        total_cost = float(ledger_entry.total_cost or (quantity * unit_cost))
+
+        if total_cost == 0:
+            logger.info(f"Skipping journal entry for zero-cost adjustment {ledger_entry.transaction_number}")
+            return None
+
+        # Create journal entry
+        entry_date = ledger_entry.transaction_date.date() if ledger_entry.transaction_date else date.today()
+        fiscal_period = self._get_fiscal_period(entry_date)
+
+        entry = JournalEntry(
+            company_id=self.company_id,
+            entry_number=self._generate_entry_number(),
+            entry_date=entry_date,
+            description=f"Stock Adjustment - {item.item_number} - {reason or adjustment_type.upper()}",
+            reference=ledger_entry.transaction_number,
+            source_type="stock_adjustment",
+            source_id=ledger_entry.id,
+            source_number=ledger_entry.transaction_number,
+            fiscal_period_id=fiscal_period.id if fiscal_period else None,
+            status="draft",
+            is_auto_generated=True,
+            created_by=self.user_id
+        )
+        self.db.add(entry)
+        self.db.flush()
+
+        lines = []
+        line_number = 1
+
+        if adjustment_type == "plus":
+            # DR: Inventory (asset increases)
+            if mapping.debit_account_id:
+                inv_line = JournalEntryLine(
+                    journal_entry_id=entry.id,
+                    account_id=mapping.debit_account_id,
+                    debit=total_cost,
+                    credit=0,
+                    description=f"Inventory increase - {item.item_number} x {quantity}",
+                    line_number=line_number
+                )
+                self.db.add(inv_line)
+                lines.append(inv_line)
+                line_number += 1
+
+            # CR: Adjustment account
+            if mapping.credit_account_id:
+                adj_line = JournalEntryLine(
+                    journal_entry_id=entry.id,
+                    account_id=mapping.credit_account_id,
+                    debit=0,
+                    credit=total_cost,
+                    description=f"Stock adjustment gain - {reason or 'inventory adjustment'}",
+                    line_number=line_number
+                )
+                self.db.add(adj_line)
+                lines.append(adj_line)
+        else:
+            # DR: Adjustment/Expense account
+            if mapping.debit_account_id:
+                adj_line = JournalEntryLine(
+                    journal_entry_id=entry.id,
+                    account_id=mapping.debit_account_id,
+                    debit=total_cost,
+                    credit=0,
+                    description=f"Stock adjustment loss - {reason or 'inventory adjustment'}",
+                    line_number=line_number
+                )
+                self.db.add(adj_line)
+                lines.append(adj_line)
+                line_number += 1
+
+            # CR: Inventory (asset decreases)
+            if mapping.credit_account_id:
+                inv_line = JournalEntryLine(
+                    journal_entry_id=entry.id,
+                    account_id=mapping.credit_account_id,
+                    debit=0,
+                    credit=total_cost,
+                    description=f"Inventory decrease - {item.item_number} x {quantity}",
+                    line_number=line_number
+                )
+                self.db.add(inv_line)
+                lines.append(inv_line)
+
+        # Update totals
+        entry.total_debit = sum(float(l.debit) for l in lines)
+        entry.total_credit = sum(float(l.credit) for l in lines)
+
+        if post_immediately:
+            entry.status = "posted"
+            entry.posted_at = datetime.utcnow()
+            entry.posted_by = self.user_id
+            self._update_account_balance(entry)
+
+        self.db.commit()
+        logger.info(f"Created journal entry {entry.entry_number} for stock adjustment {ledger_entry.transaction_number}")
+
+        return entry
+
+    def post_cycle_count_adjustment(
+        self,
+        ledger_entry: ItemLedger,
+        item: ItemMaster,
+        adjustment_type: str,  # 'plus' or 'minus'
+        cycle_count_number: str,
+        post_immediately: bool = True
+    ) -> Optional[JournalEntry]:
+        """
+        Create journal entry for cycle count variance adjustment.
+        Uses same logic as stock adjustment but with different description.
+        """
+        mapping_type = "cycle_count_plus" if adjustment_type == "plus" else "cycle_count_minus"
+        mapping = self._get_mapping(mapping_type)
+
+        if not mapping:
+            # Fall back to stock adjustment mapping
+            mapping_type = "stock_adjustment_plus" if adjustment_type == "plus" else "stock_adjustment_minus"
+            mapping = self._get_mapping(mapping_type)
+
+        if not mapping:
+            mapping = self._get_mapping("stock_adjustment")
+
+        if not mapping:
+            logger.warning(f"No account mapping for cycle count adjustment")
+            return None
+
+        quantity = abs(float(ledger_entry.quantity))
+        unit_cost = float(ledger_entry.unit_cost or 0)
+        total_cost = float(ledger_entry.total_cost or (quantity * unit_cost))
+
+        if total_cost == 0:
+            logger.info(f"Skipping journal entry for zero-cost cycle count {ledger_entry.transaction_number}")
+            return None
+
+        # Create journal entry
+        entry_date = ledger_entry.transaction_date.date() if ledger_entry.transaction_date else date.today()
+        fiscal_period = self._get_fiscal_period(entry_date)
+
+        entry = JournalEntry(
+            company_id=self.company_id,
+            entry_number=self._generate_entry_number(),
+            entry_date=entry_date,
+            description=f"Cycle Count Adjustment - {cycle_count_number} - {item.item_number}",
+            reference=ledger_entry.transaction_number,
+            source_type="cycle_count",
+            source_id=ledger_entry.id,
+            source_number=cycle_count_number,
+            fiscal_period_id=fiscal_period.id if fiscal_period else None,
+            status="draft",
+            is_auto_generated=True,
+            created_by=self.user_id
+        )
+        self.db.add(entry)
+        self.db.flush()
+
+        lines = []
+        line_number = 1
+
+        if adjustment_type == "plus":
+            # Inventory gain
+            if mapping.debit_account_id:
+                inv_line = JournalEntryLine(
+                    journal_entry_id=entry.id,
+                    account_id=mapping.debit_account_id,
+                    debit=total_cost,
+                    credit=0,
+                    description=f"Inventory gain - {item.item_number} x {quantity}",
+                    line_number=line_number
+                )
+                self.db.add(inv_line)
+                lines.append(inv_line)
+                line_number += 1
+
+            if mapping.credit_account_id:
+                adj_line = JournalEntryLine(
+                    journal_entry_id=entry.id,
+                    account_id=mapping.credit_account_id,
+                    debit=0,
+                    credit=total_cost,
+                    description=f"Cycle count variance gain - {cycle_count_number}",
+                    line_number=line_number
+                )
+                self.db.add(adj_line)
+                lines.append(adj_line)
+        else:
+            # Inventory loss
+            if mapping.debit_account_id:
+                adj_line = JournalEntryLine(
+                    journal_entry_id=entry.id,
+                    account_id=mapping.debit_account_id,
+                    debit=total_cost,
+                    credit=0,
+                    description=f"Cycle count variance loss - {cycle_count_number}",
+                    line_number=line_number
+                )
+                self.db.add(adj_line)
+                lines.append(adj_line)
+                line_number += 1
+
+            if mapping.credit_account_id:
+                inv_line = JournalEntryLine(
+                    journal_entry_id=entry.id,
+                    account_id=mapping.credit_account_id,
+                    debit=0,
+                    credit=total_cost,
+                    description=f"Inventory loss - {item.item_number} x {quantity}",
+                    line_number=line_number
+                )
+                self.db.add(inv_line)
+                lines.append(inv_line)
+
+        # Update totals
+        entry.total_debit = sum(float(l.debit) for l in lines)
+        entry.total_credit = sum(float(l.credit) for l in lines)
+
+        if post_immediately:
+            entry.status = "posted"
+            entry.posted_at = datetime.utcnow()
+            entry.posted_by = self.user_id
+            self._update_account_balance(entry)
+
+        self.db.commit()
+        logger.info(f"Created journal entry {entry.entry_number} for cycle count {cycle_count_number}")
+
+        return entry
+
+    def post_goods_receipt(
+        self,
+        grn,  # GoodsReceipt object
+        post_immediately: bool = True
+    ) -> Optional[JournalEntry]:
+        """
+        Create journal entry for Goods Receipt Note (GRN).
+
+        Standard receiving entry:
+        - DR: Inventory (asset increases)
+        - DR: VAT Input (if applicable)
+        - CR: Goods Received Not Invoiced (GRNI) or Accounts Payable
+
+        This is similar to post_po_receiving but for the new GRN system.
+        """
+        # Import here to avoid circular imports
+        from app.models import GoodsReceipt, GoodsReceiptLine
+
+        # Get mappings
+        mapping = self._get_mapping("po_receive_inventory")
+        if not mapping:
+            mapping = self._get_mapping("inventory_increase")
+
+        if not mapping:
+            logger.warning("No account mapping for goods receipt")
+            return None
+
+        vat_mapping = self._get_mapping("po_receive_vat")
+
+        # Calculate totals
+        total_value = float(grn.subtotal or 0)
+        tax_amount = float(grn.tax_amount or 0)
+        total_with_tax = total_value + tax_amount
+
+        if total_value == 0:
+            logger.info(f"Skipping journal entry for zero-value GRN {grn.grn_number}")
+            return None
+
+        # Handle exchange rate for multi-currency
+        exchange_rate = float(grn.exchange_rate or 1.0)
+        if grn.currency != 'USD':  # Assuming USD is base currency
+            rate = self._get_exchange_rate(grn.currency, 'USD')
+            if rate:
+                exchange_rate = rate
+
+        total_value_base = total_value * exchange_rate
+        tax_amount_base = tax_amount * exchange_rate
+        total_with_tax_base = total_with_tax * exchange_rate
+
+        # Create journal entry
+        po = grn.purchase_order
+        vendor_name = po.vendor.name if po and po.vendor else "Unknown Vendor"
+
+        entry_date = grn.receipt_date or date.today()
+        fiscal_period = self._get_fiscal_period(entry_date)
+
+        entry = JournalEntry(
+            company_id=self.company_id,
+            entry_number=self._generate_entry_number(),
+            entry_date=entry_date,
+            description=f"Goods Receipt - {grn.grn_number} from {vendor_name}",
+            reference=grn.grn_number,
+            source_type="goods_receipt",
+            source_id=grn.id,
+            source_number=grn.grn_number,
+            vendor_id=po.vendor_id if po else None,
+            fiscal_period_id=fiscal_period.id if fiscal_period else None,
+            status="draft",
+            is_auto_generated=True,
+            created_by=self.user_id
+        )
+        self.db.add(entry)
+        self.db.flush()
+
+        lines = []
+        line_number = 1
+
+        # Create line for each GRN line item
+        for grn_line in grn.lines:
+            line_value = float(grn_line.total_price or 0)
+            if line_value == 0:
+                continue
+
+            line_value_base = line_value * exchange_rate
+
+            # DR: Inventory
+            if mapping.debit_account_id:
+                qty = float(grn_line.quantity_accepted or grn_line.quantity_received or 0)
+                inv_line = JournalEntryLine(
+                    journal_entry_id=entry.id,
+                    account_id=mapping.debit_account_id,
+                    debit=Decimal(str(round(line_value_base, 2))),
+                    credit=Decimal('0'),
+                    description=f"{grn_line.item_code or 'Item'}: {grn_line.item_description or ''} x {qty}",
+                    line_number=line_number,
+                    vendor_id=po.vendor_id if po else None
+                )
+                self.db.add(inv_line)
+                lines.append(inv_line)
+                line_number += 1
+
+        # DR: VAT Input (if applicable)
+        if tax_amount_base > 0 and vat_mapping and vat_mapping.debit_account_id:
+            vat_line = JournalEntryLine(
+                journal_entry_id=entry.id,
+                account_id=vat_mapping.debit_account_id,
+                debit=Decimal(str(round(tax_amount_base, 2))),
+                credit=Decimal('0'),
+                description=f"VAT on GRN {grn.grn_number}",
+                line_number=line_number,
+                vendor_id=po.vendor_id if po else None
+            )
+            self.db.add(vat_line)
+            lines.append(vat_line)
+            line_number += 1
+
+        # CR: GRNI or Accounts Payable
+        grni_mapping = self._get_mapping("grni") or self._get_mapping("accounts_payable")
+        credit_account_id = grni_mapping.credit_account_id if grni_mapping else mapping.credit_account_id
+
+        if credit_account_id:
+            ap_line = JournalEntryLine(
+                journal_entry_id=entry.id,
+                account_id=credit_account_id,
+                debit=Decimal('0'),
+                credit=Decimal(str(round(total_with_tax_base, 2))),
+                description=f"GRNI for {grn.grn_number} - PO {po.po_number if po else 'N/A'}",
+                line_number=line_number,
+                vendor_id=po.vendor_id if po else None
+            )
+            self.db.add(ap_line)
+            lines.append(ap_line)
+            line_number += 1
+
+        # Handle exchange difference if applicable
+        if grn.currency != 'USD' and exchange_rate != 1.0:
+            exchange_mapping = self._get_mapping("exchange_gain_loss")
+            if exchange_mapping:
+                # Calculate any rounding difference
+                total_debits = sum(float(l.debit) for l in lines)
+                total_credits = sum(float(l.credit) for l in lines)
+                diff = abs(total_debits - total_credits)
+
+                if diff > 0.01:
+                    fx_account_id = exchange_mapping.debit_account_id if total_credits > total_debits else exchange_mapping.credit_account_id
+                    if fx_account_id:
+                        fx_line = JournalEntryLine(
+                            journal_entry_id=entry.id,
+                            account_id=fx_account_id,
+                            debit=Decimal(str(diff)) if total_credits > total_debits else Decimal('0'),
+                            credit=Decimal('0') if total_credits > total_debits else Decimal(str(diff)),
+                            description=f"Exchange difference on GRN {grn.grn_number}",
+                            line_number=line_number
+                        )
+                        self.db.add(fx_line)
+                        lines.append(fx_line)
+
+        # Update totals
+        entry.total_debit = sum(float(l.debit) for l in lines)
+        entry.total_credit = sum(float(l.credit) for l in lines)
+
+        if post_immediately:
+            entry.status = "posted"
+            entry.posted_at = datetime.utcnow()
+            entry.posted_by = self.user_id
+            self._update_account_balance(entry)
+
+        self.db.commit()
+        logger.info(f"Created journal entry {entry.entry_number} for GRN {grn.grn_number}")
 
         return entry

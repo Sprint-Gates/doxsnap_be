@@ -297,7 +297,12 @@ async def get_activity_stats(
         CRMActivity.completed_at >= start_of_month
     ).count()
 
+    total = sum(c for s, c in status_counts)
+    completed = next((c for s, c in status_counts if s == "completed"), 0)
+
     return {
+        "total": total,
+        "completed": completed,
         "by_type_this_month": {t: c for t, c in type_counts},
         "by_status": {s: c for s, c in status_counts},
         "overdue_count": overdue_count,

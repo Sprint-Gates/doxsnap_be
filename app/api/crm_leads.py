@@ -353,12 +353,19 @@ async def get_lead_stats(
         Lead.created_at >= start_of_month
     ).count()
 
+    total_leads = sum(c for s, c in status_counts)
+    total_active = sum(c for s, c in status_counts if s != "converted")
+    converted_count = sum(c for s, c in status_counts if s == "converted")
+    conversion_rate = (converted_count / total_leads * 100) if total_leads > 0 else 0
+
     return {
+        "total": total_leads,
         "by_status": {s: c for s, c in status_counts},
         "by_rating": {r or "unrated": c for r, c in rating_counts},
         "total_estimated_value": float(total_value),
         "leads_this_month": leads_this_month,
-        "total_active": sum(c for s, c in status_counts if s != "converted")
+        "total_active": total_active,
+        "conversion_rate": round(conversion_rate, 1)
     }
 
 

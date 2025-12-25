@@ -3039,6 +3039,7 @@ class PurchaseOrder(Base):
     creator = relationship("User", foreign_keys=[created_by], backref="created_purchase_orders")
     lines = relationship("PurchaseOrderLine", back_populates="purchase_order", cascade="all, delete-orphan")
     linked_invoices = relationship("PurchaseOrderInvoice", back_populates="purchase_order", cascade="all, delete-orphan")
+    goods_receipts = relationship("GoodsReceipt", back_populates="purchase_order", cascade="all, delete-orphan")
 
 
 class PurchaseOrderLine(Base):
@@ -3101,6 +3102,131 @@ class PurchaseOrderInvoice(Base):
     purchase_order = relationship("PurchaseOrder", back_populates="linked_invoices")
     invoice = relationship("ProcessedImage")
     linker = relationship("User", foreign_keys=[linked_by])
+
+
+class GoodsReceipt(Base):
+    """
+    Goods Receipt Note (GRN) - Document for receiving goods against a PO.
+    Supports partial receiving, multiple receipts per PO, and quality inspection.
+    """
+    __tablename__ = "goods_receipts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+    grn_number = Column(String(50), unique=True, nullable=False)  # GRN-YYYY-NNNNN
+
+    # Link to Purchase Order
+    purchase_order_id = Column(Integer, ForeignKey("purchase_orders.id", ondelete="CASCADE"), nullable=False)
+
+    # Receiving details
+    receipt_date = Column(Date, nullable=False)  # Actual date goods were received
+    warehouse_id = Column(Integer, ForeignKey("warehouses.id"), nullable=True)
+
+    # Supplier delivery info
+    supplier_delivery_note = Column(String(100), nullable=True)  # Supplier's DN number
+    carrier = Column(String(100), nullable=True)
+    tracking_number = Column(String(100), nullable=True)
+
+    # Status workflow: draft → pending_inspection → accepted → rejected → cancelled
+    status = Column(String(20), default='draft')
+
+    # Quality inspection
+    inspection_required = Column(Boolean, default=False)
+    inspection_status = Column(String(20), nullable=True)  # pending, passed, failed, partial
+    inspected_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    inspected_at = Column(DateTime, nullable=True)
+    inspection_notes = Column(Text, nullable=True)
+
+    # Financial tracking
+    currency = Column(String(3), default='USD')
+    exchange_rate = Column(Numeric(18, 6), default=1.0)
+    subtotal = Column(Numeric(18, 2), default=0)
+    tax_amount = Column(Numeric(18, 2), default=0)
+    total_amount = Column(Numeric(18, 2), default=0)
+
+    # Journal entry reference
+    journal_entry_id = Column(Integer, ForeignKey("journal_entries.id"), nullable=True)
+
+    notes = Column(Text, nullable=True)
+
+    # Audit fields
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+    posted_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    posted_at = Column(DateTime, nullable=True)
+
+    # Relationships
+    company = relationship("Company")
+    purchase_order = relationship("PurchaseOrder", back_populates="goods_receipts")
+    warehouse = relationship("Warehouse")
+    lines = relationship("GoodsReceiptLine", back_populates="goods_receipt", cascade="all, delete-orphan")
+    journal_entry = relationship("JournalEntry")
+    creator = relationship("User", foreign_keys=[created_by])
+    inspector = relationship("User", foreign_keys=[inspected_by])
+    poster = relationship("User", foreign_keys=[posted_by])
+
+
+class GoodsReceiptLine(Base):
+    """
+    Goods Receipt Line - Individual line items being received.
+    Links to PO line and tracks quantity, location, lot/serial, and inspection.
+    """
+    __tablename__ = "goods_receipt_lines"
+
+    id = Column(Integer, primary_key=True, index=True)
+    goods_receipt_id = Column(Integer, ForeignKey("goods_receipts.id", ondelete="CASCADE"), nullable=False)
+    po_line_id = Column(Integer, ForeignKey("purchase_order_lines.id"), nullable=False)
+
+    # Item details (denormalized for history)
+    item_id = Column(Integer, ForeignKey("item_master.id"), nullable=True)
+    item_code = Column(String(50), nullable=True)
+    item_description = Column(String(500), nullable=True)
+
+    # Quantities
+    quantity_ordered = Column(Numeric(18, 4), nullable=False)  # From PO line
+    quantity_received = Column(Numeric(18, 4), nullable=False)  # Quantity in this receipt
+    quantity_accepted = Column(Numeric(18, 4), default=0)  # After inspection
+    quantity_rejected = Column(Numeric(18, 4), default=0)  # Failed inspection
+
+    unit = Column(String(20), default='EA')
+
+    # Location - can differ from header warehouse for multi-location receiving
+    warehouse_id = Column(Integer, ForeignKey("warehouses.id"), nullable=True)
+    bin_location = Column(String(50), nullable=True)  # Specific bin/shelf location
+
+    # Lot/Serial tracking
+    lot_number = Column(String(100), nullable=True)  # Supplier batch/lot
+    serial_numbers = Column(Text, nullable=True)  # JSON array for serialized items
+    expiry_date = Column(Date, nullable=True)
+    manufacture_date = Column(Date, nullable=True)
+
+    # Pricing (from PO, may be updated)
+    unit_price = Column(Numeric(18, 4), nullable=False)
+    total_price = Column(Numeric(18, 2), nullable=False)
+
+    # Inspection details
+    inspection_status = Column(String(20), default='pending')  # pending, passed, failed
+    rejection_reason = Column(String(200), nullable=True)
+    inspection_notes = Column(Text, nullable=True)
+
+    # Variance tracking
+    has_variance = Column(Boolean, default=False)
+    variance_type = Column(String(20), nullable=True)  # over, under, damaged, wrong_item
+    variance_notes = Column(Text, nullable=True)
+
+    # ItemLedger reference for audit
+    item_ledger_id = Column(Integer, ForeignKey("item_ledger.id"), nullable=True)
+
+    notes = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=func.now())
+
+    # Relationships
+    goods_receipt = relationship("GoodsReceipt", back_populates="lines")
+    po_line = relationship("PurchaseOrderLine")
+    item = relationship("ItemMaster")
+    warehouse = relationship("Warehouse")
+    item_ledger = relationship("ItemLedger")
 
 
 # =============================================================================
@@ -3425,3 +3551,385 @@ class CampaignLead(Base):
     # Relationships
     campaign = relationship("Campaign", back_populates="campaign_leads")
     lead = relationship("Lead")
+
+
+# =============================================================================
+# TOOLS MANAGEMENT
+# =============================================================================
+
+class ToolCategory(Base):
+    """
+    Tool Category - Classification of tools as fixed assets or consumables.
+    Determines accounting treatment for purchases.
+    """
+    __tablename__ = "tool_categories"
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+
+    name = Column(String(100), nullable=False)  # e.g., "Power Tools", "Hand Tools"
+    code = Column(String(20), nullable=True, index=True)  # e.g., "PWR", "HND"
+
+    # Accounting classification
+    asset_type = Column(String(20), nullable=False)  # "fixed_asset" or "consumable"
+
+    # Fixed asset settings (only for asset_type = "fixed_asset")
+    useful_life_months = Column(Integer, nullable=True)  # e.g., 60 months for 5 years
+    depreciation_method = Column(String(30), nullable=True)  # "straight_line", "declining_balance"
+    salvage_value_percentage = Column(Numeric(5, 2), nullable=True)  # e.g., 10.00 for 10%
+
+    # Default accounts (can override DefaultAccountMapping)
+    asset_account_id = Column(Integer, ForeignKey("accounts.id"), nullable=True)  # DR for fixed assets: 1210
+    expense_account_id = Column(Integer, ForeignKey("accounts.id"), nullable=True)  # DR for consumables: 5250
+    accumulated_depreciation_account_id = Column(Integer, ForeignKey("accounts.id"), nullable=True)  # CR: 1290
+    depreciation_expense_account_id = Column(Integer, ForeignKey("accounts.id"), nullable=True)  # DR: 5330
+
+    description = Column(Text, nullable=True)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        UniqueConstraint('company_id', 'code', name='uq_tool_category_code'),
+    )
+
+    # Relationships
+    company = relationship("Company", backref="tool_categories")
+    tools = relationship("Tool", back_populates="category")
+    asset_account = relationship("Account", foreign_keys=[asset_account_id])
+    expense_account = relationship("Account", foreign_keys=[expense_account_id])
+    accumulated_depreciation_account = relationship("Account", foreign_keys=[accumulated_depreciation_account_id])
+    depreciation_expense_account = relationship("Account", foreign_keys=[depreciation_expense_account_id])
+
+
+class ToolPurchase(Base):
+    """
+    Tool Purchase - Dedicated purchase document for tools.
+    Separate from existing PO system.
+    """
+    __tablename__ = "tool_purchases"
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+
+    # Document identification
+    purchase_number = Column(String(30), nullable=False, index=True)  # TP-2025-00001
+    purchase_date = Column(Date, nullable=False)
+
+    # Vendor
+    vendor_id = Column(Integer, ForeignKey("vendors.id"), nullable=False)
+
+    # Financial
+    currency = Column(String(10), default="USD")
+    subtotal = Column(Numeric(12, 2), default=0)
+    tax_amount = Column(Numeric(12, 2), default=0)
+    total_amount = Column(Numeric(12, 2), default=0)
+
+    # Initial allocation (where tools go after purchase)
+    initial_warehouse_id = Column(Integer, ForeignKey("warehouses.id"), nullable=True)
+
+    # Status
+    status = Column(String(20), default="draft")  # draft, approved, received, cancelled
+
+    # Approval workflow
+    approved_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    approved_at = Column(DateTime, nullable=True)
+    received_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    received_at = Column(DateTime, nullable=True)
+
+    # Reference
+    reference = Column(String(100), nullable=True)  # External reference number
+    notes = Column(Text, nullable=True)
+
+    # Journal entry tracking
+    journal_entry_id = Column(Integer, ForeignKey("journal_entries.id"), nullable=True)
+
+    # Audit
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        UniqueConstraint('company_id', 'purchase_number', name='uq_tool_purchase_number'),
+    )
+
+    # Relationships
+    company = relationship("Company", backref="tool_purchases")
+    vendor = relationship("Vendor", backref="tool_purchases")
+    initial_warehouse = relationship("Warehouse", backref="tool_purchase_receipts")
+    approver = relationship("User", foreign_keys=[approved_by])
+    receiver = relationship("User", foreign_keys=[received_by])
+    creator = relationship("User", foreign_keys=[created_by])
+    journal_entry = relationship("JournalEntry", backref="tool_purchase")
+    lines = relationship("ToolPurchaseLine", back_populates="purchase", cascade="all, delete-orphan")
+    tools = relationship("Tool", back_populates="purchase")
+
+
+class ToolPurchaseLine(Base):
+    """
+    Tool Purchase Line - Individual line items on a tool purchase.
+    """
+    __tablename__ = "tool_purchase_lines"
+
+    id = Column(Integer, primary_key=True, index=True)
+    purchase_id = Column(Integer, ForeignKey("tool_purchases.id", ondelete="CASCADE"), nullable=False)
+
+    line_number = Column(Integer, nullable=False)
+    category_id = Column(Integer, ForeignKey("tool_categories.id"), nullable=False)
+
+    # Item details
+    description = Column(String(500), nullable=False)
+    manufacturer = Column(String(100), nullable=True)
+    model = Column(String(100), nullable=True)
+
+    # Quantity and pricing
+    quantity = Column(Integer, nullable=False, default=1)
+    unit_cost = Column(Numeric(12, 2), nullable=False)
+    total_cost = Column(Numeric(12, 2), nullable=False)
+
+    # Individual serial numbers (comma-separated or JSON array for multiple items)
+    serial_numbers = Column(Text, nullable=True)
+
+    notes = Column(Text, nullable=True)
+
+    # Relationships
+    purchase = relationship("ToolPurchase", back_populates="lines")
+    category = relationship("ToolCategory")
+
+
+class Tool(Base):
+    """
+    Tool - Individual tool/equipment item.
+    Can be assigned to ONE of: Site, Technician, or Warehouse.
+    """
+    __tablename__ = "tools"
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+    category_id = Column(Integer, ForeignKey("tool_categories.id"), nullable=False)
+
+    # Identification
+    tool_number = Column(String(50), nullable=False, index=True)  # e.g., "TL-2025-00001"
+    name = Column(String(200), nullable=False)  # e.g., "DeWalt 20V MAX Drill"
+    serial_number = Column(String(100), nullable=True)
+    barcode = Column(String(100), nullable=True, index=True)
+
+    # Details
+    manufacturer = Column(String(100), nullable=True)
+    model = Column(String(100), nullable=True)
+    specifications = Column(Text, nullable=True)  # JSON for technical specs
+    photo_url = Column(String(500), nullable=True)
+
+    # Purchase info (linked from ToolPurchase, denormalized for quick access)
+    purchase_id = Column(Integer, ForeignKey("tool_purchases.id"), nullable=True)
+    purchase_date = Column(Date, nullable=True)
+    purchase_cost = Column(Numeric(12, 2), nullable=True)
+    vendor_id = Column(Integer, ForeignKey("vendors.id"), nullable=True)
+
+    # Fixed asset fields (for asset_type = "fixed_asset")
+    capitalization_date = Column(Date, nullable=True)  # Date tool was capitalized
+    useful_life_months = Column(Integer, nullable=True)  # Can override category
+    salvage_value = Column(Numeric(12, 2), nullable=True)
+    accumulated_depreciation = Column(Numeric(12, 2), default=0)
+    net_book_value = Column(Numeric(12, 2), nullable=True)
+    last_depreciation_date = Column(Date, nullable=True)
+
+    # Warranty
+    warranty_expiry = Column(Date, nullable=True)
+    warranty_notes = Column(Text, nullable=True)
+
+    # Status
+    status = Column(String(30), default="available")  # available, in_use, maintenance, retired, lost
+    condition = Column(String(20), default="good")  # excellent, good, fair, poor
+
+    # Single assignment - ONLY ONE of these should be set at a time
+    assigned_site_id = Column(Integer, ForeignKey("sites.id"), nullable=True)
+    assigned_technician_id = Column(Integer, ForeignKey("technicians.id"), nullable=True)
+    assigned_warehouse_id = Column(Integer, ForeignKey("warehouses.id"), nullable=True)
+    assigned_at = Column(DateTime, nullable=True)
+
+    # Disposal fields
+    disposal_id = Column(Integer, ForeignKey("disposals.id"), nullable=True)
+    disposal_date = Column(Date, nullable=True)
+    is_disposed = Column(Boolean, default=False)
+
+    notes = Column(Text, nullable=True)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint('company_id', 'tool_number', name='uq_tool_number'),
+    )
+
+    # Relationships
+    company = relationship("Company", backref="tools")
+    category = relationship("ToolCategory", back_populates="tools")
+    purchase = relationship("ToolPurchase", back_populates="tools")
+    vendor = relationship("Vendor", backref="tools_supplied")
+    assigned_site = relationship("Site", backref="assigned_tools")
+    assigned_technician = relationship("Technician", backref="assigned_tools")
+    assigned_warehouse = relationship("Warehouse", backref="stored_tools")
+    creator = relationship("User", foreign_keys=[created_by])
+    allocation_history = relationship("ToolAllocationHistory", back_populates="tool", cascade="all, delete-orphan")
+    disposal = relationship("Disposal", back_populates="disposed_tools", foreign_keys=[disposal_id])
+
+
+class ToolAllocationHistory(Base):
+    """
+    Tool Allocation History - Tracks all location changes for a tool.
+    No journal entries on transfer per requirements.
+    """
+    __tablename__ = "tool_allocation_history"
+
+    id = Column(Integer, primary_key=True, index=True)
+    tool_id = Column(Integer, ForeignKey("tools.id", ondelete="CASCADE"), nullable=False)
+
+    # Transfer details
+    transfer_date = Column(DateTime, nullable=False, default=func.now())
+
+    # From location (one of these or null for initial assignment)
+    from_site_id = Column(Integer, ForeignKey("sites.id"), nullable=True)
+    from_technician_id = Column(Integer, ForeignKey("technicians.id"), nullable=True)
+    from_warehouse_id = Column(Integer, ForeignKey("warehouses.id"), nullable=True)
+
+    # To location (one of these)
+    to_site_id = Column(Integer, ForeignKey("sites.id"), nullable=True)
+    to_technician_id = Column(Integer, ForeignKey("technicians.id"), nullable=True)
+    to_warehouse_id = Column(Integer, ForeignKey("warehouses.id"), nullable=True)
+
+    # Transfer reason/notes
+    reason = Column(String(100), nullable=True)  # initial_assignment, reassignment, return, maintenance
+    notes = Column(Text, nullable=True)
+
+    # Audit
+    transferred_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=func.now())
+
+    # Relationships
+    tool = relationship("Tool", back_populates="allocation_history")
+    from_site = relationship("Site", foreign_keys=[from_site_id])
+    from_technician = relationship("Technician", foreign_keys=[from_technician_id])
+    from_warehouse = relationship("Warehouse", foreign_keys=[from_warehouse_id])
+    to_site = relationship("Site", foreign_keys=[to_site_id])
+    to_technician = relationship("Technician", foreign_keys=[to_technician_id])
+    to_warehouse = relationship("Warehouse", foreign_keys=[to_warehouse_id])
+    transferred_by_user = relationship("User", foreign_keys=[transferred_by])
+
+
+# ============================================================================
+# DISPOSAL MODELS - Asset & Inventory Write-off/Destruction
+# ============================================================================
+
+class Disposal(Base):
+    """
+    Disposal - Unified disposal document for both tools and inventory items.
+    Supports write-off, scrap, sale, donation with proper accounting entries.
+    """
+    __tablename__ = "disposals"
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+    disposal_number = Column(String(50), nullable=False, index=True)  # DSP-YYYY-NNNNN
+    disposal_date = Column(Date, nullable=False)
+
+    # Disposal details
+    reason = Column(String(50), nullable=False)  # damaged, obsolete, lost, stolen, sold, scrapped, donated
+    method = Column(String(50), nullable=True)  # scrap, sale, donation, return_to_vendor, destroy
+
+    # Salvage/Sale info
+    salvage_received = Column(Numeric(12, 2), default=0)  # Cash received from sale/scrap
+    salvage_reference = Column(String(100), nullable=True)  # Check/receipt number
+
+    # Status workflow
+    status = Column(String(20), default="draft")  # draft, approved, posted, cancelled
+
+    # Approval tracking
+    approved_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    approved_at = Column(DateTime, nullable=True)
+    posted_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    posted_at = Column(DateTime, nullable=True)
+
+    # Journal entry reference
+    journal_entry_id = Column(Integer, ForeignKey("journal_entries.id"), nullable=True)
+
+    # Audit
+    notes = Column(Text, nullable=True)
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        UniqueConstraint('company_id', 'disposal_number', name='uq_disposal_number'),
+    )
+
+    # Relationships
+    company = relationship("Company", backref="disposals")
+    approver = relationship("User", foreign_keys=[approved_by])
+    poster = relationship("User", foreign_keys=[posted_by])
+    creator = relationship("User", foreign_keys=[created_by])
+    journal_entry = relationship("JournalEntry", backref="disposal")
+    tool_lines = relationship("DisposalToolLine", back_populates="disposal", cascade="all, delete-orphan")
+    item_lines = relationship("DisposalItemLine", back_populates="disposal", cascade="all, delete-orphan")
+    disposed_tools = relationship("Tool", back_populates="disposal", foreign_keys="[Tool.disposal_id]")
+
+
+class DisposalToolLine(Base):
+    """
+    DisposalToolLine - Individual tool being disposed.
+    Captures snapshot of tool value at disposal time.
+    """
+    __tablename__ = "disposal_tool_lines"
+
+    id = Column(Integer, primary_key=True, index=True)
+    disposal_id = Column(Integer, ForeignKey("disposals.id", ondelete="CASCADE"), nullable=False)
+    line_number = Column(Integer, nullable=False)
+
+    tool_id = Column(Integer, ForeignKey("tools.id"), nullable=False)
+
+    # Snapshot values at disposal time
+    original_cost = Column(Numeric(12, 2), nullable=False)
+    accumulated_depreciation = Column(Numeric(12, 2), default=0)
+    net_book_value = Column(Numeric(12, 2), nullable=False)  # = original_cost - accumulated_depreciation
+
+    # Disposal values
+    salvage_value = Column(Numeric(12, 2), default=0)  # Portion of salvage allocated to this tool
+    gain_loss = Column(Numeric(12, 2), default=0)  # = salvage_value - net_book_value
+
+    notes = Column(Text, nullable=True)
+
+    # Relationships
+    disposal = relationship("Disposal", back_populates="tool_lines")
+    tool = relationship("Tool", backref="disposal_lines")
+
+
+class DisposalItemLine(Base):
+    """
+    DisposalItemLine - Inventory item being disposed.
+    Captures quantity and cost at disposal time.
+    """
+    __tablename__ = "disposal_item_lines"
+
+    id = Column(Integer, primary_key=True, index=True)
+    disposal_id = Column(Integer, ForeignKey("disposals.id", ondelete="CASCADE"), nullable=False)
+    line_number = Column(Integer, nullable=False)
+
+    item_id = Column(Integer, ForeignKey("item_master.id"), nullable=False)
+    warehouse_id = Column(Integer, ForeignKey("warehouses.id"), nullable=False)  # Where item is being disposed from
+
+    # Quantity and cost
+    quantity = Column(Numeric(12, 3), nullable=False)
+    unit_cost = Column(Numeric(12, 4), nullable=False)  # Average cost at disposal time
+    total_cost = Column(Numeric(12, 2), nullable=False)  # = quantity * unit_cost
+
+    # Disposal values
+    salvage_value = Column(Numeric(12, 2), default=0)  # Portion of salvage allocated to this item
+    gain_loss = Column(Numeric(12, 2), default=0)  # = salvage_value - total_cost (usually negative)
+
+    notes = Column(Text, nullable=True)
+
+    # Relationships
+    disposal = relationship("Disposal", back_populates="item_lines")
+    item = relationship("ItemMaster", backref="disposal_lines")
+    warehouse = relationship("Warehouse", backref="disposal_item_lines")

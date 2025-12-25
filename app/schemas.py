@@ -1,6 +1,6 @@
 from pydantic import BaseModel, EmailStr
 from datetime import datetime, date
-from typing import Optional, List
+from typing import Optional, List, Literal
 
 
 class UserBase(BaseModel):
@@ -1583,3 +1583,493 @@ class ConvertToPORequest(BaseModel):
     payment_terms: Optional[str] = None
     shipping_address: Optional[str] = None
     line_prices: Optional[dict] = None  # {pr_line_id: unit_price}
+
+
+# =============================================================================
+# TOOLS MANAGEMENT SCHEMAS
+# =============================================================================
+
+# Tool Category Schemas
+class ToolCategoryBase(BaseModel):
+    name: str
+    code: Optional[str] = None
+    asset_type: str  # "fixed_asset" or "consumable"
+    useful_life_months: Optional[int] = None
+    depreciation_method: Optional[str] = None
+    salvage_value_percentage: Optional[float] = None
+    asset_account_id: Optional[int] = None
+    expense_account_id: Optional[int] = None
+    accumulated_depreciation_account_id: Optional[int] = None
+    depreciation_expense_account_id: Optional[int] = None
+    description: Optional[str] = None
+    is_active: bool = True
+
+
+class ToolCategoryCreate(ToolCategoryBase):
+    pass
+
+
+class ToolCategoryUpdate(BaseModel):
+    name: Optional[str] = None
+    code: Optional[str] = None
+    asset_type: Optional[str] = None
+    useful_life_months: Optional[int] = None
+    depreciation_method: Optional[str] = None
+    salvage_value_percentage: Optional[float] = None
+    asset_account_id: Optional[int] = None
+    expense_account_id: Optional[int] = None
+    accumulated_depreciation_account_id: Optional[int] = None
+    depreciation_expense_account_id: Optional[int] = None
+    description: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
+class ToolCategory(ToolCategoryBase):
+    id: int
+    company_id: int
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class ToolCategoryList(BaseModel):
+    id: int
+    name: str
+    code: Optional[str] = None
+    asset_type: str
+    useful_life_months: Optional[int] = None
+    is_active: bool
+    tool_count: int = 0
+
+    class Config:
+        from_attributes = True
+
+
+# Tool Schemas
+class ToolBase(BaseModel):
+    category_id: int
+    name: str
+    serial_number: Optional[str] = None
+    barcode: Optional[str] = None
+    manufacturer: Optional[str] = None
+    model: Optional[str] = None
+    specifications: Optional[str] = None
+    photo_url: Optional[str] = None
+    warranty_expiry: Optional[date] = None
+    warranty_notes: Optional[str] = None
+    useful_life_months: Optional[int] = None
+    salvage_value: Optional[float] = None
+    notes: Optional[str] = None
+
+
+class ToolCreate(ToolBase):
+    # Initial assignment (optional, only one can be set)
+    assigned_site_id: Optional[int] = None
+    assigned_technician_id: Optional[int] = None
+    assigned_warehouse_id: Optional[int] = None
+
+
+class ToolUpdate(BaseModel):
+    category_id: Optional[int] = None
+    name: Optional[str] = None
+    serial_number: Optional[str] = None
+    barcode: Optional[str] = None
+    manufacturer: Optional[str] = None
+    model: Optional[str] = None
+    specifications: Optional[str] = None
+    photo_url: Optional[str] = None
+    warranty_expiry: Optional[date] = None
+    warranty_notes: Optional[str] = None
+    useful_life_months: Optional[int] = None
+    salvage_value: Optional[float] = None
+    status: Optional[str] = None
+    condition: Optional[str] = None
+    notes: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
+class ToolAllocation(BaseModel):
+    """Schema for assigning/transferring a tool"""
+    assigned_site_id: Optional[int] = None
+    assigned_technician_id: Optional[int] = None
+    assigned_warehouse_id: Optional[int] = None
+    reason: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class Tool(ToolBase):
+    id: int
+    company_id: int
+    tool_number: str
+    purchase_id: Optional[int] = None
+    purchase_date: Optional[date] = None
+    purchase_cost: Optional[float] = None
+    vendor_id: Optional[int] = None
+    capitalization_date: Optional[date] = None
+    accumulated_depreciation: float = 0
+    net_book_value: Optional[float] = None
+    last_depreciation_date: Optional[date] = None
+    status: str
+    condition: str
+    assigned_site_id: Optional[int] = None
+    assigned_technician_id: Optional[int] = None
+    assigned_warehouse_id: Optional[int] = None
+    assigned_at: Optional[datetime] = None
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+    # Nested names
+    category_name: Optional[str] = None
+    asset_type: Optional[str] = None
+    assigned_site_name: Optional[str] = None
+    assigned_technician_name: Optional[str] = None
+    assigned_warehouse_name: Optional[str] = None
+    vendor_name: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class ToolList(BaseModel):
+    id: int
+    tool_number: str
+    name: str
+    category_id: int
+    category_name: str
+    asset_type: str
+    serial_number: Optional[str] = None
+    status: str
+    condition: str
+    assigned_to: Optional[str] = None  # "Site: ABC" or "Technician: John" or "Warehouse: Main"
+    purchase_cost: Optional[float] = None
+    net_book_value: Optional[float] = None
+    is_active: bool
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+# Tool Purchase Line Schemas
+class ToolPurchaseLineBase(BaseModel):
+    category_id: int
+    description: str
+    manufacturer: Optional[str] = None
+    model: Optional[str] = None
+    quantity: int = 1
+    unit_cost: float
+    serial_numbers: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class ToolPurchaseLineCreate(ToolPurchaseLineBase):
+    pass
+
+
+class ToolPurchaseLineUpdate(BaseModel):
+    category_id: Optional[int] = None
+    description: Optional[str] = None
+    manufacturer: Optional[str] = None
+    model: Optional[str] = None
+    quantity: Optional[int] = None
+    unit_cost: Optional[float] = None
+    serial_numbers: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class ToolPurchaseLine(ToolPurchaseLineBase):
+    id: int
+    purchase_id: int
+    line_number: int
+    total_cost: float
+    category_name: Optional[str] = None
+    category_asset_type: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+# Tool Purchase Schemas
+class ToolPurchaseBase(BaseModel):
+    vendor_id: int
+    purchase_date: Optional[date] = None
+    currency: str = "USD"
+    initial_warehouse_id: Optional[int] = None
+    reference: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class ToolPurchaseCreate(ToolPurchaseBase):
+    lines: List[ToolPurchaseLineCreate] = []
+
+
+class ToolPurchaseUpdate(BaseModel):
+    vendor_id: Optional[int] = None
+    purchase_date: Optional[date] = None
+    currency: Optional[str] = None
+    initial_warehouse_id: Optional[int] = None
+    reference: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class ToolPurchase(ToolPurchaseBase):
+    id: int
+    company_id: int
+    purchase_number: str
+    subtotal: float
+    tax_amount: float
+    total_amount: float
+    status: str
+    approved_by: Optional[int] = None
+    approved_at: Optional[datetime] = None
+    received_by: Optional[int] = None
+    received_at: Optional[datetime] = None
+    journal_entry_id: Optional[int] = None
+    created_by: Optional[int] = None
+    created_at: datetime
+    updated_at: datetime
+    # Nested
+    vendor_name: Optional[str] = None
+    initial_warehouse_name: Optional[str] = None
+    lines: List[ToolPurchaseLine] = []
+
+    class Config:
+        from_attributes = True
+
+
+class ToolPurchaseList(BaseModel):
+    id: int
+    purchase_number: str
+    purchase_date: date
+    vendor_id: int
+    vendor_name: str
+    total_amount: float
+    currency: str
+    status: str
+    line_count: int = 0
+    created_by_name: Optional[str] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+# Tool Allocation History Schema
+class ToolAllocationHistoryItem(BaseModel):
+    id: int
+    tool_id: int
+    transfer_date: datetime
+    from_location: Optional[str] = None  # "Site: X" or "Technician: Y" or "Warehouse: Z"
+    to_location: Optional[str] = None
+    reason: Optional[str] = None
+    notes: Optional[str] = None
+    transferred_by_name: Optional[str] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+# Depreciation Schemas
+class DepreciationPreview(BaseModel):
+    tool_id: int
+    tool_number: str
+    tool_name: str
+    purchase_cost: float
+    accumulated_depreciation: float
+    net_book_value: float
+    monthly_depreciation: float
+    depreciation_this_run: float
+
+
+class DepreciationRunRequest(BaseModel):
+    run_date: Optional[date] = None  # Defaults to today
+
+
+class DepreciationRunResult(BaseModel):
+    run_date: date
+    tools_processed: int
+    total_depreciation: float
+    journal_entry_id: Optional[int] = None
+    journal_entry_number: Optional[str] = None
+    details: List[DepreciationPreview] = []
+
+
+# ============================================================================
+# DISPOSAL SCHEMAS - Asset & Inventory Write-off/Destruction
+# ============================================================================
+
+# Disposal enums as Literals
+DisposalReason = Literal["damaged", "obsolete", "lost", "stolen", "sold", "scrapped", "donated"]
+DisposalMethod = Literal["scrap", "sale", "donation", "return_to_vendor", "destroy"]
+DisposalStatus = Literal["draft", "approved", "posted", "cancelled"]
+
+
+# Disposal Tool Line Schemas
+class DisposalToolLineCreate(BaseModel):
+    tool_id: int
+    salvage_value: float = 0
+    notes: Optional[str] = None
+
+
+class DisposalToolLineUpdate(BaseModel):
+    salvage_value: Optional[float] = None
+    notes: Optional[str] = None
+
+
+class DisposalToolLine(BaseModel):
+    id: int
+    line_number: int
+    tool_id: int
+    tool_number: Optional[str] = None
+    tool_name: Optional[str] = None
+    original_cost: float
+    accumulated_depreciation: float
+    net_book_value: float
+    salvage_value: float
+    gain_loss: float
+    notes: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+# Disposal Item Line Schemas
+class DisposalItemLineCreate(BaseModel):
+    item_id: int
+    warehouse_id: int
+    quantity: float
+    salvage_value: float = 0
+    notes: Optional[str] = None
+
+
+class DisposalItemLineUpdate(BaseModel):
+    quantity: Optional[float] = None
+    salvage_value: Optional[float] = None
+    notes: Optional[str] = None
+
+
+class DisposalItemLine(BaseModel):
+    id: int
+    line_number: int
+    item_id: int
+    item_number: Optional[str] = None
+    item_name: Optional[str] = None
+    warehouse_id: int
+    warehouse_name: Optional[str] = None
+    quantity: float
+    unit_cost: float
+    total_cost: float
+    salvage_value: float
+    gain_loss: float
+    notes: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+# Disposal Header Schemas
+class DisposalBase(BaseModel):
+    disposal_date: date
+    reason: str
+    method: Optional[str] = None
+    salvage_received: float = 0
+    salvage_reference: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class DisposalCreate(DisposalBase):
+    tool_lines: List[DisposalToolLineCreate] = []
+    item_lines: List[DisposalItemLineCreate] = []
+
+
+class DisposalUpdate(BaseModel):
+    disposal_date: Optional[date] = None
+    reason: Optional[str] = None
+    method: Optional[str] = None
+    salvage_received: Optional[float] = None
+    salvage_reference: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class Disposal(DisposalBase):
+    id: int
+    company_id: int
+    disposal_number: str
+    status: str
+    approved_by: Optional[int] = None
+    approved_at: Optional[datetime] = None
+    posted_by: Optional[int] = None
+    posted_at: Optional[datetime] = None
+    journal_entry_id: Optional[int] = None
+    journal_entry_number: Optional[str] = None
+    created_by: Optional[int] = None
+    created_by_name: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+    # Nested lines
+    tool_lines: List[DisposalToolLine] = []
+    item_lines: List[DisposalItemLine] = []
+    # Computed totals
+    total_tool_value: float = 0
+    total_tool_nbv: float = 0
+    total_item_value: float = 0
+    total_gain_loss: float = 0
+    tool_count: int = 0
+    item_count: int = 0
+
+    class Config:
+        from_attributes = True
+
+
+class DisposalList(BaseModel):
+    id: int
+    disposal_number: str
+    disposal_date: date
+    reason: str
+    method: Optional[str] = None
+    status: str
+    salvage_received: float
+    tool_count: int = 0
+    item_count: int = 0
+    total_value: float = 0
+    total_gain_loss: float = 0
+    created_by_name: Optional[str] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+# Available items for disposal
+class AvailableToolForDisposal(BaseModel):
+    id: int
+    tool_number: str
+    name: str
+    serial_number: Optional[str] = None
+    category_name: str
+    asset_type: str
+    purchase_cost: float
+    accumulated_depreciation: float
+    net_book_value: float
+    status: str
+    current_location: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class AvailableItemForDisposal(BaseModel):
+    item_id: int
+    item_number: str
+    item_name: str
+    warehouse_id: int
+    warehouse_name: str
+    quantity_on_hand: float
+    average_cost: float
+    total_value: float
+
+    class Config:
+        from_attributes = True

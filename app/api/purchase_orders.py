@@ -12,6 +12,7 @@ from app.models import (
     ItemStock, ItemLedger
 )
 from app.utils.security import verify_token
+from app.services.journal_posting import JournalPostingService
 from app.schemas import (
     PurchaseOrderCreate, PurchaseOrderUpdate, PurchaseOrder as POSchema,
     PurchaseOrderList, PurchaseOrderLineCreate, PurchaseOrderLineUpdate,
@@ -603,18 +604,51 @@ async def receive_po_line(
             if item_stock.quantity_on_order:
                 item_stock.quantity_on_order = max(0, item_stock.quantity_on_order - Decimal(str(receive_data.quantity_received)))
 
-            # Create ledger entry
+            # Generate transaction number for ledger entry
+            today = datetime.now().strftime("%Y%m%d")
+            tx_prefix = f"POR-{today}-"
+            last_tx = db.query(ItemLedger).filter(
+                ItemLedger.company_id == current_user.company_id,
+                ItemLedger.transaction_number.like(f"{tx_prefix}%")
+            ).order_by(ItemLedger.id.desc()).first()
+
+            if last_tx:
+                try:
+                    last_num = int(last_tx.transaction_number.split("-")[-1])
+                    next_num = last_num + 1
+                except (ValueError, IndexError):
+                    next_num = 1
+            else:
+                next_num = 1
+            tx_number = f"{tx_prefix}{next_num:05d}"
+
+            # Create ledger entry (receiving goes TO warehouse, so use to_warehouse_id)
             ledger_entry = ItemLedger(
+                company_id=current_user.company_id,
                 item_id=line.item_id,
-                warehouse_id=item_stock.warehouse_id,
+                transaction_number=tx_number,
                 transaction_type='RECEIVE_PO',
                 quantity=Decimal(str(receive_data.quantity_received)),
-                reference_type='purchase_order',
-                reference_id=po.id,
+                unit=line.unit,
+                unit_cost=line.unit_price,
+                total_cost=Decimal(str(receive_data.quantity_received)) * (line.unit_price or Decimal('0')),
+                to_warehouse_id=item_stock.warehouse_id,
                 notes=f"Received from PO {po.po_number}",
                 created_by=current_user.id
             )
             db.add(ledger_entry)
+            db.flush()  # Flush to get ledger_entry.id
+
+            # Auto-post journal entry for inventory receiving
+            try:
+                journal_service = JournalPostingService(db, current_user.company_id, current_user.id)
+                journal_entry = journal_service.post_po_receiving(
+                    po, line, Decimal(str(receive_data.quantity_received)), ledger_entry
+                )
+                if journal_entry:
+                    logger.info(f"Auto-posted journal entry {journal_entry.entry_number} for PO receive")
+            except Exception as e:
+                logger.warning(f"Failed to auto-post journal entry for PO receive: {e}")
 
     db.commit()
 

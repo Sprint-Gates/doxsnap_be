@@ -445,14 +445,32 @@ async def get_opportunity_stats(
         Opportunity.expected_close_date < end_of_month.date()
     ).scalar() or 0
 
+    # Total value of all opportunities (all statuses)
+    all_value = db.query(func.sum(Opportunity.amount)).filter(
+        Opportunity.company_id == user.company_id
+    ).scalar() or 0
+
+    # Won value (total won)
+    won_value = db.query(func.sum(Opportunity.amount)).filter(
+        Opportunity.company_id == user.company_id,
+        Opportunity.status == "won"
+    ).scalar() or 0
+
+    # Average deal size
+    open_count = next((c for s, c in status_counts if s == "open"), 0)
+    avg_deal_size = float(total_value) / open_count if open_count > 0 else 0
+
     return {
+        "total_value": float(all_value),
         "total_pipeline_value": float(total_value),
         "weighted_pipeline_value": float(weighted_value),
+        "won_value": float(won_value),
         "won_this_month": float(won_this_month),
         "closing_this_month": float(closing_this_month),
         "by_status": {s: c for s, c in status_counts},
         "win_rate": round(win_rate, 1),
-        "open_count": next((c for s, c in status_counts if s == "open"), 0)
+        "open_count": open_count,
+        "avg_deal_size": round(avg_deal_size, 2)
     }
 
 
