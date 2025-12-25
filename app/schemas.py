@@ -1297,6 +1297,41 @@ class BalanceSheetReport(BaseModel):
     is_balanced: bool
 
 
+# Balance Sheet Diagnostic Schemas
+class UnbalancedJournalEntry(BaseModel):
+    id: int
+    entry_number: str
+    entry_date: date
+    description: Optional[str] = None
+    source_type: Optional[str] = None
+    source_number: Optional[str] = None
+    total_debit: float
+    total_credit: float
+    difference: float
+
+
+class AccountBalanceIssue(BaseModel):
+    account_id: int
+    account_code: str
+    account_name: str
+    account_type: str
+    normal_balance: str
+    computed_balance: float
+    issue_description: str
+
+
+class BalanceSheetDiagnostic(BaseModel):
+    as_of_date: date
+    total_assets: float
+    total_liabilities_and_equity: float
+    imbalance_amount: float
+    is_balanced: bool
+    unbalanced_entries: List[UnbalancedJournalEntry]
+    total_unbalanced_amount: float
+    account_issues: List[AccountBalanceIssue]
+    recommendations: List[str]
+
+
 # Chart of Accounts initialization
 class ChartOfAccountsInit(BaseModel):
     template: str = "default"  # default, property_management, service_company

@@ -26,7 +26,8 @@ from app.schemas import (
     DefaultAccountMappingCreate, DefaultAccountMappingUpdate,
     SiteLedgerReport, SiteLedgerEntry, TrialBalanceReport, TrialBalanceRow,
     ChartOfAccountsInit, ProfitLossReport, PLSection, PLLineItem,
-    BalanceSheetReport, BSSection, BSLineItem
+    BalanceSheetReport, BSSection, BSLineItem,
+    BalanceSheetDiagnostic, UnbalancedJournalEntry, AccountBalanceIssue
 )
 from app.utils.security import verify_token
 import logging
@@ -1621,6 +1622,157 @@ def get_balance_sheet(
         total_equity=total_equity,
         total_liabilities_and_equity=total_liabilities_and_equity,
         is_balanced=is_balanced
+    )
+
+
+@router.get("/reports/balance-sheet/diagnostic", response_model=BalanceSheetDiagnostic)
+def get_balance_sheet_diagnostic(
+    as_of_date: date,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Diagnose balance sheet issues by checking for:
+    1. Unbalanced journal entries (debits != credits)
+    2. Account balance anomalies
+    3. Provide recommendations for fixing issues
+    """
+    company_id = get_company_id(current_user, db)
+
+    # First, get the balance sheet totals
+    balance_sheet = get_balance_sheet(as_of_date, None, db, current_user)
+    imbalance_amount = balance_sheet.total_assets - balance_sheet.total_liabilities_and_equity
+
+    # Find all unbalanced journal entries
+    unbalanced_entries = []
+    total_unbalanced_amount = Decimal('0')
+
+    # Get all posted journal entries up to the as_of_date
+    entries = db.query(JournalEntry).filter(
+        JournalEntry.company_id == company_id,
+        JournalEntry.status == "posted",
+        JournalEntry.entry_date <= as_of_date
+    ).all()
+
+    for entry in entries:
+        # Calculate total debits and credits for this entry
+        totals = db.query(
+            func.coalesce(func.sum(JournalEntryLine.debit), 0).label('total_debit'),
+            func.coalesce(func.sum(JournalEntryLine.credit), 0).label('total_credit')
+        ).filter(
+            JournalEntryLine.journal_entry_id == entry.id
+        ).first()
+
+        total_debit = float(totals.total_debit or 0)
+        total_credit = float(totals.total_credit or 0)
+        difference = round(total_debit - total_credit, 2)
+
+        if abs(difference) >= 0.01:  # Allow for small rounding differences
+            unbalanced_entries.append(UnbalancedJournalEntry(
+                id=entry.id,
+                entry_number=entry.entry_number,
+                entry_date=entry.entry_date,
+                description=entry.description,
+                source_type=entry.source_type,
+                source_number=entry.source_number,
+                total_debit=total_debit,
+                total_credit=total_credit,
+                difference=difference
+            ))
+            total_unbalanced_amount += Decimal(str(difference))
+
+    # Check for account balance anomalies
+    account_issues = []
+
+    # Check contra-asset accounts (like Accumulated Depreciation) that should have credit balances
+    contra_accounts = db.query(
+        Account.id,
+        Account.code,
+        Account.name,
+        AccountType.code.label('type_code'),
+        AccountType.normal_balance,
+        func.coalesce(func.sum(JournalEntryLine.debit), 0).label('total_debit'),
+        func.coalesce(func.sum(JournalEntryLine.credit), 0).label('total_credit')
+    ).join(
+        AccountType, Account.account_type_id == AccountType.id
+    ).outerjoin(
+        JournalEntryLine, Account.id == JournalEntryLine.account_id
+    ).outerjoin(
+        JournalEntry, and_(
+            JournalEntryLine.journal_entry_id == JournalEntry.id,
+            JournalEntry.status == "posted",
+            JournalEntry.entry_date <= as_of_date
+        )
+    ).filter(
+        Account.company_id == company_id,
+        Account.is_active == True,
+        Account.is_header == False,
+        Account.code.in_(['1290'])  # Accumulated Depreciation
+    ).group_by(
+        Account.id, Account.code, Account.name, AccountType.code, AccountType.normal_balance
+    ).all()
+
+    for acc in contra_accounts:
+        total_debit = float(acc.total_debit or 0)
+        total_credit = float(acc.total_credit or 0)
+        balance = total_debit - total_credit
+
+        # Accumulated Depreciation is a contra-asset, stored as ASSET type but should have credit balance
+        if acc.code == '1290' and balance > 0:
+            account_issues.append(AccountBalanceIssue(
+                account_id=acc.id,
+                account_code=acc.code,
+                account_name=acc.name,
+                account_type=acc.type_code,
+                normal_balance=acc.normal_balance,
+                computed_balance=balance,
+                issue_description=f"Contra-asset account shows debit balance of ${balance:.2f}. " +
+                                  "Accumulated Depreciation should normally have a credit balance."
+            ))
+
+    # Generate recommendations
+    recommendations = []
+
+    if unbalanced_entries:
+        recommendations.append(
+            f"Found {len(unbalanced_entries)} unbalanced journal entry(ies) totaling ${float(total_unbalanced_amount):.2f}. " +
+            "Review and correct these entries to balance debits and credits."
+        )
+
+        # Group by source type for targeted recommendations
+        source_types = set(e.source_type for e in unbalanced_entries if e.source_type)
+        for st in source_types:
+            count = sum(1 for e in unbalanced_entries if e.source_type == st)
+            recommendations.append(
+                f"- {count} unbalanced entry(ies) from '{st}' transactions. Check the {st} posting logic."
+            )
+
+    if account_issues:
+        recommendations.append(
+            f"Found {len(account_issues)} account balance issue(s). " +
+            "Review account configurations and journal entries affecting these accounts."
+        )
+
+    if not unbalanced_entries and not account_issues and abs(imbalance_amount) >= 0.01:
+        recommendations.append(
+            "Balance sheet is unbalanced but no specific issues found. " +
+            "This may indicate a calculation issue in the balance sheet report itself or " +
+            "missing account mappings."
+        )
+
+    if abs(imbalance_amount) < 0.01:
+        recommendations.append("Balance sheet is properly balanced. No issues found.")
+
+    return BalanceSheetDiagnostic(
+        as_of_date=as_of_date,
+        total_assets=balance_sheet.total_assets,
+        total_liabilities_and_equity=balance_sheet.total_liabilities_and_equity,
+        imbalance_amount=round(imbalance_amount, 2),
+        is_balanced=abs(imbalance_amount) < 0.01,
+        unbalanced_entries=unbalanced_entries,
+        total_unbalanced_amount=float(total_unbalanced_amount),
+        account_issues=account_issues,
+        recommendations=recommendations
     )
 
 

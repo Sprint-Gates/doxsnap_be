@@ -708,8 +708,13 @@ async def post_disposal(
             )
         return account
 
+    # Check if any salvage exists on lines
+    has_tool_salvage = any(float(tl.salvage_value or 0) > 0 for tl in disposal.tool_lines)
+    has_item_salvage = any(float(il.salvage_value or 0) > 0 for il in disposal.item_lines)
+    has_any_salvage = has_tool_salvage or has_item_salvage
+
     # Account codes
-    cash_account = get_account_by_code("1110") if float(disposal.salvage_received or 0) > 0 else None
+    cash_account = get_account_by_code("1110") if has_any_salvage else None
     tools_account = get_account_by_code("1210") if disposal.tool_lines else None
     accum_depr_account = get_account_by_code("1290") if disposal.tool_lines else None
     inventory_account = get_account_by_code("1140") if disposal.item_lines else None
@@ -821,6 +826,7 @@ async def post_disposal(
     total_tool_original_cost = Decimal("0")
     total_tool_loss = Decimal("0")
     total_tool_gain = Decimal("0")
+    total_tool_salvage = Decimal("0")
 
     for tool_line in disposal.tool_lines:
         tool = tool_line.tool
@@ -828,6 +834,7 @@ async def post_disposal(
         # Accumulate for journal entry
         total_tool_accum_depr += Decimal(str(tool_line.accumulated_depreciation or 0))
         total_tool_original_cost += Decimal(str(tool_line.original_cost or 0))
+        total_tool_salvage += Decimal(str(tool_line.salvage_value or 0))
 
         gain_loss = Decimal(str(tool_line.gain_loss or 0))
         if gain_loss < 0:
@@ -883,6 +890,19 @@ async def post_disposal(
             ))
             total_credit += total_tool_gain
 
+        # DR: Cash for tool salvage (if any)
+        if total_tool_salvage > 0 and cash_account:
+            line_number += 1
+            db.add(JournalEntryLine(
+                journal_entry_id=journal_entry.id,
+                line_number=line_number,
+                account_id=cash_account.id,
+                debit=float(total_tool_salvage),
+                credit=0,
+                description=f"Salvage received for tools"
+            ))
+            total_debit += total_tool_salvage
+
         # CR: Tools & Equipment (original cost)
         line_number += 1
         db.add(JournalEntryLine(
@@ -898,6 +918,7 @@ async def post_disposal(
     # Process item lines
     total_item_cost = Decimal("0")
     total_item_loss = Decimal("0")
+    total_item_salvage = Decimal("0")
 
     for item_line in disposal.item_lines:
         # Update item stock
@@ -929,6 +950,7 @@ async def post_disposal(
 
         # Accumulate for journal entry
         total_item_cost += Decimal(str(item_line.total_cost or 0))
+        total_item_salvage += Decimal(str(item_line.salvage_value or 0))
         loss = Decimal(str(item_line.total_cost or 0)) - Decimal(str(item_line.salvage_value or 0))
         total_item_loss += loss
 
@@ -947,6 +969,19 @@ async def post_disposal(
             ))
             total_debit += total_item_loss
 
+        # DR: Cash for item salvage (if any)
+        if total_item_salvage > 0 and cash_account:
+            line_number += 1
+            db.add(JournalEntryLine(
+                journal_entry_id=journal_entry.id,
+                line_number=line_number,
+                account_id=cash_account.id,
+                debit=float(total_item_salvage),
+                credit=0,
+                description=f"Salvage received for inventory items"
+            ))
+            total_debit += total_item_salvage
+
         # CR: Inventory
         line_number += 1
         db.add(JournalEntryLine(
@@ -958,20 +993,6 @@ async def post_disposal(
             description=f"Inventory disposed - {len(disposal.item_lines)} items"
         ))
         total_credit += total_item_cost
-
-    # Handle salvage received (cash)
-    salvage_received = Decimal(str(disposal.salvage_received or 0))
-    if salvage_received > 0 and cash_account:
-        line_number += 1
-        db.add(JournalEntryLine(
-            journal_entry_id=journal_entry.id,
-            line_number=line_number,
-            account_id=cash_account.id,
-            debit=float(salvage_received),
-            credit=0,
-            description=f"Salvage received - {disposal.salvage_reference or 'Cash'}"
-        ))
-        total_debit += salvage_received
 
     # Update journal entry totals
     journal_entry.total_debit = float(total_debit)
