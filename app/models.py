@@ -292,6 +292,11 @@ class Warehouse(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+
+    # Business Unit - links warehouse to accounting (JDE concept)
+    # All inventory transactions for this warehouse will post to this BU
+    business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=True)
+
     name = Column(String, nullable=False)
     code = Column(String, nullable=True)  # Warehouse code for reference (e.g., "WH-001")
     address = Column(Text, nullable=True)
@@ -309,6 +314,7 @@ class Warehouse(Base):
 
     # Relationships
     company = relationship("Company", backref="warehouses")
+    business_unit = relationship("BusinessUnit", backref="warehouses")
 
 
 class OTPCode(Base):
@@ -1356,6 +1362,9 @@ class ItemLedger(Base):
     from_hhd_id = Column(Integer, ForeignKey("handheld_devices.id"), nullable=True)
     to_hhd_id = Column(Integer, ForeignKey("handheld_devices.id"), nullable=True)
 
+    # Business Unit - derived from warehouse for accounting integration
+    business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=True)
+
     # Reference documents
     invoice_id = Column(Integer, ForeignKey("processed_images.id"), nullable=True)  # For RECEIVE_INVOICE
     work_order_id = Column(Integer, ForeignKey("work_orders.id"), nullable=True)  # For ISSUE/RETURN
@@ -1376,6 +1385,7 @@ class ItemLedger(Base):
     to_warehouse = relationship("Warehouse", foreign_keys=[to_warehouse_id])
     from_hhd = relationship("HandHeldDevice", foreign_keys=[from_hhd_id])
     to_hhd = relationship("HandHeldDevice", foreign_keys=[to_hhd_id])
+    business_unit = relationship("BusinessUnit", backref="item_ledger_entries")
     invoice = relationship("ProcessedImage")
     work_order = relationship("WorkOrder")
     transfer = relationship("ItemTransfer", back_populates="ledger_entries")
@@ -2729,7 +2739,11 @@ class JournalEntryLine(Base):
     # Line description
     description = Column(Text, nullable=True)
 
-    # Cost center - Site is the primary dimension
+    # Cost center - Business Unit is the primary dimension (JDE concept)
+    business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=True)
+
+    # Legacy site_id - kept for backward compatibility during migration
+    # TODO: Deprecate after full migration to business_unit_id
     site_id = Column(Integer, ForeignKey("sites.id"), nullable=True)
 
     # Additional dimensions for drill-down reporting
@@ -2748,6 +2762,7 @@ class JournalEntryLine(Base):
     # Relationships
     journal_entry = relationship("JournalEntry", back_populates="lines")
     account = relationship("Account", back_populates="journal_lines")
+    business_unit = relationship("BusinessUnit", backref="journal_lines")
     site = relationship("Site", backref="journal_lines")
     contract = relationship("Contract", backref="journal_lines")
     work_order = relationship("WorkOrder", backref="journal_lines")
@@ -2768,7 +2783,11 @@ class AccountBalance(Base):
     account_id = Column(Integer, ForeignKey("accounts.id"), nullable=False)
     fiscal_period_id = Column(Integer, ForeignKey("fiscal_periods.id"), nullable=False)
 
-    # Cost center (optional - null means company-wide)
+    # Cost center - Business Unit is the primary dimension (JDE concept)
+    business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=True)
+
+    # Legacy site_id - kept for backward compatibility during migration
+    # TODO: Deprecate after full migration to business_unit_id
     site_id = Column(Integer, ForeignKey("sites.id"), nullable=True)
 
     # Period activity
@@ -2782,10 +2801,10 @@ class AccountBalance(Base):
     # Audit
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
 
-    # Unique constraint
+    # Unique constraint - now includes business_unit_id
     __table_args__ = (
-        UniqueConstraint('company_id', 'account_id', 'fiscal_period_id', 'site_id',
-                        name='uq_account_balance_period_site'),
+        UniqueConstraint('company_id', 'account_id', 'fiscal_period_id', 'business_unit_id', 'site_id',
+                        name='uq_account_balance_period_bu'),
     )
 
     # Relationships
@@ -2793,6 +2812,92 @@ class AccountBalance(Base):
     account = relationship("Account", backref="balances")
     fiscal_period = relationship("FiscalPeriod", backref="account_balances")
     site = relationship("Site", backref="account_balances")
+    business_unit = relationship("BusinessUnit", backref="account_balances")
+
+
+class BusinessUnit(Base):
+    """
+    Business Unit - The smallest accounting unit in the ERP system.
+    Inspired by Oracle JD Edwards, this represents the "where" portion of an account.
+
+    Key concepts:
+    - Each BU belongs to exactly one company
+    - Supports hierarchy via parent_id (up to 9 levels)
+    - Two types: balance_sheet (assets/liabilities/equity) and profit_loss (revenue/expenses)
+    - All accounting entries reference a BU for proper cost center tracking
+    - Warehouses are linked to BUs for inventory-accounting integration
+    """
+    __tablename__ = "business_units"
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+
+    # JD Edwards style identifier (12-char alphanumeric)
+    code = Column(String(12), nullable=False, index=True)
+    name = Column(String(100), nullable=False)
+    description = Column(Text, nullable=True)
+
+    # Hierarchy support
+    parent_id = Column(Integer, ForeignKey("business_units.id"), nullable=True)
+    level_of_detail = Column(Integer, default=1)  # 1-9 for hierarchy depth
+
+    # Type classification
+    bu_type = Column(String(20), default="profit_loss")  # balance_sheet, profit_loss
+
+    # Model/Consolidated flag (JDE concept)
+    # "" = Normal BU
+    # "M" = Model BU (template)
+    # "C" = Consolidated BU (roll-up)
+    # "1" = Target BU
+    model_flag = Column(String(1), default="")
+
+    # Posting control
+    # "" = Normal posting allowed
+    # "K" = Budget locked
+    # "N" = No posting allowed
+    # "P" = Purge (marked for deletion)
+    posting_edit = Column(String(1), default="")
+    is_adjustment_only = Column(Boolean, default=False)
+
+    # Status
+    is_active = Column(Boolean, default=True)
+
+    # Subsequent BU (for closed/redirected BUs)
+    subsequent_bu_id = Column(Integer, ForeignKey("business_units.id"), nullable=True)
+
+    # Address/Location info (optional)
+    address = Column(String(255), nullable=True)
+    city = Column(String(100), nullable=True)
+    state = Column(String(50), nullable=True)
+    country = Column(String(50), nullable=True)
+
+    # Category codes (JDE has 30, we support 10 for flexibility)
+    category_code_01 = Column(String(10), nullable=True)  # Primary classification
+    category_code_02 = Column(String(10), nullable=True)  # Secondary classification
+    category_code_03 = Column(String(10), nullable=True)
+    category_code_04 = Column(String(10), nullable=True)
+    category_code_05 = Column(String(10), nullable=True)
+    category_code_06 = Column(String(10), nullable=True)
+    category_code_07 = Column(String(10), nullable=True)
+    category_code_08 = Column(String(10), nullable=True)
+    category_code_09 = Column(String(10), nullable=True)
+    category_code_10 = Column(String(10), nullable=True)
+
+    # Audit
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    # Unique constraint: code must be unique within company
+    __table_args__ = (
+        UniqueConstraint('company_id', 'code', name='uq_business_unit_code'),
+    )
+
+    # Relationships
+    company = relationship("Company", backref="business_units")
+    parent = relationship("BusinessUnit", foreign_keys=[parent_id], remote_side=[id], backref="children")
+    subsequent_bu = relationship("BusinessUnit", foreign_keys=[subsequent_bu_id], remote_side=[id])
+    creator = relationship("User", foreign_keys=[created_by])
 
 
 class DefaultAccountMapping(Base):

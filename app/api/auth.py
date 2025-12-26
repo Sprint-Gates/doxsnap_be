@@ -14,7 +14,7 @@ from app.services.otp import OTPService
 from app.models import RefreshToken, Company
 
 router = APIRouter()
-security = HTTPBearer()
+security = HTTPBearer(auto_error=False)
 
 
 def check_subscription_active(user, db: Session) -> dict:
@@ -55,6 +55,10 @@ async def get_current_user(
         detail="Could not validate credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
+
+    # Check if credentials were provided (auto_error=False means this can be None)
+    if credentials is None:
+        raise credentials_exception
 
     email = verify_token(credentials.credentials)
     if email is None:

@@ -21,7 +21,7 @@ from app.models import (
     User, Vendor, Site, Technician, Warehouse, Account, AccountType,
     Tool, ToolCategory, ItemMaster, ItemStock, ItemLedger,
     Disposal, DisposalToolLine, DisposalItemLine,
-    JournalEntry, JournalEntryLine, FiscalPeriod
+    JournalEntry, JournalEntryLine, FiscalPeriod, BusinessUnit
 )
 from app.schemas import (
     DisposalCreate, DisposalUpdate, Disposal as DisposalSchema, DisposalList,
@@ -92,6 +92,27 @@ def get_tool_current_location(tool: Tool) -> Optional[str]:
     elif tool.assigned_warehouse_id and tool.assigned_warehouse:
         return f"Warehouse: {tool.assigned_warehouse.name}"
     return None
+
+
+def get_business_unit_for_disposal(db: Session, company_id: int, warehouse_id: Optional[int] = None) -> Optional[int]:
+    """Get business_unit_id from warehouse or default to company's balance sheet BU"""
+    # Try to get from warehouse first
+    if warehouse_id:
+        warehouse = db.query(Warehouse).filter(
+            Warehouse.id == warehouse_id,
+            Warehouse.company_id == company_id
+        ).first()
+        if warehouse and warehouse.business_unit_id:
+            return warehouse.business_unit_id
+
+    # Fall back to company's default balance sheet BU
+    bu = db.query(BusinessUnit).filter(
+        BusinessUnit.company_id == company_id,
+        BusinessUnit.bu_type == "balance_sheet",
+        BusinessUnit.is_active == True,
+        BusinessUnit.parent_id == None
+    ).first()
+    return bu.id if bu else None
 
 
 def disposal_to_response(disposal: Disposal) -> dict:
@@ -821,6 +842,20 @@ async def post_disposal(
     total_debit = Decimal("0")
     total_credit = Decimal("0")
 
+    # Determine business_unit_id for the disposal
+    # For items, we'll use the warehouse's BU; for tools, use their warehouse or default
+    # Get from first item line's warehouse if available, otherwise default
+    first_warehouse_id = None
+    if disposal.item_lines:
+        first_warehouse_id = disposal.item_lines[0].warehouse_id
+    elif disposal.tool_lines:
+        for tl in disposal.tool_lines:
+            if tl.tool and tl.tool.assigned_warehouse_id:
+                first_warehouse_id = tl.tool.assigned_warehouse_id
+                break
+
+    business_unit_id = get_business_unit_for_disposal(db, current_user.company_id, first_warehouse_id)
+
     # Process tool lines
     total_tool_accum_depr = Decimal("0")
     total_tool_original_cost = Decimal("0")
@@ -860,7 +895,8 @@ async def post_disposal(
                 account_id=accum_depr_account.id,
                 debit=float(total_tool_accum_depr),
                 credit=0,
-                description=f"Accumulated depreciation removed - {len(disposal.tool_lines)} tools"
+                description=f"Accumulated depreciation removed - {len(disposal.tool_lines)} tools",
+                business_unit_id=business_unit_id
             ))
             total_debit += total_tool_accum_depr
 
@@ -873,7 +909,8 @@ async def post_disposal(
                 account_id=loss_account.id,
                 debit=float(total_tool_loss),
                 credit=0,
-                description=f"Loss on tool disposal - {disposal.reason}"
+                description=f"Loss on tool disposal - {disposal.reason}",
+                business_unit_id=business_unit_id
             ))
             total_debit += total_tool_loss
 
@@ -886,7 +923,8 @@ async def post_disposal(
                 account_id=gain_account.id,
                 debit=0,
                 credit=float(total_tool_gain),
-                description=f"Gain on tool disposal"
+                description=f"Gain on tool disposal",
+                business_unit_id=business_unit_id
             ))
             total_credit += total_tool_gain
 
@@ -899,7 +937,8 @@ async def post_disposal(
                 account_id=cash_account.id,
                 debit=float(total_tool_salvage),
                 credit=0,
-                description=f"Salvage received for tools"
+                description=f"Salvage received for tools",
+                business_unit_id=business_unit_id
             ))
             total_debit += total_tool_salvage
 
@@ -911,7 +950,8 @@ async def post_disposal(
             account_id=tools_account.id,
             debit=0,
             credit=float(total_tool_original_cost),
-            description=f"Tools removed - {len(disposal.tool_lines)} tools"
+            description=f"Tools removed - {len(disposal.tool_lines)} tools",
+            business_unit_id=business_unit_id
         ))
         total_credit += total_tool_original_cost
 
@@ -933,6 +973,10 @@ async def post_disposal(
         # Create item ledger entry
         # Generate transaction number for ledger
         ledger_tx_number = f"DSP-{disposal.disposal_number}-{item_line.id}"
+
+        # Get business_unit_id for this specific warehouse
+        item_bu_id = get_business_unit_for_disposal(db, current_user.company_id, item_line.warehouse_id)
+
         ledger_entry = ItemLedger(
             company_id=current_user.company_id,
             item_id=item_line.item_id,
@@ -944,7 +988,8 @@ async def post_disposal(
             unit_cost=float(item_line.unit_cost),
             total_cost=-float(item_line.total_cost),
             notes=f"Disposal {disposal.disposal_number}: {disposal.reason} - {item_line.notes or ''}",
-            created_by=current_user.id
+            created_by=current_user.id,
+            business_unit_id=item_bu_id
         )
         db.add(ledger_entry)
 
@@ -965,7 +1010,8 @@ async def post_disposal(
                 account_id=inventory_writeoff_account.id,
                 debit=float(total_item_loss),
                 credit=0,
-                description=f"Inventory write-off - {len(disposal.item_lines)} items"
+                description=f"Inventory write-off - {len(disposal.item_lines)} items",
+                business_unit_id=business_unit_id
             ))
             total_debit += total_item_loss
 
@@ -978,7 +1024,8 @@ async def post_disposal(
                 account_id=cash_account.id,
                 debit=float(total_item_salvage),
                 credit=0,
-                description=f"Salvage received for inventory items"
+                description=f"Salvage received for inventory items",
+                business_unit_id=business_unit_id
             ))
             total_debit += total_item_salvage
 
@@ -990,7 +1037,8 @@ async def post_disposal(
             account_id=inventory_account.id,
             debit=0,
             credit=float(total_item_cost),
-            description=f"Inventory disposed - {len(disposal.item_lines)} items"
+            description=f"Inventory disposed - {len(disposal.item_lines)} items",
+            business_unit_id=business_unit_id
         ))
         total_credit += total_item_cost
 

@@ -1,11 +1,11 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import or_
 from typing import Optional, List
 from app.database import get_db
-from app.models import Warehouse, User
+from app.models import Warehouse, User, BusinessUnit
 from app.api.auth import get_current_user
 
 router = APIRouter()
@@ -15,6 +15,7 @@ security = HTTPBearer()
 class WarehouseCreate(BaseModel):
     name: str
     code: Optional[str] = None
+    business_unit_id: Optional[int] = None  # Link to Business Unit for accounting
     address: Optional[str] = None
     city: Optional[str] = None
     country: Optional[str] = None
@@ -29,6 +30,7 @@ class WarehouseCreate(BaseModel):
 class WarehouseUpdate(BaseModel):
     name: Optional[str] = None
     code: Optional[str] = None
+    business_unit_id: Optional[int] = None  # Link to Business Unit for accounting
     address: Optional[str] = None
     city: Optional[str] = None
     country: Optional[str] = None
@@ -45,6 +47,9 @@ class WarehouseResponse(BaseModel):
     id: int
     name: str
     code: Optional[str]
+    business_unit_id: Optional[int]
+    business_unit_code: Optional[str] = None
+    business_unit_name: Optional[str] = None
     address: Optional[str]
     city: Optional[str]
     country: Optional[str]
@@ -67,6 +72,9 @@ def warehouse_to_response(warehouse: Warehouse) -> WarehouseResponse:
         id=warehouse.id,
         name=warehouse.name,
         code=warehouse.code,
+        business_unit_id=warehouse.business_unit_id,
+        business_unit_code=warehouse.business_unit.code if warehouse.business_unit else None,
+        business_unit_name=warehouse.business_unit.name if warehouse.business_unit else None,
         address=warehouse.address,
         city=warehouse.city,
         country=warehouse.country,
@@ -90,7 +98,9 @@ async def get_warehouses(
     search: Optional[str] = Query(None, description="Search by name, code, or city")
 ):
     """Get all warehouses for the current user's company"""
-    query = db.query(Warehouse).filter(Warehouse.company_id == current_user.company_id)
+    query = db.query(Warehouse).options(
+        joinedload(Warehouse.business_unit)
+    ).filter(Warehouse.company_id == current_user.company_id)
 
     if not include_inactive:
         query = query.filter(Warehouse.is_active == True)
@@ -172,6 +182,7 @@ async def create_warehouse(
         company_id=current_user.company_id,
         name=warehouse_data.name,
         code=warehouse_data.code,
+        business_unit_id=warehouse_data.business_unit_id,
         address=warehouse_data.address,
         city=warehouse_data.city,
         country=warehouse_data.country,

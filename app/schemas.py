@@ -1009,7 +1009,8 @@ class JournalEntryLineBase(BaseModel):
     debit: float = 0
     credit: float = 0
     description: Optional[str] = None
-    site_id: Optional[int] = None
+    business_unit_id: Optional[int] = None  # Primary dimension (JDE concept)
+    site_id: Optional[int] = None  # Legacy - kept for backward compatibility
     contract_id: Optional[int] = None
     work_order_id: Optional[int] = None
     vendor_id: Optional[int] = None
@@ -1028,6 +1029,7 @@ class JournalEntryLineBrief(BaseModel):
     debit: float
     credit: float
     description: Optional[str] = None
+    business_unit_id: Optional[int] = None
     site_id: Optional[int] = None
     line_number: int
     account: Optional[AccountBrief] = None
@@ -1120,7 +1122,8 @@ class JournalEntryList(BaseModel):
 class AccountBalanceBase(BaseModel):
     account_id: int
     fiscal_period_id: int
-    site_id: Optional[int] = None
+    business_unit_id: Optional[int] = None  # Primary dimension (JDE concept)
+    site_id: Optional[int] = None  # Legacy - kept for backward compatibility
     period_debit: float = 0
     period_credit: float = 0
     opening_balance: float = 0
@@ -1210,6 +1213,8 @@ class TrialBalanceReport(BaseModel):
     as_of_date: date
     site_id: Optional[int] = None
     site_name: Optional[str] = None
+    business_unit_id: Optional[int] = None
+    business_unit_name: Optional[str] = None
     rows: List[TrialBalanceRow]
     total_debit: float
     total_credit: float
@@ -1235,6 +1240,8 @@ class ProfitLossReport(BaseModel):
     end_date: date
     site_id: Optional[int] = None
     site_name: Optional[str] = None
+    business_unit_id: Optional[int] = None
+    business_unit_name: Optional[str] = None
 
     # Revenue section
     revenue: PLSection
@@ -1273,6 +1280,8 @@ class BalanceSheetReport(BaseModel):
     as_of_date: date
     site_id: Optional[int] = None
     site_name: Optional[str] = None
+    business_unit_id: Optional[int] = None
+    business_unit_name: Optional[str] = None
 
     # Assets
     current_assets: BSSection
@@ -2108,3 +2117,168 @@ class AvailableItemForDisposal(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+# =============================================================================
+# Business Unit Schemas (JD Edwards concept)
+# =============================================================================
+
+class BusinessUnitBase(BaseModel):
+    """Base schema for Business Unit - the smallest accounting unit in the ERP"""
+    code: str  # 12-char alphanumeric identifier
+    name: str
+    description: Optional[str] = None
+
+    # Hierarchy
+    parent_id: Optional[int] = None
+    level_of_detail: int = 1  # 1-9 for hierarchy depth
+
+    # Type classification
+    bu_type: Literal["balance_sheet", "profit_loss"] = "profit_loss"
+
+    # Model/Consolidated flag
+    model_flag: Literal["", "M", "C", "1"] = ""  # "", M=Model, C=Consolidated, 1=Target
+
+    # Posting control
+    posting_edit: Literal["", "K", "N", "P"] = ""  # "", K=Budget locked, N=No posting, P=Purge
+    is_adjustment_only: bool = False
+
+    # Status
+    is_active: bool = True
+
+    # Subsequent BU (for closed BUs)
+    subsequent_bu_id: Optional[int] = None
+
+    # Address/Location info
+    address: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    country: Optional[str] = None
+
+    # Category codes (up to 10)
+    category_code_01: Optional[str] = None
+    category_code_02: Optional[str] = None
+    category_code_03: Optional[str] = None
+    category_code_04: Optional[str] = None
+    category_code_05: Optional[str] = None
+    category_code_06: Optional[str] = None
+    category_code_07: Optional[str] = None
+    category_code_08: Optional[str] = None
+    category_code_09: Optional[str] = None
+    category_code_10: Optional[str] = None
+
+
+class BusinessUnitCreate(BusinessUnitBase):
+    """Schema for creating a new Business Unit"""
+    pass
+
+
+class BusinessUnitUpdate(BaseModel):
+    """Schema for updating a Business Unit"""
+    name: Optional[str] = None
+    description: Optional[str] = None
+    parent_id: Optional[int] = None
+    level_of_detail: Optional[int] = None
+    bu_type: Optional[Literal["balance_sheet", "profit_loss"]] = None
+    model_flag: Optional[Literal["", "M", "C", "1"]] = None
+    posting_edit: Optional[Literal["", "K", "N", "P"]] = None
+    is_adjustment_only: Optional[bool] = None
+    is_active: Optional[bool] = None
+    subsequent_bu_id: Optional[int] = None
+    address: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    country: Optional[str] = None
+    category_code_01: Optional[str] = None
+    category_code_02: Optional[str] = None
+    category_code_03: Optional[str] = None
+    category_code_04: Optional[str] = None
+    category_code_05: Optional[str] = None
+    category_code_06: Optional[str] = None
+    category_code_07: Optional[str] = None
+    category_code_08: Optional[str] = None
+    category_code_09: Optional[str] = None
+    category_code_10: Optional[str] = None
+
+
+class BusinessUnitBrief(BaseModel):
+    """Brief Business Unit info for dropdowns and references"""
+    id: int
+    code: str
+    name: str
+    bu_type: str
+    is_active: bool
+
+    class Config:
+        from_attributes = True
+
+
+class BusinessUnit(BusinessUnitBase):
+    """Full Business Unit schema with all fields"""
+    id: int
+    company_id: int
+    created_by: Optional[int] = None
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class BusinessUnitWithChildren(BusinessUnit):
+    """Business Unit with nested children for hierarchy display"""
+    children: List["BusinessUnitWithChildren"] = []
+    parent_name: Optional[str] = None
+    warehouse_count: int = 0  # Number of warehouses linked to this BU
+
+    class Config:
+        from_attributes = True
+
+
+class BusinessUnitHierarchy(BaseModel):
+    """Full hierarchy tree for a company"""
+    company_id: int
+    total_business_units: int
+    balance_sheet_units: List[BusinessUnitWithChildren] = []
+    profit_loss_units: List[BusinessUnitWithChildren] = []
+
+
+class BusinessUnitLedgerEntry(BaseModel):
+    """Ledger entry for Business Unit report"""
+    entry_date: date
+    entry_number: str
+    account_code: str
+    account_name: str
+    description: Optional[str] = None
+    debit: float
+    credit: float
+    source_type: Optional[str] = None
+    source_number: Optional[str] = None
+
+
+class BusinessUnitLedgerReport(BaseModel):
+    """Business Unit Ledger Report"""
+    business_unit_id: int
+    business_unit_code: str
+    business_unit_name: str
+    bu_type: str
+    start_date: date
+    end_date: date
+    opening_balance: float
+    total_debits: float
+    total_credits: float
+    closing_balance: float
+    entries: List[BusinessUnitLedgerEntry] = []
+
+
+class BusinessUnitSummary(BaseModel):
+    """Summary info for a Business Unit"""
+    id: int
+    code: str
+    name: str
+    bu_type: str
+    total_debits: float
+    total_credits: float
+    net_balance: float
+    warehouse_count: int
+    transaction_count: int

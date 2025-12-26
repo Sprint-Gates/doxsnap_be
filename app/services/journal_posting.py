@@ -16,7 +16,7 @@ import json
 import logging
 
 from app.models import (
-    User, Company, Site,
+    User, Company, Site, Warehouse, BusinessUnit,
     AccountType, Account, FiscalPeriod, JournalEntry, JournalEntryLine,
     AccountBalance, DefaultAccountMapping,
     ProcessedImage, InvoiceAllocation, AllocationPeriod,
@@ -36,6 +36,34 @@ class JournalPostingService:
         self.company_id = company_id
         self.user_id = user_id
         self._mappings_cache = None
+        self._warehouse_bu_cache = {}
+
+    def _get_business_unit_from_warehouse(self, warehouse_id: Optional[int]) -> Optional[int]:
+        """Get business_unit_id from a warehouse, with caching"""
+        if not warehouse_id:
+            return None
+
+        if warehouse_id in self._warehouse_bu_cache:
+            return self._warehouse_bu_cache[warehouse_id]
+
+        warehouse = self.db.query(Warehouse).filter(
+            Warehouse.id == warehouse_id,
+            Warehouse.company_id == self.company_id
+        ).first()
+
+        bu_id = warehouse.business_unit_id if warehouse else None
+        self._warehouse_bu_cache[warehouse_id] = bu_id
+        return bu_id
+
+    def _get_default_business_unit(self, bu_type: str = "profit_loss") -> Optional[int]:
+        """Get the default business unit for a given type (balance_sheet or profit_loss)"""
+        bu = self.db.query(BusinessUnit).filter(
+            BusinessUnit.company_id == self.company_id,
+            BusinessUnit.bu_type == bu_type,
+            BusinessUnit.is_active == True,
+            BusinessUnit.parent_id == None  # Top-level BU
+        ).first()
+        return bu.id if bu else None
 
     def _get_mappings(self) -> dict:
         """Load and cache account mappings"""
@@ -101,11 +129,13 @@ class JournalPostingService:
             return
 
         for line in entry.lines:
+            # Query by both site_id and business_unit_id for proper balance tracking
             balance = self.db.query(AccountBalance).filter(
                 AccountBalance.company_id == self.company_id,
                 AccountBalance.account_id == line.account_id,
                 AccountBalance.fiscal_period_id == entry.fiscal_period_id,
-                AccountBalance.site_id == line.site_id
+                AccountBalance.site_id == line.site_id,
+                AccountBalance.business_unit_id == line.business_unit_id
             ).first()
 
             if not balance:
@@ -114,6 +144,7 @@ class JournalPostingService:
                     account_id=line.account_id,
                     fiscal_period_id=entry.fiscal_period_id,
                     site_id=line.site_id,
+                    business_unit_id=line.business_unit_id,
                     period_debit=0,
                     period_credit=0,
                     opening_balance=0,
@@ -706,6 +737,12 @@ class JournalPostingService:
             if po_currency != company_currency:
                 tax_amount = tax_amount * exchange_rate
 
+        # Get business_unit_id from ledger entry's warehouse (inventory is balance sheet)
+        business_unit_id = self._get_business_unit_from_warehouse(ledger_entry.to_warehouse_id)
+        if not business_unit_id:
+            # Fall back to default balance sheet BU for inventory
+            business_unit_id = self._get_default_business_unit("balance_sheet")
+
         # Create journal entry
         entry_date = date.today()
         fiscal_period = self._get_fiscal_period(entry_date)
@@ -741,7 +778,8 @@ class JournalPostingService:
                 vendor_id=po.vendor_id,
                 work_order_id=po.work_order_id,
                 contract_id=po.contract_id,
-                line_number=line_number
+                line_number=line_number,
+                business_unit_id=business_unit_id
             )
             self.db.add(inv_line)
             lines.append(inv_line)
@@ -758,7 +796,8 @@ class JournalPostingService:
                     credit=0,
                     description="VAT Input - PO Receiving",
                     vendor_id=po.vendor_id,
-                    line_number=line_number
+                    line_number=line_number,
+                    business_unit_id=business_unit_id
                 )
                 self.db.add(vat_line)
                 lines.append(vat_line)
@@ -774,7 +813,8 @@ class JournalPostingService:
                 credit=total_credit,
                 description=f"Payable for PO {po.po_number}",
                 vendor_id=po.vendor_id,
-                line_number=line_number
+                line_number=line_number,
+                business_unit_id=business_unit_id
             )
             self.db.add(payable_line)
             lines.append(payable_line)
@@ -792,7 +832,8 @@ class JournalPostingService:
                         debit=float(exchange_gain_loss) if exchange_gain_loss > 0 else 0,
                         credit=float(abs(exchange_gain_loss)) if exchange_gain_loss < 0 else 0,
                         description=f"Exchange {'gain' if exchange_gain_loss > 0 else 'loss'} on PO {po.po_number}",
-                        line_number=line_number
+                        line_number=line_number,
+                        business_unit_id=business_unit_id
                     )
                     self.db.add(fx_line)
                     lines.append(fx_line)
@@ -850,6 +891,12 @@ class JournalPostingService:
             logger.info(f"Skipping journal entry for zero-cost adjustment {ledger_entry.transaction_number}")
             return None
 
+        # Get business_unit_id from ledger entry's warehouse
+        warehouse_id = ledger_entry.to_warehouse_id or ledger_entry.from_warehouse_id
+        business_unit_id = self._get_business_unit_from_warehouse(warehouse_id)
+        if not business_unit_id:
+            business_unit_id = self._get_default_business_unit("balance_sheet")
+
         # Create journal entry
         entry_date = ledger_entry.transaction_date.date() if ledger_entry.transaction_date else date.today()
         fiscal_period = self._get_fiscal_period(entry_date)
@@ -883,7 +930,8 @@ class JournalPostingService:
                     debit=total_cost,
                     credit=0,
                     description=f"Inventory increase - {item.item_number} x {quantity}",
-                    line_number=line_number
+                    line_number=line_number,
+                    business_unit_id=business_unit_id
                 )
                 self.db.add(inv_line)
                 lines.append(inv_line)
@@ -897,7 +945,8 @@ class JournalPostingService:
                     debit=0,
                     credit=total_cost,
                     description=f"Stock adjustment gain - {reason or 'inventory adjustment'}",
-                    line_number=line_number
+                    line_number=line_number,
+                    business_unit_id=business_unit_id
                 )
                 self.db.add(adj_line)
                 lines.append(adj_line)
@@ -910,7 +959,8 @@ class JournalPostingService:
                     debit=total_cost,
                     credit=0,
                     description=f"Stock adjustment loss - {reason or 'inventory adjustment'}",
-                    line_number=line_number
+                    line_number=line_number,
+                    business_unit_id=business_unit_id
                 )
                 self.db.add(adj_line)
                 lines.append(adj_line)
@@ -924,7 +974,8 @@ class JournalPostingService:
                     debit=0,
                     credit=total_cost,
                     description=f"Inventory decrease - {item.item_number} x {quantity}",
-                    line_number=line_number
+                    line_number=line_number,
+                    business_unit_id=business_unit_id
                 )
                 self.db.add(inv_line)
                 lines.append(inv_line)
@@ -979,6 +1030,12 @@ class JournalPostingService:
             logger.info(f"Skipping journal entry for zero-cost cycle count {ledger_entry.transaction_number}")
             return None
 
+        # Get business_unit_id from ledger entry's warehouse
+        warehouse_id = ledger_entry.to_warehouse_id or ledger_entry.from_warehouse_id
+        business_unit_id = self._get_business_unit_from_warehouse(warehouse_id)
+        if not business_unit_id:
+            business_unit_id = self._get_default_business_unit("balance_sheet")
+
         # Create journal entry
         entry_date = ledger_entry.transaction_date.date() if ledger_entry.transaction_date else date.today()
         fiscal_period = self._get_fiscal_period(entry_date)
@@ -1012,7 +1069,8 @@ class JournalPostingService:
                     debit=total_cost,
                     credit=0,
                     description=f"Inventory gain - {item.item_number} x {quantity}",
-                    line_number=line_number
+                    line_number=line_number,
+                    business_unit_id=business_unit_id
                 )
                 self.db.add(inv_line)
                 lines.append(inv_line)
@@ -1025,7 +1083,8 @@ class JournalPostingService:
                     debit=0,
                     credit=total_cost,
                     description=f"Cycle count variance gain - {cycle_count_number}",
-                    line_number=line_number
+                    line_number=line_number,
+                    business_unit_id=business_unit_id
                 )
                 self.db.add(adj_line)
                 lines.append(adj_line)
@@ -1038,7 +1097,8 @@ class JournalPostingService:
                     debit=total_cost,
                     credit=0,
                     description=f"Cycle count variance loss - {cycle_count_number}",
-                    line_number=line_number
+                    line_number=line_number,
+                    business_unit_id=business_unit_id
                 )
                 self.db.add(adj_line)
                 lines.append(adj_line)
@@ -1051,7 +1111,8 @@ class JournalPostingService:
                     debit=0,
                     credit=total_cost,
                     description=f"Inventory loss - {item.item_number} x {quantity}",
-                    line_number=line_number
+                    line_number=line_number,
+                    business_unit_id=business_unit_id
                 )
                 self.db.add(inv_line)
                 lines.append(inv_line)
@@ -1124,6 +1185,12 @@ class JournalPostingService:
         po = grn.purchase_order
         vendor_name = po.vendor.name if po and po.vendor else "Unknown Vendor"
 
+        # Get business_unit_id from warehouse (inventory is balance sheet)
+        business_unit_id = self._get_business_unit_from_warehouse(grn.warehouse_id)
+        if not business_unit_id:
+            # Fall back to default balance sheet BU for inventory
+            business_unit_id = self._get_default_business_unit("balance_sheet")
+
         entry_date = grn.receipt_date or date.today()
         fiscal_period = self._get_fiscal_period(entry_date)
 
@@ -1166,7 +1233,8 @@ class JournalPostingService:
                     credit=Decimal('0'),
                     description=f"{grn_line.item_code or 'Item'}: {grn_line.item_description or ''} x {qty}",
                     line_number=line_number,
-                    vendor_id=po.vendor_id if po else None
+                    vendor_id=po.vendor_id if po else None,
+                    business_unit_id=business_unit_id
                 )
                 self.db.add(inv_line)
                 lines.append(inv_line)
@@ -1181,7 +1249,8 @@ class JournalPostingService:
                 credit=Decimal('0'),
                 description=f"VAT on GRN {grn.grn_number}",
                 line_number=line_number,
-                vendor_id=po.vendor_id if po else None
+                vendor_id=po.vendor_id if po else None,
+                business_unit_id=business_unit_id
             )
             self.db.add(vat_line)
             lines.append(vat_line)
@@ -1199,7 +1268,8 @@ class JournalPostingService:
                 credit=Decimal(str(round(total_with_tax_base, 2))),
                 description=f"GRNI for {grn.grn_number} - PO {po.po_number if po else 'N/A'}",
                 line_number=line_number,
-                vendor_id=po.vendor_id if po else None
+                vendor_id=po.vendor_id if po else None,
+                business_unit_id=business_unit_id
             )
             self.db.add(ap_line)
             lines.append(ap_line)
@@ -1223,7 +1293,8 @@ class JournalPostingService:
                             debit=Decimal(str(diff)) if total_credits > total_debits else Decimal('0'),
                             credit=Decimal('0') if total_credits > total_debits else Decimal(str(diff)),
                             description=f"Exchange difference on GRN {grn.grn_number}",
-                            line_number=line_number
+                            line_number=line_number,
+                            business_unit_id=business_unit_id
                         )
                         self.db.add(fx_line)
                         lines.append(fx_line)

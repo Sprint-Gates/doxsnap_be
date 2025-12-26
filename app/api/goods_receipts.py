@@ -518,8 +518,8 @@ async def create_goods_receipt(
 
     return grn_to_response(grn)
 
-
-@router.get("/", response_model=List[dict])
+# @router.get("/", response_model=List[dict])
+@router.get("/")
 async def list_goods_receipts(
     purchase_order_id: Optional[int] = None,
     status: Optional[str] = None,
@@ -531,6 +531,8 @@ async def list_goods_receipts(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
+    
+    print("Inside list_goods_receipts")
     """List Goods Receipt Notes with optional filters"""
     if not current_user.company_id:
         raise HTTPException(status_code=400, detail="User must be associated with a company")
@@ -539,7 +541,8 @@ async def list_goods_receipts(
         joinedload(GoodsReceipt.purchase_order).joinedload(PurchaseOrder.vendor),
         joinedload(GoodsReceipt.warehouse),
         joinedload(GoodsReceipt.creator)
-    ).filter(GoodsReceipt.company_id == current_user.company_id)
+    )
+    # .filter(GoodsReceipt.company_id == current_user.company_id)
 
     if purchase_order_id:
         query = query.filter(GoodsReceipt.purchase_order_id == purchase_order_id)

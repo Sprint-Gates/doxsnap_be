@@ -12,7 +12,7 @@ from datetime import datetime, date
 from decimal import Decimal
 from app.database import get_db
 from app.models import (
-    User, Company, Site,
+    User, Company, Site, BusinessUnit,
     AccountType, Account, FiscalPeriod, JournalEntry, JournalEntryLine,
     AccountBalance, DefaultAccountMapping
 )
@@ -464,6 +464,7 @@ def list_journal_entries(
     start_date: Optional[date] = None,
     end_date: Optional[date] = None,
     site_id: Optional[int] = None,
+    business_unit_id: Optional[int] = None,
     search: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
@@ -488,6 +489,12 @@ def list_journal_entries(
     if site_id:
         # Filter entries that have lines for this site
         query = query.join(JournalEntryLine).filter(JournalEntryLine.site_id == site_id)
+
+    if business_unit_id:
+        # Filter entries that have lines for this business unit
+        if not site_id:  # Avoid duplicate join
+            query = query.join(JournalEntryLine)
+        query = query.filter(JournalEntryLine.business_unit_id == business_unit_id)
 
     if search:
         query = query.filter(
@@ -773,12 +780,13 @@ def update_account_balances(db: Session, entry: JournalEntry):
         return
 
     for line in entry.lines:
-        # Get or create balance record
+        # Get or create balance record (now including business_unit_id)
         balance = db.query(AccountBalance).filter(
             AccountBalance.company_id == entry.company_id,
             AccountBalance.account_id == line.account_id,
             AccountBalance.fiscal_period_id == entry.fiscal_period_id,
-            AccountBalance.site_id == line.site_id
+            AccountBalance.site_id == line.site_id,
+            AccountBalance.business_unit_id == line.business_unit_id
         ).first()
 
         if not balance:
@@ -787,6 +795,7 @@ def update_account_balances(db: Session, entry: JournalEntry):
                 account_id=line.account_id,
                 fiscal_period_id=entry.fiscal_period_id,
                 site_id=line.site_id,
+                business_unit_id=line.business_unit_id,
                 period_debit=0,
                 period_credit=0,
                 opening_balance=0,
@@ -996,10 +1005,11 @@ def get_site_ledger(
 def get_trial_balance(
     as_of_date: date,
     site_id: Optional[int] = None,
+    business_unit_id: Optional[int] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Get trial balance as of a specific date"""
+    """Get trial balance as of a specific date, optionally filtered by site or business unit"""
     company_id = get_company_id(current_user, db)
 
     # Get all accounts with their balances
@@ -1032,6 +1042,14 @@ def get_trial_balance(
             or_(
                 JournalEntryLine.site_id == site_id,
                 JournalEntryLine.site_id == None
+            )
+        )
+
+    if business_unit_id:
+        query = query.filter(
+            or_(
+                JournalEntryLine.business_unit_id == business_unit_id,
+                JournalEntryLine.business_unit_id == None
             )
         )
 
@@ -1085,10 +1103,17 @@ def get_trial_balance(
         site = db.query(Site).filter(Site.id == site_id).first()
         site_name = site.name if site else None
 
+    business_unit_name = None
+    if business_unit_id:
+        bu = db.query(BusinessUnit).filter(BusinessUnit.id == business_unit_id).first()
+        business_unit_name = bu.name if bu else None
+
     return TrialBalanceReport(
         as_of_date=as_of_date,
         site_id=site_id,
         site_name=site_name,
+        business_unit_id=business_unit_id,
+        business_unit_name=business_unit_name,
         rows=rows,
         total_debit=total_debit,
         total_credit=total_credit
@@ -1100,10 +1125,11 @@ def get_profit_loss(
     start_date: date,
     end_date: date,
     site_id: Optional[int] = None,
+    business_unit_id: Optional[int] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Get Profit & Loss (Income Statement) report for a date range"""
+    """Get Profit & Loss (Income Statement) report for a date range, optionally filtered by site or business unit"""
     company_id = get_company_id(current_user, db)
 
     # Get all account types to identify revenue vs expense
@@ -1149,6 +1175,14 @@ def get_profit_loss(
                 or_(
                     JournalEntryLine.site_id == site_id,
                     JournalEntryLine.site_id == None
+                )
+            )
+
+        if business_unit_id:
+            query = query.filter(
+                or_(
+                    JournalEntryLine.business_unit_id == business_unit_id,
+                    JournalEntryLine.business_unit_id == None
                 )
             )
 
@@ -1242,6 +1276,14 @@ def get_profit_loss(
                 )
             )
 
+        if business_unit_id:
+            cost_query = cost_query.filter(
+                or_(
+                    JournalEntryLine.business_unit_id == business_unit_id,
+                    JournalEntryLine.business_unit_id == None
+                )
+            )
+
         cost_results = cost_query.group_by(
             Account.id, Account.code, Account.name
         ).order_by(Account.code).all()
@@ -1304,6 +1346,14 @@ def get_profit_loss(
                 )
             )
 
+        if business_unit_id:
+            opex_query = opex_query.filter(
+                or_(
+                    JournalEntryLine.business_unit_id == business_unit_id,
+                    JournalEntryLine.business_unit_id == None
+                )
+            )
+
         opex_results = opex_query.group_by(
             Account.id, Account.code, Account.name
         ).order_by(Account.code).all()
@@ -1330,11 +1380,19 @@ def get_profit_loss(
         site = db.query(Site).filter(Site.id == site_id).first()
         site_name = site.name if site else None
 
+    # Get business unit name if filtered
+    business_unit_name = None
+    if business_unit_id:
+        bu = db.query(BusinessUnit).filter(BusinessUnit.id == business_unit_id).first()
+        business_unit_name = bu.name if bu else None
+
     return ProfitLossReport(
         start_date=start_date,
         end_date=end_date,
         site_id=site_id,
         site_name=site_name,
+        business_unit_id=business_unit_id,
+        business_unit_name=business_unit_name,
         revenue=PLSection(
             name="Revenue",
             items=revenue_items,
@@ -1364,10 +1422,11 @@ def get_profit_loss(
 def get_balance_sheet(
     as_of_date: date,
     site_id: Optional[int] = None,
+    business_unit_id: Optional[int] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Get Balance Sheet report as of a specific date"""
+    """Get Balance Sheet report as of a specific date, optionally filtered by site or business unit"""
     company_id = get_company_id(current_user, db)
 
     # Get all account types
@@ -1418,6 +1477,14 @@ def get_balance_sheet(
                 or_(
                     JournalEntryLine.site_id == site_id,
                     JournalEntryLine.site_id == None
+                )
+            )
+
+        if business_unit_id:
+            query = query.filter(
+                or_(
+                    JournalEntryLine.business_unit_id == business_unit_id,
+                    JournalEntryLine.business_unit_id == None
                 )
             )
 
@@ -1540,6 +1607,14 @@ def get_balance_sheet(
             )
         )
 
+    if business_unit_id:
+        revenue_query = revenue_query.filter(
+            or_(
+                JournalEntryLine.business_unit_id == business_unit_id,
+                JournalEntryLine.business_unit_id == None
+            )
+        )
+
     revenue_result = revenue_query.first()
     total_revenue = float(revenue_result.total_credit or 0) - float(revenue_result.total_debit or 0)
 
@@ -1567,6 +1642,14 @@ def get_balance_sheet(
             )
         )
 
+    if business_unit_id:
+        expense_query = expense_query.filter(
+            or_(
+                JournalEntryLine.business_unit_id == business_unit_id,
+                JournalEntryLine.business_unit_id == None
+            )
+        )
+
     expense_result = expense_query.first()
     total_expenses = float(expense_result.total_debit or 0) - float(expense_result.total_credit or 0)
 
@@ -1588,10 +1671,18 @@ def get_balance_sheet(
         site = db.query(Site).filter(Site.id == site_id).first()
         site_name = site.name if site else None
 
+    # Get business unit name if filtered
+    business_unit_name = None
+    if business_unit_id:
+        bu = db.query(BusinessUnit).filter(BusinessUnit.id == business_unit_id).first()
+        business_unit_name = bu.name if bu else None
+
     return BalanceSheetReport(
         as_of_date=as_of_date,
         site_id=site_id,
         site_name=site_name,
+        business_unit_id=business_unit_id,
+        business_unit_name=business_unit_name,
         current_assets=BSSection(
             name="Current Assets",
             items=current_asset_items,
