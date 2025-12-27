@@ -548,14 +548,19 @@ async def create_goods_receipt(
             detail="Cannot create GRN - Purchase Order must have at least one linked invoice for three-way matching. Please link an invoice to this PO first."
         )
 
-    # Validate warehouse if provided
-    if grn_data.warehouse_id:
-        warehouse = db.query(Warehouse).filter(
-            Warehouse.id == grn_data.warehouse_id,
-            Warehouse.company_id == current_user.company_id
-        ).first()
-        if not warehouse:
-            raise HTTPException(status_code=404, detail="Warehouse not found")
+    # Validate warehouse (REQUIRED)
+    if not grn_data.warehouse_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Warehouse is required for goods receipt"
+        )
+
+    warehouse = db.query(Warehouse).filter(
+        Warehouse.id == grn_data.warehouse_id,
+        Warehouse.company_id == current_user.company_id
+    ).first()
+    if not warehouse:
+        raise HTTPException(status_code=404, detail="Warehouse not found")
 
     # Create GRN
     grn_number = generate_grn_number(db, current_user.company_id)
