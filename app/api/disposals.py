@@ -18,7 +18,7 @@ import logging
 
 from app.database import get_db
 from app.models import (
-    User, Vendor, Site, Technician, Warehouse, Account, AccountType,
+    User, Site, Technician, Warehouse, Account, AccountType,
     Tool, ToolCategory, ItemMaster, ItemStock, ItemLedger,
     Disposal, DisposalToolLine, DisposalItemLine,
     JournalEntry, JournalEntryLine, FiscalPeriod, BusinessUnit

@@ -8,7 +8,7 @@ from decimal import Decimal
 from app.database import get_db
 from app.models import (
     PurchaseRequest, PurchaseRequestLine, PurchaseOrder, PurchaseOrderLine,
-    User, Vendor, WorkOrder, Contract, ItemMaster, Company
+    User, AddressBook, WorkOrder, Contract, ItemMaster, Company
 )
 from app.utils.security import verify_token
 from app.schemas import (
@@ -113,7 +113,7 @@ async def list_purchase_requests(
     query = db.query(PurchaseRequest).filter(
         PurchaseRequest.company_id == current_user.company_id
     ).options(
-        joinedload(PurchaseRequest.vendor),
+        joinedload(PurchaseRequest.address_book),
         joinedload(PurchaseRequest.work_order),
         joinedload(PurchaseRequest.contract),
         joinedload(PurchaseRequest.creator),
@@ -125,7 +125,7 @@ async def list_purchase_requests(
     if priority:
         query = query.filter(PurchaseRequest.priority == priority)
     if vendor_id:
-        query = query.filter(PurchaseRequest.vendor_id == vendor_id)
+        query = query.filter(PurchaseRequest.address_book_id == vendor_id)
     if work_order_id:
         query = query.filter(PurchaseRequest.work_order_id == work_order_id)
     if contract_id:
@@ -149,7 +149,7 @@ async def list_purchase_requests(
             estimated_total=float(pr.estimated_total or 0),
             currency=pr.currency,
             required_date=pr.required_date,
-            vendor_name=pr.vendor.name if pr.vendor else None,
+            vendor_name=pr.address_book.alpha_name if pr.address_book else None,
             work_order_number=pr.work_order.wo_number if pr.work_order else None,
             contract_number=pr.contract.contract_number if pr.contract else None,
             created_by_name=pr.creator.name if pr.creator else "Unknown",
@@ -172,12 +172,14 @@ async def create_purchase_request(
 
     # Validate references
     if pr_data.vendor_id:
-        vendor = db.query(Vendor).filter(
-            Vendor.id == pr_data.vendor_id,
-            Vendor.company_id == current_user.company_id
+        # vendor_id now refers to AddressBook with search_type='V'
+        vendor = db.query(AddressBook).filter(
+            AddressBook.id == pr_data.vendor_id,
+            AddressBook.company_id == current_user.company_id,
+            AddressBook.search_type == 'V'
         ).first()
         if not vendor:
-            raise HTTPException(status_code=404, detail="Vendor not found")
+            raise HTTPException(status_code=404, detail="Vendor not found in Address Book")
 
     if pr_data.work_order_id:
         wo = db.query(WorkOrder).filter(
@@ -201,7 +203,7 @@ async def create_purchase_request(
         pr_number=pr_number,
         title=pr_data.title,
         description=pr_data.description,
-        vendor_id=pr_data.vendor_id,
+        address_book_id=pr_data.vendor_id,
         work_order_id=pr_data.work_order_id,
         contract_id=pr_data.contract_id,
         required_date=pr_data.required_date,
@@ -259,7 +261,7 @@ async def get_purchase_request(
         PurchaseRequest.company_id == current_user.company_id
     ).options(
         joinedload(PurchaseRequest.lines),
-        joinedload(PurchaseRequest.vendor),
+        joinedload(PurchaseRequest.address_book),
         joinedload(PurchaseRequest.work_order),
         joinedload(PurchaseRequest.contract)
     ).first()
@@ -291,6 +293,11 @@ async def update_purchase_request(
 
     # Update fields
     update_data = pr_data.model_dump(exclude_unset=True)
+
+    # Map vendor_id to address_book_id (schema uses vendor_id, model uses address_book_id)
+    if 'vendor_id' in update_data:
+        update_data['address_book_id'] = update_data.pop('vendor_id')
+
     for key, value in update_data.items():
         setattr(pr, key, value)
 
@@ -596,13 +603,14 @@ async def convert_pr_to_po(
     if pr.status != 'approved':
         raise HTTPException(status_code=400, detail="Can only convert approved purchase requests to PO")
 
-    # Validate vendor
-    vendor = db.query(Vendor).filter(
-        Vendor.id == convert_data.vendor_id,
-        Vendor.company_id == current_user.company_id
+    # Validate vendor from Address Book
+    vendor = db.query(AddressBook).filter(
+        AddressBook.id == convert_data.vendor_id,
+        AddressBook.company_id == current_user.company_id,
+        AddressBook.search_type == 'V'
     ).first()
     if not vendor:
-        raise HTTPException(status_code=404, detail="Vendor not found")
+        raise HTTPException(status_code=404, detail="Vendor not found in Address Book")
 
     # Generate PO number
     po_number = generate_po_number(db, current_user.company_id)
@@ -612,7 +620,7 @@ async def convert_pr_to_po(
         company_id=current_user.company_id,
         po_number=po_number,
         purchase_request_id=pr.id,
-        vendor_id=convert_data.vendor_id,
+        address_book_id=convert_data.vendor_id,
         work_order_id=pr.work_order_id,
         contract_id=pr.contract_id,
         order_date=convert_data.order_date,

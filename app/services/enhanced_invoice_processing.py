@@ -1286,11 +1286,32 @@ def validate_line_item_calculations(structured_data: Dict[str, Any]) -> Dict[str
     return structured_data
 
 
+def generate_address_number(db_session, company_id: int) -> str:
+    """Generate sequential address number for the company."""
+    from app.models import AddressBook
+    from sqlalchemy import func
+
+    # Get the max address_number for this company
+    max_num = db_session.query(func.max(AddressBook.address_number)).filter(
+        AddressBook.company_id == company_id
+    ).scalar()
+
+    if max_num:
+        try:
+            next_num = int(max_num) + 1
+        except ValueError:
+            next_num = 1
+    else:
+        next_num = 1
+
+    return str(next_num).zfill(8)  # 8-digit format like "00000001"
+
+
 def lookup_vendor_in_database(supplier_name: str, db_session=None, supplier_data: Dict = None, company_id: int = None) -> Dict[str, Any]:
     """
-    Enhanced vendor lookup using multiple attributes from OCR-extracted supplier data.
-    Matches on: company name, tax number, registration number, email, phone, address.
-    If no vendor is found and company_id is provided, auto-creates the vendor.
+    Enhanced vendor lookup using Address Book (search_type='V').
+    Matches on: company name (alpha_name), tax number (tax_id), registration number, email, phone.
+    If no vendor is found and company_id is provided, auto-creates an Address Book entry.
     Returns vendor info if found or created.
 
     Args:
@@ -1304,7 +1325,7 @@ def lookup_vendor_in_database(supplier_name: str, db_session=None, supplier_data
 
     try:
         from sqlalchemy import or_, func
-        from app.models import Vendor
+        from app.models import AddressBook, BusinessUnit
 
         # Extract additional attributes from supplier_data for multi-attribute matching
         extracted_tax_number = None
@@ -1312,6 +1333,8 @@ def lookup_vendor_in_database(supplier_name: str, db_session=None, supplier_data
         extracted_email = None
         extracted_phone = None
         extracted_address = None
+        extracted_city = None
+        extracted_country = None
 
         if supplier_data:
             extracted_tax_number = supplier_data.get("vat_number") or supplier_data.get("tax_id")
@@ -1319,15 +1342,20 @@ def lookup_vendor_in_database(supplier_name: str, db_session=None, supplier_data
             extracted_email = supplier_data.get("email")
             extracted_phone = supplier_data.get("phone")
             extracted_address = supplier_data.get("company_address")
+            extracted_city = supplier_data.get("city")
+            extracted_country = supplier_data.get("country")
 
         vendor = None
         match_method = None
 
-        # Build base query filtered by company
+        # Build base query filtered by company and search_type='V' (Vendor)
         def get_vendor_query():
-            query = db_session.query(Vendor).filter(Vendor.is_active == True)
+            query = db_session.query(AddressBook).filter(
+                AddressBook.is_active == True,
+                AddressBook.search_type == 'V'
+            )
             if company_id:
-                query = query.filter(Vendor.company_id == company_id)
+                query = query.filter(AddressBook.company_id == company_id)
             return query
 
         # Priority 1: Match by Tax Number (VAT number) - most reliable identifier
@@ -1335,8 +1363,8 @@ def lookup_vendor_in_database(supplier_name: str, db_session=None, supplier_data
             normalized_tax = extracted_tax_number.strip().upper().replace(" ", "").replace("-", "")
             vendors = get_vendor_query().all()
             for v in vendors:
-                if v.tax_number:
-                    db_tax = v.tax_number.strip().upper().replace(" ", "").replace("-", "")
+                if v.tax_id:
+                    db_tax = v.tax_id.strip().upper().replace(" ", "").replace("-", "")
                     if db_tax == normalized_tax:
                         vendor = v
                         match_method = "tax_number"
@@ -1359,7 +1387,7 @@ def lookup_vendor_in_database(supplier_name: str, db_session=None, supplier_data
         # Priority 3: Match by Email
         if not vendor and extracted_email and extracted_email.strip():
             query = get_vendor_query().filter(
-                func.lower(Vendor.email) == extracted_email.strip().lower()
+                func.lower(AddressBook.email) == extracted_email.strip().lower()
             )
             vendor = query.first()
             if vendor:
@@ -1369,10 +1397,7 @@ def lookup_vendor_in_database(supplier_name: str, db_session=None, supplier_data
         # Priority 4: Match by Company Name (exact match, case-insensitive)
         if not vendor and supplier_name and supplier_name.strip():
             query = get_vendor_query().filter(
-                or_(
-                    Vendor.name.ilike(supplier_name.strip()),
-                    Vendor.display_name.ilike(supplier_name.strip())
-                )
+                AddressBook.alpha_name.ilike(supplier_name.strip())
             )
             vendor = query.first()
             if vendor:
@@ -1386,8 +1411,8 @@ def lookup_vendor_in_database(supplier_name: str, db_session=None, supplier_data
             if len(normalized_phone) >= 7:  # Minimum reasonable phone length
                 vendors = get_vendor_query().all()
                 for v in vendors:
-                    if v.phone:
-                        db_phone = ''.join(filter(str.isdigit, v.phone))
+                    if v.phone_primary:
+                        db_phone = ''.join(filter(str.isdigit, v.phone_primary))
                         # Match last 7+ digits (handles country code differences)
                         if len(db_phone) >= 7 and (db_phone[-7:] == normalized_phone[-7:] or db_phone == normalized_phone):
                             vendor = v
@@ -1395,18 +1420,37 @@ def lookup_vendor_in_database(supplier_name: str, db_session=None, supplier_data
                             logger.info(f"Vendor matched by phone: {extracted_phone}")
                             break
 
-        # If no vendor found and we have company_id and supplier name, auto-create the vendor
+        # If no vendor found and we have company_id and supplier name, auto-create Address Book entry
         if not vendor and company_id and supplier_name and supplier_name.strip():
             try:
-                new_vendor = Vendor(
+                # Generate address number
+                address_number = generate_address_number(db_session, company_id)
+
+                # Create Business Unit for the vendor
+                bu = BusinessUnit(
                     company_id=company_id,
-                    name=supplier_name.strip(),
-                    display_name=supplier_name.strip(),
-                    email=extracted_email.strip() if extracted_email else None,
-                    phone=extracted_phone.strip() if extracted_phone else None,
-                    address=extracted_address.strip() if extracted_address else None,
-                    tax_number=extracted_tax_number.strip() if extracted_tax_number else None,
-                    registration_number=extracted_registration_number.strip() if extracted_registration_number else None,
+                    code=f"V{address_number}",
+                    name=supplier_name.strip()[:100],
+                    description=f"Auto-created for vendor: {supplier_name.strip()}"
+                )
+                db_session.add(bu)
+                db_session.flush()
+
+                # Create Address Book entry with search_type='V'
+                new_vendor = AddressBook(
+                    company_id=company_id,
+                    address_number=address_number,
+                    search_type='V',  # Vendor type
+                    alpha_name=supplier_name.strip()[:100],
+                    mailing_name=supplier_name.strip()[:100],
+                    email=extracted_email.strip()[:255] if extracted_email else None,
+                    phone_primary=extracted_phone.strip()[:30] if extracted_phone else None,  # Truncate to DB limit
+                    address_line_1=extracted_address.strip()[:200] if extracted_address else None,
+                    city=extracted_city.strip()[:100] if extracted_city else None,
+                    country=extracted_country.strip()[:50] if extracted_country else None,
+                    tax_id=extracted_tax_number.strip()[:50] if extracted_tax_number else None,
+                    registration_number=extracted_registration_number.strip()[:50] if extracted_registration_number else None,
+                    business_unit_id=bu.id,
                     is_active=True
                 )
                 db_session.add(new_vendor)
@@ -1414,9 +1458,9 @@ def lookup_vendor_in_database(supplier_name: str, db_session=None, supplier_data
 
                 vendor = new_vendor
                 match_method = "auto_created"
-                logger.info(f"Auto-created vendor '{supplier_name}' (ID: {vendor.id}) for company {company_id}")
+                logger.info(f"Auto-created vendor '{supplier_name}' in Address Book (ID: {vendor.id}) for company {company_id}")
             except Exception as create_error:
-                logger.error(f"Failed to auto-create vendor: {create_error}")
+                logger.error(f"Failed to auto-create vendor in Address Book: {create_error}")
                 # Continue without vendor creation
 
         if vendor:
@@ -1424,12 +1468,14 @@ def lookup_vendor_in_database(supplier_name: str, db_session=None, supplier_data
                 "found": True,
                 "vendor": {
                     "id": vendor.id,
-                    "name": vendor.name,
-                    "display_name": vendor.display_name,
+                    "address_book_id": vendor.id,
+                    "address_number": vendor.address_number,
+                    "name": vendor.alpha_name,
+                    "display_name": vendor.alpha_name,
                     "email": vendor.email,
-                    "phone": vendor.phone,
-                    "address": vendor.address,
-                    "tax_number": vendor.tax_number,
+                    "phone": vendor.phone_primary,
+                    "address": " ".join(filter(None, [vendor.address_line_1, vendor.city, vendor.country])),
+                    "tax_number": vendor.tax_id,
                     "registration_number": vendor.registration_number
                 },
                 "suggestions": [],
@@ -1442,18 +1488,17 @@ def lookup_vendor_in_database(supplier_name: str, db_session=None, supplier_data
         if supplier_name and supplier_name.strip():
             search_term = f"%{supplier_name.strip()}%"
             query = get_vendor_query().filter(
-                or_(
-                    Vendor.name.ilike(search_term),
-                    Vendor.display_name.ilike(search_term)
-                )
+                AddressBook.alpha_name.ilike(search_term)
             ).limit(5)
             similar_vendors = query.all()
 
             suggestions = [
                 {
                     "id": v.id,
-                    "name": v.name,
-                    "display_name": v.display_name
+                    "address_book_id": v.id,
+                    "address_number": v.address_number,
+                    "name": v.alpha_name,
+                    "display_name": v.alpha_name
                 }
                 for v in similar_vendors
             ]
@@ -1473,12 +1518,12 @@ def lookup_vendor_in_database(supplier_name: str, db_session=None, supplier_data
 
 def apply_vendor_data_to_invoice(structured_data: Dict[str, Any], vendor_data: Dict) -> Dict[str, Any]:
     """
-    Apply accurate vendor data from the database to the invoice's supplier section.
+    Apply accurate vendor data from Address Book to the invoice's supplier section.
     This replaces potentially inaccurate OCR-extracted data with verified vendor information.
 
     Args:
         structured_data: The invoice structured data
-        vendor_data: The matched vendor data from the database
+        vendor_data: The matched vendor data from Address Book
 
     Returns:
         Updated structured_data with vendor information applied
@@ -1491,8 +1536,8 @@ def apply_vendor_data_to_invoice(structured_data: Dict[str, Any], vendor_data: D
 
     supplier = structured_data["supplier"]
 
-    # Apply vendor data - vendor data takes precedence over OCR data
-    supplier["vendor_id"] = vendor_data.get("id")
+    # Apply Address Book vendor data - takes precedence over OCR data
+    supplier["address_book_id"] = vendor_data.get("address_book_id") or vendor_data.get("id")
     supplier["vendor_matched"] = True
 
     # Only overwrite if vendor has the data (preserve OCR data if vendor data is empty)
@@ -1515,7 +1560,7 @@ def apply_vendor_data_to_invoice(structured_data: Dict[str, Any], vendor_data: D
     if vendor_data.get("registration_number"):
         supplier["registration_number"] = vendor_data["registration_number"]
 
-    logger.info(f"Applied vendor data (ID: {vendor_data.get('id')}) to invoice supplier section")
+    logger.info(f"Applied Address Book vendor data (ID: {vendor_data.get('id')}) to invoice supplier section")
     return structured_data
 
 

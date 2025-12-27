@@ -22,7 +22,8 @@ from app.models import (
     ProcessedImage, InvoiceAllocation, AllocationPeriod,
     WorkOrder, WorkOrderSparePart, WorkOrderTimeEntry,
     PettyCashTransaction, PettyCashReplenishment,
-    PurchaseOrder, PurchaseOrderLine, ItemLedger, ItemMaster, ExchangeRate
+    PurchaseOrder, PurchaseOrderLine, ItemLedger, ItemMaster, ExchangeRate,
+    GoodsReceiptExtraCost
 )
 
 logger = logging.getLogger(__name__)
@@ -265,7 +266,7 @@ class JournalPostingService:
                 description=f"Invoice expense - {invoice_category}",
                 site_id=site_id,
                 contract_id=allocation.contract_id,
-                vendor_id=vendor_id,
+                address_book_id=vendor_id,
                 project_id=allocation.project_id,
                 line_number=line_number
             )
@@ -284,7 +285,7 @@ class JournalPostingService:
                     credit=0,
                     description="VAT Input",
                     site_id=site_id,
-                    vendor_id=vendor_id,
+                    address_book_id=vendor_id,
                     line_number=line_number
                 )
                 self.db.add(vat_line)
@@ -300,7 +301,7 @@ class JournalPostingService:
                 credit=amount,  # Full amount including VAT
                 description=f"Payable to {supplier_info.get('company_name', 'vendor')}",
                 site_id=site_id,
-                vendor_id=vendor_id,
+                address_book_id=vendor_id,
                 line_number=line_number
             )
             self.db.add(payable_line)
@@ -775,7 +776,7 @@ class JournalPostingService:
                 debit=float(line_total_base),
                 credit=0,
                 description=f"Inventory - {line.description or line.item_number} x {quantity_received}",
-                vendor_id=po.vendor_id,
+                address_book_id=po.address_book_id,
                 work_order_id=po.work_order_id,
                 contract_id=po.contract_id,
                 line_number=line_number,
@@ -795,7 +796,7 @@ class JournalPostingService:
                     debit=float(tax_amount),
                     credit=0,
                     description="VAT Input - PO Receiving",
-                    vendor_id=po.vendor_id,
+                    address_book_id=po.address_book_id,
                     line_number=line_number,
                     business_unit_id=business_unit_id
                 )
@@ -812,7 +813,7 @@ class JournalPostingService:
                 debit=0,
                 credit=total_credit,
                 description=f"Payable for PO {po.po_number}",
-                vendor_id=po.vendor_id,
+                address_book_id=po.address_book_id,
                 line_number=line_number,
                 business_unit_id=business_unit_id
             )
@@ -1141,9 +1142,15 @@ class JournalPostingService:
         Create journal entry for Goods Receipt Note (GRN).
 
         Standard receiving entry:
-        - DR: Inventory (asset increases)
+        - DR: Inventory (asset increases) - uses landed cost if available
         - DR: VAT Input (if applicable)
-        - CR: Goods Received Not Invoiced (GRNI) or Accounts Payable
+        - CR: Goods Received Not Invoiced (GRNI) or Accounts Payable - for invoice amount
+        - CR: Accounts Payable (or specific accounts) - for each extra cost
+
+        For imports with extra costs (landed cost):
+        - Inventory is debited with landed cost (invoice + allocated extra costs)
+        - GRNI credited for invoice amount
+        - Separate credit entries for each extra cost (freight, duty, etc.)
 
         This is similar to post_po_receiving but for the new GRN system.
         """
@@ -1161,12 +1168,16 @@ class JournalPostingService:
 
         vat_mapping = self._get_mapping("po_receive_vat")
 
-        # Calculate totals
-        total_value = float(grn.subtotal or 0)
+        # Calculate totals - use landed cost if available
+        total_invoice_value = float(grn.subtotal or 0)
+        total_extra_costs = float(grn.total_extra_costs or 0)
         tax_amount = float(grn.tax_amount or 0)
-        total_with_tax = total_value + tax_amount
 
-        if total_value == 0:
+        # Total inventory value = invoice + extra costs (landed cost)
+        total_inventory_value = total_invoice_value + total_extra_costs
+        total_invoice_with_tax = total_invoice_value + tax_amount
+
+        if total_invoice_value == 0:
             logger.info(f"Skipping journal entry for zero-value GRN {grn.grn_number}")
             return None
 
@@ -1177,13 +1188,14 @@ class JournalPostingService:
             if rate:
                 exchange_rate = rate
 
-        total_value_base = total_value * exchange_rate
+        total_invoice_value_base = total_invoice_value * exchange_rate
+        total_extra_costs_base = total_extra_costs * exchange_rate
         tax_amount_base = tax_amount * exchange_rate
-        total_with_tax_base = total_with_tax * exchange_rate
+        total_invoice_with_tax_base = total_invoice_with_tax * exchange_rate
 
         # Create journal entry
         po = grn.purchase_order
-        vendor_name = po.vendor.name if po and po.vendor else "Unknown Vendor"
+        vendor_name = po.address_book.alpha_name if po and po.address_book else "Unknown Vendor"
 
         # Get business_unit_id from warehouse (inventory is balance sheet)
         business_unit_id = self._get_business_unit_from_warehouse(grn.warehouse_id)
@@ -1194,16 +1206,20 @@ class JournalPostingService:
         entry_date = grn.receipt_date or date.today()
         fiscal_period = self._get_fiscal_period(entry_date)
 
+        # Build description
+        description = f"Goods Receipt - {grn.grn_number} from {vendor_name}"
+        if grn.is_import and total_extra_costs > 0:
+            description += f" (Import with landed costs)"
+
         entry = JournalEntry(
             company_id=self.company_id,
             entry_number=self._generate_entry_number(),
             entry_date=entry_date,
-            description=f"Goods Receipt - {grn.grn_number} from {vendor_name}",
+            description=description,
             reference=grn.grn_number,
             source_type="goods_receipt",
             source_id=grn.id,
             source_number=grn.grn_number,
-            vendor_id=po.vendor_id if po else None,
             fiscal_period_id=fiscal_period.id if fiscal_period else None,
             status="draft",
             is_auto_generated=True,
@@ -1215,32 +1231,42 @@ class JournalPostingService:
         lines = []
         line_number = 1
 
-        # Create line for each GRN line item
+        # Create line for each GRN line item - use landed cost if available
         for grn_line in grn.lines:
-            line_value = float(grn_line.total_price or 0)
+            # Use landed total cost if available, otherwise use invoice total
+            if grn_line.landed_total_cost and float(grn_line.landed_total_cost) > 0:
+                line_value = float(grn_line.landed_total_cost)
+            else:
+                line_value = float(grn_line.total_price or 0)
+
             if line_value == 0:
                 continue
 
             line_value_base = line_value * exchange_rate
 
-            # DR: Inventory
+            # DR: Inventory (at landed cost)
             if mapping.debit_account_id:
                 qty = float(grn_line.quantity_accepted or grn_line.quantity_received or 0)
+                allocated_extra = float(grn_line.allocated_extra_cost or 0)
+                desc = f"{grn_line.item_code or 'Item'}: {grn_line.item_description or ''} x {qty}"
+                if allocated_extra > 0:
+                    desc += f" (incl. landed costs: {allocated_extra:.2f})"
+
                 inv_line = JournalEntryLine(
                     journal_entry_id=entry.id,
                     account_id=mapping.debit_account_id,
                     debit=Decimal(str(round(line_value_base, 2))),
                     credit=Decimal('0'),
-                    description=f"{grn_line.item_code or 'Item'}: {grn_line.item_description or ''} x {qty}",
+                    description=desc,
                     line_number=line_number,
-                    vendor_id=po.vendor_id if po else None,
+                    address_book_id=po.address_book_id if po else None,
                     business_unit_id=business_unit_id
                 )
                 self.db.add(inv_line)
                 lines.append(inv_line)
                 line_number += 1
 
-        # DR: VAT Input (if applicable)
+        # DR: VAT Input (if applicable) - on invoice amount only
         if tax_amount_base > 0 and vat_mapping and vat_mapping.debit_account_id:
             vat_line = JournalEntryLine(
                 journal_entry_id=entry.id,
@@ -1249,14 +1275,14 @@ class JournalPostingService:
                 credit=Decimal('0'),
                 description=f"VAT on GRN {grn.grn_number}",
                 line_number=line_number,
-                vendor_id=po.vendor_id if po else None,
+                address_book_id=po.address_book_id if po else None,
                 business_unit_id=business_unit_id
             )
             self.db.add(vat_line)
             lines.append(vat_line)
             line_number += 1
 
-        # CR: GRNI or Accounts Payable
+        # CR: GRNI or Accounts Payable - for invoice amount only
         grni_mapping = self._get_mapping("grni") or self._get_mapping("accounts_payable")
         credit_account_id = grni_mapping.credit_account_id if grni_mapping else mapping.credit_account_id
 
@@ -1265,15 +1291,62 @@ class JournalPostingService:
                 journal_entry_id=entry.id,
                 account_id=credit_account_id,
                 debit=Decimal('0'),
-                credit=Decimal(str(round(total_with_tax_base, 2))),
+                credit=Decimal(str(round(total_invoice_with_tax_base, 2))),
                 description=f"GRNI for {grn.grn_number} - PO {po.po_number if po else 'N/A'}",
                 line_number=line_number,
-                vendor_id=po.vendor_id if po else None,
+                address_book_id=po.address_book_id if po else None,
                 business_unit_id=business_unit_id
             )
             self.db.add(ap_line)
             lines.append(ap_line)
             line_number += 1
+
+        # CR: Extra costs - separate entry for each extra cost
+        if hasattr(grn, 'extra_costs') and grn.extra_costs:
+            for extra_cost in grn.extra_costs:
+                cost_amount = float(extra_cost.amount or 0)
+                if cost_amount == 0:
+                    continue
+
+                cost_amount_base = cost_amount * exchange_rate
+
+                # Map cost type to transaction type for account lookup
+                cost_type_mapping = {
+                    'freight': 'landed_cost_freight',
+                    'duty': 'landed_cost_duty',
+                    'port_handling': 'landed_cost_port_handling',
+                    'customs': 'landed_cost_customs',
+                    'insurance': 'landed_cost_insurance',
+                    'other': 'landed_cost_other'
+                }
+
+                mapping_key = cost_type_mapping.get(extra_cost.cost_type, 'landed_cost_other')
+                extra_cost_mapping = self._get_mapping(mapping_key)
+
+                # Fall back to accounts payable if no specific mapping
+                if not extra_cost_mapping:
+                    extra_cost_mapping = self._get_mapping("accounts_payable")
+
+                if extra_cost_mapping:
+                    extra_credit_account = extra_cost_mapping.credit_account_id
+                else:
+                    extra_credit_account = credit_account_id  # Use same as GRNI
+
+                if extra_credit_account:
+                    cost_type_label = extra_cost.cost_description or extra_cost.cost_type.replace('_', ' ').title()
+                    extra_cost_line = JournalEntryLine(
+                        journal_entry_id=entry.id,
+                        account_id=extra_credit_account,
+                        debit=Decimal('0'),
+                        credit=Decimal(str(round(cost_amount_base, 2))),
+                        description=f"{cost_type_label}: {extra_cost.reference_number or grn.grn_number}",
+                        line_number=line_number,
+                        address_book_id=getattr(extra_cost, 'address_book_id', None) or (po.address_book_id if po else None),
+                        business_unit_id=business_unit_id
+                    )
+                    self.db.add(extra_cost_line)
+                    lines.append(extra_cost_line)
+                    line_number += 1
 
         # Handle exchange difference if applicable
         if grn.currency != 'USD' and exchange_rate != 1.0:

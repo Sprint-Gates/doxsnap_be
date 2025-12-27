@@ -17,7 +17,7 @@ from app.database import get_db
 from app.models import (
     User, ItemCategory, ItemMaster, ItemStock, ItemLedger,
     ItemTransfer, ItemTransferLine, InvoiceItem, ItemAlias,
-    Warehouse, HandHeldDevice, Vendor, WorkOrder
+    Warehouse, HandHeldDevice, AddressBook, WorkOrder
 )
 from app.api.auth import verify_token
 from app.services.journal_posting import JournalPostingService
@@ -472,11 +472,11 @@ def item_to_response(item: ItemMaster, include_stock: bool = False) -> dict:
         "currency": item.currency,
         "minimum_stock_level": item.minimum_stock_level,
         "reorder_quantity": item.reorder_quantity,
-        "primary_vendor_id": item.primary_vendor_id,
+        "primary_vendor_id": item.primary_address_book_id,
         "primary_vendor": {
-            "id": item.primary_vendor.id,
-            "name": item.primary_vendor.name
-        } if item.primary_vendor else None,
+            "id": item.primary_address_book.id,
+            "name": item.primary_address_book.alpha_name
+        } if item.primary_address_book else None,
         "vendor_part_number": item.vendor_part_number,
         "manufacturer": item.manufacturer,
         "notes": item.notes,
@@ -510,8 +510,8 @@ def item_to_response(item: ItemMaster, include_stock: bool = False) -> dict:
                 "id": alias.id,
                 "alias_code": alias.alias_code,
                 "alias_description": alias.alias_description,
-                "vendor_id": alias.vendor_id,
-                "vendor_name": alias.vendor.name if alias.vendor else None,
+                "vendor_id": alias.address_book_id,
+                "vendor_name": alias.address_book.alpha_name if alias.address_book else None,
                 "source": alias.source,
                 "is_active": alias.is_active,
                 "created_at": alias.created_at.isoformat() if alias.created_at else None
@@ -725,7 +725,7 @@ async def get_items(
             joinedload(ItemMaster.stock_levels).joinedload(ItemStock.warehouse),
             joinedload(ItemMaster.stock_levels).joinedload(ItemStock.handheld_device),
             joinedload(ItemMaster.category),
-            joinedload(ItemMaster.primary_vendor)
+            joinedload(ItemMaster.primary_address_book)
         )
         all_items = query.order_by(ItemMaster.item_number).all()
 
@@ -759,12 +759,12 @@ async def get_items(
             joinedload(ItemMaster.stock_levels).joinedload(ItemStock.warehouse),
             joinedload(ItemMaster.stock_levels).joinedload(ItemStock.handheld_device),
             joinedload(ItemMaster.category),
-            joinedload(ItemMaster.primary_vendor)
+            joinedload(ItemMaster.primary_address_book)
         )
     else:
         query = query.options(
             joinedload(ItemMaster.category),
-            joinedload(ItemMaster.primary_vendor)
+            joinedload(ItemMaster.primary_address_book)
         )
 
     # Apply pagination
@@ -796,7 +796,7 @@ async def get_item(
         joinedload(ItemMaster.stock_levels).joinedload(ItemStock.warehouse),
         joinedload(ItemMaster.stock_levels).joinedload(ItemStock.handheld_device),
         joinedload(ItemMaster.category),
-        joinedload(ItemMaster.primary_vendor)
+        joinedload(ItemMaster.primary_address_book)
     ).filter(
         ItemMaster.id == item_id,
         ItemMaster.company_id == user.company_id
@@ -827,10 +827,16 @@ async def create_item(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Item number {data.item_number} already exists")
 
     try:
+        # Map schema fields to model fields
+        item_data = data.dict(exclude_unset=True)
+        # Map primary_vendor_id -> primary_address_book_id
+        if 'primary_vendor_id' in item_data:
+            item_data['primary_address_book_id'] = item_data.pop('primary_vendor_id')
+
         item = ItemMaster(
             company_id=user.company_id,
             created_by=user.id,
-            **data.dict()
+            **item_data
         )
         db.add(item)
         db.commit()
@@ -962,8 +968,8 @@ async def get_item_aliases(
             "id": alias.id,
             "alias_code": alias.alias_code,
             "alias_description": alias.alias_description,
-            "vendor_id": alias.vendor_id,
-            "vendor_name": alias.vendor.name if alias.vendor else None,
+            "vendor_id": alias.address_book_id,
+            "vendor_name": alias.address_book.alpha_name if alias.address_book else None,
             "source": alias.source,
             "notes": alias.notes,
             "is_active": alias.is_active,
@@ -1015,7 +1021,7 @@ async def add_item_alias(
         item_id=item_id,
         alias_code=data.alias_code.strip(),
         alias_description=data.alias_description,
-        vendor_id=data.vendor_id,
+        address_book_id=data.vendor_id,
         notes=data.notes,
         source="manual",
         created_by=user.id
@@ -1031,7 +1037,7 @@ async def add_item_alias(
             "id": alias.id,
             "alias_code": alias.alias_code,
             "alias_description": alias.alias_description,
-            "vendor_id": alias.vendor_id,
+            "vendor_id": alias.address_book_id,
             "source": alias.source,
             "created_at": alias.created_at.isoformat() if alias.created_at else None
         }
@@ -1892,6 +1898,11 @@ async def import_items_from_excel(
 
 
 # ============ Invoice Receiving Endpoints ============
+# DISABLED: Direct invoice receiving bypasses GRN workflow.
+# Inventory should only be received through GRN (Goods Receipt Note) for proper:
+# - Three-way matching (PO ↔ GRN ↔ Invoice)
+# - Journal Entry creation (DR: Inventory, CR: GRNI)
+# - Complete audit trail
 
 @router.post("/invoices/{invoice_id}/receive-item")
 async def receive_invoice_item(
@@ -1900,6 +1911,17 @@ async def receive_invoice_item(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
+    """
+    DISABLED: This endpoint is deprecated.
+    Inventory receiving should be done through GRN workflow only.
+    """
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail="Direct invoice receiving is disabled. Please use the GRN (Goods Receipt Note) workflow to receive inventory. "
+               "Go to Purchase Orders → Select PO → Create GRN → Post GRN."
+    )
+
+    # Original code preserved below for reference (not executed due to raise above)
     """
     Receive a single invoice item to a specified warehouse.
     Creates stock and ledger entries with weighted average cost calculation.
@@ -2012,6 +2034,17 @@ async def confirm_invoice_to_main_warehouse(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
+    """
+    DISABLED: This endpoint is deprecated.
+    Inventory receiving should be done through GRN workflow only.
+    """
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail="Direct invoice confirmation is disabled. Please use the GRN (Goods Receipt Note) workflow to receive inventory. "
+               "Go to Purchase Orders → Select PO → Create GRN → Post GRN."
+    )
+
+    # Original code preserved below for reference (not executed due to raise above)
     """
     Confirm an invoice and auto-receive all linked items to the main warehouse.
     This creates stock and ledger entries for all invoice items that have linked items.
@@ -2230,12 +2263,12 @@ async def link_invoice_item_to_master(
         ).first()
 
         if not existing_alias:
-            # Get vendor_id from the invoice if available
+            # Get address_book_id from the invoice if available
             from app.models import ProcessedImage
             invoice = db.query(ProcessedImage).filter(
                 ProcessedImage.id == invoice_item.invoice_id
             ).first()
-            vendor_id = invoice.vendor_id if invoice else None
+            vendor_address_book_id = invoice.address_book_id if invoice else None
 
             # Create new alias
             new_alias = ItemAlias(
@@ -2243,7 +2276,7 @@ async def link_invoice_item_to_master(
                 item_id=master_item.id,
                 alias_code=invoice_item.item_number,
                 alias_description=invoice_item.item_description,
-                vendor_id=vendor_id,
+                address_book_id=vendor_address_book_id,
                 source="invoice_link",
                 created_by=user.id
             )
@@ -2611,19 +2644,19 @@ async def create_generic_item_from_invoice(
     # Create an alias if the invoice item has an item code
     alias_created = False
     if invoice_item.item_number:
-        # Get vendor_id from the invoice if available
+        # Get address_book_id from the invoice if available
         from app.models import ProcessedImage
         invoice = db.query(ProcessedImage).filter(
             ProcessedImage.id == invoice_item.invoice_id
         ).first()
-        vendor_id = invoice.vendor_id if invoice else None
+        vendor_address_book_id = invoice.address_book_id if invoice else None
 
         new_alias = ItemAlias(
             company_id=user.company_id,
             item_id=new_item.id,
             alias_code=invoice_item.item_number,
             alias_description=invoice_item.item_description,
-            vendor_id=vendor_id,
+            address_book_id=vendor_address_book_id,
             source="generic_item_creation",
             created_by=user.id
         )

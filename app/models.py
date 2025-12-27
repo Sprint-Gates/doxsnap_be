@@ -106,7 +106,7 @@ class Company(Base):
 
 
 class Client(Base):
-    """Client/Customer of a company"""
+    """Client/Customer of a company - linked to Address Book for master data"""
     __tablename__ = "clients"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -125,9 +125,13 @@ class Client(Base):
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
 
+    # Address Book link - connects Client to Address Book entry (type C)
+    address_book_id = Column(Integer, ForeignKey("address_book.id"), nullable=True)
+
     # Relationships
     company = relationship("Company", back_populates="clients")
     branches = relationship("Branch", back_populates="client")
+    address_book = relationship("AddressBook", backref="client")
 
 
 class Branch(Base):
@@ -149,8 +153,12 @@ class Branch(Base):
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
 
+    # Address Book link (for transition to Address Book as master data)
+    address_book_id = Column(Integer, ForeignKey("address_book.id"), nullable=True)
+
     # Relationships
     client = relationship("Client", back_populates="branches")
+    address_book = relationship("AddressBook", foreign_keys=[address_book_id])
     operators = relationship("User", secondary=operator_branches, back_populates="assigned_branches")
     floors = relationship("Floor", back_populates="branch")
 
@@ -226,8 +234,8 @@ class ProcessedImage(Base):
     # Contract linkage
     contract_id = Column(Integer, ForeignKey("contracts.id"), nullable=True)
 
-    # Vendor linkage
-    vendor_id = Column(Integer, ForeignKey("vendors.id"), nullable=True)
+    # Vendor linkage - Address Book (search_type='V')
+    address_book_id = Column(Integer, ForeignKey("address_book.id"), nullable=True)
 
     # Enhanced Invoice processing results
     ocr_extracted_words = Column(Integer, default=0)  # Number of words extracted by OCR
@@ -247,7 +255,7 @@ class ProcessedImage(Base):
     project = relationship("Project", back_populates="invoices")
     site = relationship("Site", backref="invoices")
     contract = relationship("Contract", backref="invoices")
-    vendor = relationship("Vendor", back_populates="invoices")
+    address_book = relationship("AddressBook", backref="invoices")
 
 
 class DocumentType(Base):
@@ -264,26 +272,8 @@ class DocumentType(Base):
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
 
 
-class Vendor(Base):
-    __tablename__ = "vendors"
-
-    id = Column(Integer, primary_key=True, index=True)
-    company_id = Column(Integer, ForeignKey("companies.id"), nullable=True)
-    name = Column(String, nullable=False, index=True)
-    display_name = Column(String, nullable=False)
-    email = Column(String, nullable=True)
-    phone = Column(String, nullable=True)
-    address = Column(Text, nullable=True)
-    tax_number = Column(String, nullable=True)  # VAT/Tax registration number
-    registration_number = Column(String, nullable=True)  # Company registration number
-    website = Column(String, nullable=True)
-    notes = Column(Text, nullable=True)
-    is_active = Column(Boolean, default=True)  # Soft delete - cannot delete, only disable
-    created_at = Column(DateTime, default=func.now())
-    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
-
-    # Relationships
-    invoices = relationship("ProcessedImage", back_populates="vendor")
+# REMOVED: Vendor model - Use AddressBook with search_type='V' instead
+# Legacy vendors table kept in database for data migration purposes only
 
 
 class Warehouse(Base):
@@ -364,30 +354,36 @@ class Technician(Base):
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
 
-    # Salary breakdown fields (accounting only)
-    salary_type = Column(String, default="monthly")  # monthly, hourly, daily
-    base_salary = Column(Numeric(12, 2), nullable=True)  # Base salary amount
-    currency = Column(String, default="USD")
-    hourly_rate = Column(Numeric(10, 2), nullable=True)  # Calculated or manual hourly rate
-    overtime_rate_multiplier = Column(Numeric(4, 2), default=1.5)  # e.g., 1.5x for overtime
-    working_hours_per_day = Column(Numeric(4, 2), default=8.0)
-    working_days_per_month = Column(Integer, default=22)
+    # DEPRECATED: Salary fields are now in AddressBook (search_type='E')
+    # These fields are kept for backward compatibility during migration
+    # Use AddressBook salary fields for new implementations
+    salary_type = Column(String, default="monthly")  # DEPRECATED
+    base_salary = Column(Numeric(12, 2), nullable=True)  # DEPRECATED
+    currency = Column(String, default="USD")  # DEPRECATED
+    hourly_rate = Column(Numeric(10, 2), nullable=True)  # DEPRECATED
+    overtime_rate_multiplier = Column(Numeric(4, 2), default=1.5)  # DEPRECATED
+    working_hours_per_day = Column(Numeric(4, 2), default=8.0)  # DEPRECATED
+    working_days_per_month = Column(Integer, default=22)  # DEPRECATED
 
-    # Additional compensation
-    transport_allowance = Column(Numeric(10, 2), nullable=True)
-    housing_allowance = Column(Numeric(10, 2), nullable=True)
-    food_allowance = Column(Numeric(10, 2), nullable=True)
-    other_allowances = Column(Numeric(10, 2), nullable=True)
-    allowances_notes = Column(Text, nullable=True)  # Description of other allowances
+    # DEPRECATED: Additional compensation - use AddressBook
+    transport_allowance = Column(Numeric(10, 2), nullable=True)  # DEPRECATED
+    housing_allowance = Column(Numeric(10, 2), nullable=True)  # DEPRECATED
+    food_allowance = Column(Numeric(10, 2), nullable=True)  # DEPRECATED
+    other_allowances = Column(Numeric(10, 2), nullable=True)  # DEPRECATED
+    allowances_notes = Column(Text, nullable=True)  # DEPRECATED
 
-    # Deductions
-    social_security_rate = Column(Numeric(5, 4), nullable=True)  # e.g., 0.0725 for 7.25%
-    tax_rate = Column(Numeric(5, 4), nullable=True)  # Income tax rate
-    other_deductions = Column(Numeric(10, 2), nullable=True)
-    deductions_notes = Column(Text, nullable=True)
+    # DEPRECATED: Deductions - use AddressBook
+    social_security_rate = Column(Numeric(5, 4), nullable=True)  # DEPRECATED
+    tax_rate = Column(Numeric(5, 4), nullable=True)  # DEPRECATED
+    other_deductions = Column(Numeric(10, 2), nullable=True)  # DEPRECATED
+    deductions_notes = Column(Text, nullable=True)  # DEPRECATED
+
+    # Address Book link (Employee type - search_type='E')
+    address_book_id = Column(Integer, ForeignKey("address_book.id"), nullable=True)
 
     # Relationships
     company = relationship("Company")
+    address_book = relationship("AddressBook", foreign_keys=[address_book_id])
     assigned_device = relationship("HandHeldDevice", back_populates="assigned_technician", uselist=False)
     assigned_devices = relationship("HandHeldDevice", secondary="handheld_device_technicians", back_populates="assigned_technicians")
     site_shifts = relationship("TechnicianSiteShift", back_populates="technician", cascade="all, delete-orphan")
@@ -433,8 +429,11 @@ class HandHeldDevice(Base):
     warehouse_id = Column(Integer, ForeignKey("warehouses.id"), nullable=True)
 
     # Technician assignment (one device = one technician)
-    assigned_technician_id = Column(Integer, ForeignKey("technicians.id"), nullable=True)
+    assigned_technician_id = Column(Integer, ForeignKey("technicians.id"), nullable=True)  # Legacy
     assigned_at = Column(DateTime, nullable=True)  # When technician was assigned
+
+    # Address Book employee assignment (replaces assigned_technician_id)
+    address_book_id = Column(Integer, ForeignKey("address_book.id"), nullable=True)
 
     # Mobile app authentication
     mobile_pin = Column(String, nullable=True)  # PIN for mobile app login (4-6 digits)
@@ -449,8 +448,9 @@ class HandHeldDevice(Base):
     # Relationships
     company = relationship("Company")
     warehouse = relationship("Warehouse", backref="handheld_devices")
-    assigned_technician = relationship("Technician", back_populates="assigned_device")
-    assigned_technicians = relationship("Technician", secondary="handheld_device_technicians", back_populates="assigned_devices")
+    assigned_technician = relationship("Technician", back_populates="assigned_device")  # Legacy
+    assigned_technicians = relationship("Technician", secondary="handheld_device_technicians", back_populates="assigned_devices")  # Legacy
+    address_book = relationship("AddressBook", foreign_keys=[address_book_id])
 
 
 class Floor(Base):
@@ -564,6 +564,9 @@ class Equipment(Base):
     room_id = Column(Integer, ForeignKey("rooms.id"), nullable=True)
     desk_id = Column(Integer, ForeignKey("desks.id"), nullable=True)
 
+    # Address Book link (for transition to Address Book as master data)
+    address_book_id = Column(Integer, ForeignKey("address_book.id"), nullable=True)
+
     name = Column(String, nullable=False)  # e.g., "Air Conditioning Unit", "Main Distribution Panel"
     code = Column(String, nullable=True, index=True)  # Asset tag/code e.g., "AC-001", "MDP-01"
     category = Column(String, nullable=False)  # "electrical", "mechanical", "plumbing"
@@ -591,6 +594,7 @@ class Equipment(Base):
 
     # Relationships
     client = relationship("Client", backref="equipment")
+    address_book = relationship("AddressBook", foreign_keys=[address_book_id])
     site = relationship("Site", backref="equipment")
     building = relationship("Building", backref="equipment")
     space = relationship("Space", backref="equipment")
@@ -624,6 +628,9 @@ class SubEquipment(Base):
     floor_id = Column(Integer, ForeignKey("floors.id"), nullable=True)
     room_id = Column(Integer, ForeignKey("rooms.id"), nullable=True)
 
+    # Address Book link (for transition to Address Book as master data)
+    address_book_id = Column(Integer, ForeignKey("address_book.id"), nullable=True)
+
     name = Column(String, nullable=False)  # e.g., "Compressor", "Filter", "Motor"
     code = Column(String, nullable=True, index=True)  # Sub-asset code
     component_type = Column(String, nullable=True)  # Type of component
@@ -644,6 +651,7 @@ class SubEquipment(Base):
     # Relationships
     parent_equipment = relationship("Equipment", back_populates="sub_equipment")
     client = relationship("Client", backref="sub_equipment")
+    address_book = relationship("AddressBook", foreign_keys=[address_book_id])
     site = relationship("Site", backref="sub_equipment")
     building = relationship("Building", backref="sub_equipment")
     space = relationship("Space", backref="sub_equipment")
@@ -657,8 +665,11 @@ class TechnicianAttendance(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
-    technician_id = Column(Integer, ForeignKey("technicians.id"), nullable=False)
+    technician_id = Column(Integer, ForeignKey("technicians.id"), nullable=True)  # Legacy
     date = Column(Date, nullable=False, index=True)  # The date of attendance
+
+    # Address Book employee (replaces technician_id)
+    address_book_id = Column(Integer, ForeignKey("address_book.id"), nullable=True)
 
     # Attendance status
     status = Column(String, default="present")  # present, absent, late, half_day, on_leave, holiday
@@ -690,13 +701,14 @@ class TechnicianAttendance(Base):
 
     # Relationships
     company = relationship("Company")
-    technician = relationship("Technician", backref="attendance_records")
+    technician = relationship("Technician", backref="attendance_records")  # Legacy
+    address_book = relationship("AddressBook", foreign_keys=[address_book_id])
     approver = relationship("User", foreign_keys=[leave_approved_by])
     creator = relationship("User", foreign_keys=[created_by])
     updater = relationship("User", foreign_keys=[updated_by])
 
 
-# Association table for WorkOrder-Technician many-to-many relationship
+# Association table for WorkOrder-Technician many-to-many relationship (Legacy)
 work_order_technicians = Table(
     'work_order_technicians',
     Base.metadata,
@@ -704,6 +716,18 @@ work_order_technicians = Table(
     Column('technician_id', Integer, ForeignKey('technicians.id'), primary_key=True),
     Column('assigned_at', DateTime, default=func.now()),
     Column('hours_worked', Numeric(5, 2), nullable=True),  # Hours this technician worked on this WO
+    Column('hourly_rate', Numeric(10, 2), nullable=True),  # Snapshot of rate at time of assignment
+    Column('notes', Text, nullable=True)
+)
+
+# Association table for WorkOrder-AddressBook Employee many-to-many relationship
+work_order_technicians_ab = Table(
+    'work_order_technicians_ab',
+    Base.metadata,
+    Column('work_order_id', Integer, ForeignKey('work_orders.id'), primary_key=True),
+    Column('address_book_id', Integer, ForeignKey('address_book.id'), primary_key=True),
+    Column('assigned_at', DateTime, default=func.now()),
+    Column('hours_worked', Numeric(5, 2), nullable=True),  # Hours this employee worked on this WO
     Column('hourly_rate', Numeric(10, 2), nullable=True),  # Snapshot of rate at time of assignment
     Column('notes', Text, nullable=True)
 )
@@ -850,7 +874,8 @@ class WorkOrder(Base):
     canceller = relationship("User", foreign_keys=[cancelled_by])
     creator = relationship("User", foreign_keys=[created_by])
     updater = relationship("User", foreign_keys=[updated_by])
-    assigned_technicians = relationship("Technician", secondary=work_order_technicians, backref="work_orders")
+    assigned_technicians = relationship("Technician", secondary=work_order_technicians, backref="work_orders")  # Legacy
+    assigned_employees = relationship("AddressBook", secondary=work_order_technicians_ab, backref="assigned_work_orders")
     spare_parts_used = relationship("WorkOrderSparePart", back_populates="work_order", cascade="all, delete-orphan")
     time_entries = relationship("WorkOrderTimeEntry", back_populates="work_order", cascade="all, delete-orphan")
     checklist_items = relationship("WorkOrderChecklistItem", back_populates="work_order", cascade="all, delete-orphan", order_by="WorkOrderChecklistItem.item_number")
@@ -887,7 +912,10 @@ class WorkOrderTimeEntry(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     work_order_id = Column(Integer, ForeignKey("work_orders.id"), nullable=False)
-    technician_id = Column(Integer, ForeignKey("technicians.id"), nullable=False)
+    technician_id = Column(Integer, ForeignKey("technicians.id"), nullable=True)  # Legacy
+
+    # Address Book employee (replaces technician_id)
+    address_book_id = Column(Integer, ForeignKey("address_book.id"), nullable=True)
 
     # Time tracking
     start_time = Column(DateTime, nullable=False)
@@ -911,7 +939,8 @@ class WorkOrderTimeEntry(Base):
 
     # Relationships
     work_order = relationship("WorkOrder", back_populates="time_entries")
-    technician = relationship("Technician")
+    technician = relationship("Technician")  # Legacy
+    address_book = relationship("AddressBook", foreign_keys=[address_book_id])
 
 
 class WorkOrderChecklistItem(Base):
@@ -1216,8 +1245,8 @@ class ItemMaster(Base):
     minimum_stock_level = Column(Integer, default=0)
     reorder_quantity = Column(Integer, default=0)
 
-    # Supplier info
-    primary_vendor_id = Column(Integer, ForeignKey("vendors.id"), nullable=True)
+    # Supplier info - Address Book (search_type='V')
+    primary_address_book_id = Column(Integer, ForeignKey("address_book.id"), nullable=True)
     vendor_part_number = Column(String(100), nullable=True)
 
     # Additional info
@@ -1232,7 +1261,7 @@ class ItemMaster(Base):
     # Relationships
     company = relationship("Company", backref="item_master")
     category = relationship("ItemCategory", back_populates="items")
-    primary_vendor = relationship("Vendor", backref="supplied_items")
+    primary_address_book = relationship("AddressBook", backref="supplied_items")
     creator = relationship("User", foreign_keys=[created_by])
     stock_levels = relationship("ItemStock", back_populates="item", cascade="all, delete-orphan")
     ledger_entries = relationship("ItemLedger", back_populates="item", cascade="all, delete-orphan")
@@ -1257,7 +1286,8 @@ class ItemAlias(Base):
     # Alias details
     alias_code = Column(String(100), nullable=False, index=True)  # Vendor's item code (e.g., LG406481)
     alias_description = Column(String(500), nullable=True)  # Vendor's description if different
-    vendor_id = Column(Integer, ForeignKey("vendors.id"), nullable=True)  # Optional: specific vendor
+    # Vendor - Address Book (search_type='V')
+    address_book_id = Column(Integer, ForeignKey("address_book.id"), nullable=True)
 
     # Metadata
     source = Column(String(50), default="manual")  # manual, invoice_link, import
@@ -1270,7 +1300,7 @@ class ItemAlias(Base):
     # Relationships
     company = relationship("Company")
     item = relationship("ItemMaster", backref="aliases")
-    vendor = relationship("Vendor")
+    address_book = relationship("AddressBook")
     creator = relationship("User", foreign_keys=[created_by])
 
     __table_args__ = (
@@ -1589,6 +1619,8 @@ class Site(Base):
     """
     Site - Location/facility of a client (replaces Branch concept for asset hierarchy)
     Client -> Site -> Building -> Space/Floor -> Room
+
+    Now linked to Address Book for master data management.
     """
     __tablename__ = "sites"
 
@@ -1609,8 +1641,12 @@ class Site(Base):
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
 
+    # Address Book link - connects Site to Address Book entry (type CB)
+    address_book_id = Column(Integer, ForeignKey("address_book.id"), nullable=True)
+
     # Relationships
     client = relationship("Client", backref="sites")
+    address_book = relationship("AddressBook", backref="site")
     blocks = relationship("Block", back_populates="site", cascade="all, delete-orphan")
     buildings = relationship("Building", back_populates="site", cascade="all, delete-orphan")
     spaces = relationship("Space", back_populates="site", cascade="all, delete-orphan")
@@ -1742,7 +1778,10 @@ class Contract(Base):
     id = Column(Integer, primary_key=True, index=True)
     company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
     client_id = Column(Integer, ForeignKey("clients.id"), nullable=False)
-    
+
+    # Address Book link (for transition to Address Book as master data)
+    address_book_id = Column(Integer, ForeignKey("address_book.id"), nullable=True)
+
     # Contract identification
     contract_number = Column(String, nullable=False, index=True)  # Auto-generated or manual
     name = Column(String, nullable=False)  # Contract name/title
@@ -1790,6 +1829,7 @@ class Contract(Base):
     # Relationships
     company = relationship("Company", backref="contracts")
     client = relationship("Client", backref="contracts")
+    address_book = relationship("AddressBook", foreign_keys=[address_book_id])
     sites = relationship("Site", secondary=contract_sites, back_populates="contracts")
     scopes = relationship("ContractScope", back_populates="contract", cascade="all, delete-orphan")
     creator = relationship("User", foreign_keys=[created_by])
@@ -1955,7 +1995,10 @@ class CalendarSlot(Base):
     current_bookings = Column(Integer, default=0)
 
     # Technician assignment (optional - slot can be for specific technician)
-    technician_id = Column(Integer, ForeignKey("technicians.id"), nullable=True)
+    technician_id = Column(Integer, ForeignKey("technicians.id"), nullable=True)  # Legacy
+
+    # Address Book employee (replaces technician_id)
+    address_book_id = Column(Integer, ForeignKey("address_book.id"), nullable=True)
 
     # Site context (optional - slot can be site-specific)
     site_id = Column(Integer, ForeignKey("sites.id"), nullable=True)
@@ -1972,7 +2015,8 @@ class CalendarSlot(Base):
 
     # Relationships
     company = relationship("Company", backref="calendar_slots")
-    technician = relationship("Technician", backref="calendar_slots")
+    technician = relationship("Technician", backref="calendar_slots")  # Legacy
+    address_book = relationship("AddressBook", foreign_keys=[address_book_id])
     site = relationship("Site", backref="calendar_slots")
     creator = relationship("User", foreign_keys=[created_by])
     assignments = relationship("WorkOrderSlotAssignment", back_populates="calendar_slot", cascade="all, delete-orphan")
@@ -1997,6 +2041,9 @@ class WorkOrderSlotAssignment(Base):
     assigned_at = Column(DateTime, default=func.now())
     assigned_by = Column(Integer, ForeignKey("users.id"), nullable=True)
 
+    # Address Book employee assignment (derived from calendar_slot or direct)
+    address_book_id = Column(Integer, ForeignKey("address_book.id"), nullable=True)
+
     # Status
     status = Column(String, default="scheduled")  # scheduled, confirmed, completed, cancelled
 
@@ -2008,6 +2055,7 @@ class WorkOrderSlotAssignment(Base):
     work_order = relationship("WorkOrder", backref="slot_assignments")
     calendar_slot = relationship("CalendarSlot", back_populates="assignments")
     assigner = relationship("User", foreign_keys=[assigned_by])
+    address_book = relationship("AddressBook", foreign_keys=[address_book_id])
 
     __table_args__ = (
         UniqueConstraint('work_order_id', 'calendar_slot_id', name='uq_work_order_slot'),
@@ -2068,6 +2116,9 @@ class ConditionReport(Base):
     company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
     client_id = Column(Integer, ForeignKey("clients.id"), nullable=False)
 
+    # Address Book link (for transition to Address Book as master data)
+    address_book_id = Column(Integer, ForeignKey("address_book.id"), nullable=True)
+
     # Report details
     report_number = Column(String, nullable=True, index=True)  # Auto-generated: CR-YYYYMMDD-XXX
     title = Column(String(255), nullable=False)
@@ -2106,6 +2157,7 @@ class ConditionReport(Base):
     # Relationships
     company = relationship("Company", backref="condition_reports")
     client = relationship("Client", backref="condition_reports")
+    address_book = relationship("AddressBook", foreign_keys=[address_book_id])
     site = relationship("Site", backref="condition_reports")
     building = relationship("Building", backref="condition_reports")
     floor = relationship("Floor", backref="condition_reports")
@@ -2163,7 +2215,10 @@ class TechnicianEvaluation(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
-    technician_id = Column(Integer, ForeignKey("technicians.id"), nullable=False)
+    technician_id = Column(Integer, ForeignKey("technicians.id"), nullable=True)  # Legacy
+
+    # Address Book employee (replaces technician_id)
+    address_book_id = Column(Integer, ForeignKey("address_book.id"), nullable=True)
 
     # Evaluation period
     evaluation_period = Column(String(50), nullable=False)  # monthly, quarterly, semi-annual, annual
@@ -2205,7 +2260,8 @@ class TechnicianEvaluation(Base):
 
     # Relationships
     company = relationship("Company", backref="technician_evaluations")
-    technician = relationship("Technician", backref="evaluations")
+    technician = relationship("Technician", backref="evaluations")  # Legacy
+    address_book = relationship("AddressBook", foreign_keys=[address_book_id])
     evaluator = relationship("User", foreign_keys=[evaluated_by], backref="conducted_evaluations")
 
 
@@ -2227,6 +2283,9 @@ class NPSSurvey(Base):
     id = Column(Integer, primary_key=True, index=True)
     company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
     client_id = Column(Integer, ForeignKey("clients.id"), nullable=False)
+
+    # Address Book link (for transition to Address Book as master data)
+    address_book_id = Column(Integer, ForeignKey("address_book.id"), nullable=True)
 
     # Survey details
     survey_date = Column(Date, nullable=False)
@@ -2267,6 +2326,7 @@ class NPSSurvey(Base):
     # Relationships
     company = relationship("Company", backref="nps_surveys")
     client = relationship("Client", backref="nps_surveys")
+    address_book = relationship("AddressBook", foreign_keys=[address_book_id])
     work_order = relationship("WorkOrder", backref="nps_surveys")
     site = relationship("Site", backref="nps_surveys")
     collector = relationship("User", foreign_keys=[collected_by], backref="collected_nps_surveys")
@@ -2287,7 +2347,10 @@ class PettyCashFund(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
-    technician_id = Column(Integer, ForeignKey("technicians.id"), nullable=False)
+    technician_id = Column(Integer, ForeignKey("technicians.id"), nullable=True)  # Legacy
+
+    # Address Book employee (replaces technician_id)
+    address_book_id = Column(Integer, ForeignKey("address_book.id"), nullable=True)
 
     # Fund details
     fund_limit = Column(Numeric(12, 2), nullable=False, default=500.00)  # Maximum allocated amount
@@ -2307,7 +2370,8 @@ class PettyCashFund(Base):
 
     # Relationships
     company = relationship("Company", backref="petty_cash_funds")
-    technician = relationship("Technician", backref=backref("petty_cash_fund", uselist=False))
+    technician = relationship("Technician", backref=backref("petty_cash_fund", uselist=False))  # Legacy
+    address_book = relationship("AddressBook", foreign_keys=[address_book_id])
     creator = relationship("User", foreign_keys=[created_by], backref="created_petty_cash_funds")
     transactions = relationship("PettyCashTransaction", back_populates="fund", cascade="all, delete-orphan")
     replenishments = relationship("PettyCashReplenishment", back_populates="fund", cascade="all, delete-orphan")
@@ -2749,7 +2813,10 @@ class JournalEntryLine(Base):
     # Additional dimensions for drill-down reporting
     contract_id = Column(Integer, ForeignKey("contracts.id"), nullable=True)
     work_order_id = Column(Integer, ForeignKey("work_orders.id"), nullable=True)
-    vendor_id = Column(Integer, ForeignKey("vendors.id"), nullable=True)
+
+    # Vendor - Address Book (search_type='V')
+    address_book_id = Column(Integer, ForeignKey("address_book.id"), nullable=True)
+
     project_id = Column(Integer, ForeignKey("projects.id"), nullable=True)
     technician_id = Column(Integer, ForeignKey("technicians.id"), nullable=True)
 
@@ -2766,7 +2833,7 @@ class JournalEntryLine(Base):
     site = relationship("Site", backref="journal_lines")
     contract = relationship("Contract", backref="journal_lines")
     work_order = relationship("WorkOrder", backref="journal_lines")
-    vendor = relationship("Vendor", backref="journal_lines")
+    address_book = relationship("AddressBook", backref="journal_lines")
     project = relationship("Project", backref="journal_lines")
     technician = relationship("Technician", backref="journal_lines")
 
@@ -3014,8 +3081,8 @@ class PurchaseRequest(Base):
     work_order_id = Column(Integer, ForeignKey("work_orders.id"), nullable=True)
     contract_id = Column(Integer, ForeignKey("contracts.id"), nullable=True)
 
-    # Vendor (can be specified or left for PO stage)
-    vendor_id = Column(Integer, ForeignKey("vendors.id"), nullable=True)
+    # Vendor - Address Book (search_type='V')
+    address_book_id = Column(Integer, ForeignKey("address_book.id"), nullable=True)
 
     # Details
     title = Column(String(200), nullable=False)
@@ -3049,7 +3116,7 @@ class PurchaseRequest(Base):
     company = relationship("Company", backref="purchase_requests")
     work_order = relationship("WorkOrder", backref="purchase_requests")
     contract = relationship("Contract", backref="purchase_requests")
-    vendor = relationship("Vendor", backref="purchase_requests")
+    address_book = relationship("AddressBook", backref="purchase_requests")
     creator = relationship("User", foreign_keys=[created_by], backref="created_purchase_requests")
     submitter = relationship("User", foreign_keys=[submitted_by])
     approver = relationship("User", foreign_keys=[approved_by])
@@ -3107,8 +3174,8 @@ class PurchaseOrder(Base):
     # Status: draft → sent → acknowledged → partial → received → cancelled
     status = Column(String(20), default='draft')
 
-    # Vendor (required for PO)
-    vendor_id = Column(Integer, ForeignKey("vendors.id"), nullable=False)
+    # Vendor - Address Book (search_type='V') - required for PO
+    address_book_id = Column(Integer, ForeignKey("address_book.id"), nullable=True)
 
     # Source linkage (inherited from PR or set directly)
     work_order_id = Column(Integer, ForeignKey("work_orders.id"), nullable=True)
@@ -3138,7 +3205,7 @@ class PurchaseOrder(Base):
     # Relationships
     company = relationship("Company", backref="purchase_orders")
     purchase_request = relationship("PurchaseRequest", back_populates="purchase_orders")
-    vendor = relationship("Vendor", backref="purchase_orders")
+    address_book = relationship("AddressBook", backref="purchase_orders")
     work_order = relationship("WorkOrder", backref="purchase_orders")
     contract = relationship("Contract", backref="purchase_orders")
     creator = relationship("User", foreign_keys=[created_by], backref="created_purchase_orders")
@@ -3249,8 +3316,14 @@ class GoodsReceipt(Base):
     tax_amount = Column(Numeric(18, 2), default=0)
     total_amount = Column(Numeric(18, 2), default=0)
 
+    # Landed cost tracking for imports
+    is_import = Column(Boolean, default=False)  # Flag for import receipts
+    total_extra_costs = Column(Numeric(18, 2), default=0)  # Sum of all extra costs
+    total_landed_cost = Column(Numeric(18, 2), default=0)  # total_amount + total_extra_costs
+
     # Journal entry reference
     journal_entry_id = Column(Integer, ForeignKey("journal_entries.id"), nullable=True)
+    reversal_journal_entry_id = Column(Integer, ForeignKey("journal_entries.id"), nullable=True)
 
     notes = Column(Text, nullable=True)
 
@@ -3266,7 +3339,9 @@ class GoodsReceipt(Base):
     purchase_order = relationship("PurchaseOrder", back_populates="goods_receipts")
     warehouse = relationship("Warehouse")
     lines = relationship("GoodsReceiptLine", back_populates="goods_receipt", cascade="all, delete-orphan")
-    journal_entry = relationship("JournalEntry")
+    extra_costs = relationship("GoodsReceiptExtraCost", back_populates="goods_receipt", cascade="all, delete-orphan")
+    journal_entry = relationship("JournalEntry", foreign_keys=[journal_entry_id])
+    reversal_journal_entry = relationship("JournalEntry", foreign_keys=[reversal_journal_entry_id])
     creator = relationship("User", foreign_keys=[created_by])
     inspector = relationship("User", foreign_keys=[inspected_by])
     poster = relationship("User", foreign_keys=[posted_by])
@@ -3310,6 +3385,11 @@ class GoodsReceiptLine(Base):
     unit_price = Column(Numeric(18, 4), nullable=False)
     total_price = Column(Numeric(18, 2), nullable=False)
 
+    # Landed cost fields (for imports with extra costs)
+    allocated_extra_cost = Column(Numeric(18, 2), default=0)  # Proportionally allocated extra costs
+    landed_unit_cost = Column(Numeric(18, 4), nullable=True)  # unit_price + (allocated_extra_cost / quantity)
+    landed_total_cost = Column(Numeric(18, 2), nullable=True)  # Total including extra costs
+
     # Inspection details
     inspection_status = Column(String(20), default='pending')  # pending, passed, failed
     rejection_reason = Column(String(200), nullable=True)
@@ -3332,6 +3412,41 @@ class GoodsReceiptLine(Base):
     item = relationship("ItemMaster")
     warehouse = relationship("Warehouse")
     item_ledger = relationship("ItemLedger")
+
+
+class GoodsReceiptExtraCost(Base):
+    """
+    Extra costs for imported goods (freight, duties, port charges, etc.)
+    These costs are allocated proportionally to GRN lines based on line value.
+    """
+    __tablename__ = "goods_receipt_extra_costs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    goods_receipt_id = Column(Integer, ForeignKey("goods_receipts.id", ondelete="CASCADE"), nullable=False)
+
+    # Cost details
+    cost_type = Column(String(50), nullable=False)  # freight, duty, port_handling, customs, insurance, other
+    cost_description = Column(String(255), nullable=True)
+    amount = Column(Numeric(18, 2), nullable=False)
+    currency = Column(String(3), default='USD')
+
+    # Vendor who charged this cost (freight company, customs broker, etc.) - Address Book (search_type='V')
+    address_book_id = Column(Integer, ForeignKey("address_book.id"), nullable=True)
+
+    # Reference documents
+    reference_number = Column(String(100), nullable=True)  # Bill of lading, customs doc, invoice number
+
+    notes = Column(Text, nullable=True)
+
+    # Audit fields
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    # Relationships
+    goods_receipt = relationship("GoodsReceipt", back_populates="extra_costs")
+    address_book = relationship("AddressBook", backref="goods_receipt_extra_costs")
+    creator = relationship("User", foreign_keys=[created_by])
 
 
 # =============================================================================
@@ -3429,6 +3544,7 @@ class Lead(Base):
 
     # Conversion tracking
     converted_to_client_id = Column(Integer, ForeignKey("clients.id"), nullable=True)
+    converted_to_address_book_id = Column(Integer, ForeignKey("address_book.id"), nullable=True)
     converted_to_opportunity_id = Column(Integer, nullable=True)  # Will reference opportunities.id
     converted_at = Column(DateTime, nullable=True)
     converted_by = Column(Integer, ForeignKey("users.id"), nullable=True)
@@ -3445,6 +3561,7 @@ class Lead(Base):
     creator = relationship("User", foreign_keys=[created_by])
     converter = relationship("User", foreign_keys=[converted_by])
     converted_client = relationship("Client")
+    converted_address_book = relationship("AddressBook", foreign_keys=[converted_to_address_book_id])
     activities = relationship("CRMActivity", back_populates="lead", foreign_keys="CRMActivity.lead_id")
 
 
@@ -3463,6 +3580,7 @@ class Opportunity(Base):
 
     # Related entities
     client_id = Column(Integer, ForeignKey("clients.id"), nullable=True)
+    address_book_id = Column(Integer, ForeignKey("address_book.id"), nullable=True)
     lead_id = Column(Integer, ForeignKey("leads.id"), nullable=True)  # If converted from lead
     contact_name = Column(String(200), nullable=True)
     contact_email = Column(String(255), nullable=True)
@@ -3504,6 +3622,7 @@ class Opportunity(Base):
     # Relationships
     company = relationship("Company")
     client = relationship("Client")
+    address_book = relationship("AddressBook", foreign_keys=[address_book_id])
     lead = relationship("Lead")
     stage = relationship("PipelineStage", back_populates="opportunities")
     assignee = relationship("User", foreign_keys=[assigned_to])
@@ -3530,6 +3649,7 @@ class CRMActivity(Base):
     lead_id = Column(Integer, ForeignKey("leads.id"), nullable=True)
     opportunity_id = Column(Integer, ForeignKey("opportunities.id"), nullable=True)
     client_id = Column(Integer, ForeignKey("clients.id"), nullable=True)
+    address_book_id = Column(Integer, ForeignKey("address_book.id"), nullable=True)
 
     # Scheduling
     due_date = Column(DateTime, nullable=True)
@@ -3570,6 +3690,7 @@ class CRMActivity(Base):
     lead = relationship("Lead", back_populates="activities", foreign_keys=[lead_id])
     opportunity = relationship("Opportunity", back_populates="activities", foreign_keys=[opportunity_id])
     client = relationship("Client")
+    address_book = relationship("AddressBook", foreign_keys=[address_book_id])
     assignee = relationship("User", foreign_keys=[assigned_to])
     completer = relationship("User", foreign_keys=[completed_by])
     creator = relationship("User", foreign_keys=[created_by])
@@ -3721,8 +3842,8 @@ class ToolPurchase(Base):
     purchase_number = Column(String(30), nullable=False, index=True)  # TP-2025-00001
     purchase_date = Column(Date, nullable=False)
 
-    # Vendor
-    vendor_id = Column(Integer, ForeignKey("vendors.id"), nullable=False)
+    # Vendor - Address Book (search_type='V')
+    address_book_id = Column(Integer, ForeignKey("address_book.id"), nullable=True)
 
     # Financial
     currency = Column(String(10), default="USD")
@@ -3760,7 +3881,7 @@ class ToolPurchase(Base):
 
     # Relationships
     company = relationship("Company", backref="tool_purchases")
-    vendor = relationship("Vendor", backref="tool_purchases")
+    address_book = relationship("AddressBook", backref="tool_purchases")
     initial_warehouse = relationship("Warehouse", backref="tool_purchase_receipts")
     approver = relationship("User", foreign_keys=[approved_by])
     receiver = relationship("User", foreign_keys=[received_by])
@@ -3829,7 +3950,8 @@ class Tool(Base):
     purchase_id = Column(Integer, ForeignKey("tool_purchases.id"), nullable=True)
     purchase_date = Column(Date, nullable=True)
     purchase_cost = Column(Numeric(12, 2), nullable=True)
-    vendor_id = Column(Integer, ForeignKey("vendors.id"), nullable=True)
+    # Vendor - Address Book (search_type='V')
+    vendor_address_book_id = Column(Integer, ForeignKey("address_book.id"), nullable=True)
 
     # Fixed asset fields (for asset_type = "fixed_asset")
     capitalization_date = Column(Date, nullable=True)  # Date tool was capitalized
@@ -3849,9 +3971,12 @@ class Tool(Base):
 
     # Single assignment - ONLY ONE of these should be set at a time
     assigned_site_id = Column(Integer, ForeignKey("sites.id"), nullable=True)
-    assigned_technician_id = Column(Integer, ForeignKey("technicians.id"), nullable=True)
+    assigned_technician_id = Column(Integer, ForeignKey("technicians.id"), nullable=True)  # Legacy
     assigned_warehouse_id = Column(Integer, ForeignKey("warehouses.id"), nullable=True)
     assigned_at = Column(DateTime, nullable=True)
+
+    # Address Book employee assignment (replaces assigned_technician_id)
+    address_book_id = Column(Integer, ForeignKey("address_book.id"), nullable=True)
 
     # Disposal fields
     disposal_id = Column(Integer, ForeignKey("disposals.id"), nullable=True)
@@ -3872,9 +3997,10 @@ class Tool(Base):
     company = relationship("Company", backref="tools")
     category = relationship("ToolCategory", back_populates="tools")
     purchase = relationship("ToolPurchase", back_populates="tools")
-    vendor = relationship("Vendor", backref="tools_supplied")
     assigned_site = relationship("Site", backref="assigned_tools")
-    assigned_technician = relationship("Technician", backref="assigned_tools")
+    assigned_technician = relationship("Technician", backref="assigned_tools")  # Legacy
+    address_book = relationship("AddressBook", foreign_keys=[address_book_id])
+    vendor_address_book = relationship("AddressBook", foreign_keys=[vendor_address_book_id])
     assigned_warehouse = relationship("Warehouse", backref="stored_tools")
     creator = relationship("User", foreign_keys=[created_by])
     allocation_history = relationship("ToolAllocationHistory", back_populates="tool", cascade="all, delete-orphan")
@@ -3896,13 +4022,19 @@ class ToolAllocationHistory(Base):
 
     # From location (one of these or null for initial assignment)
     from_site_id = Column(Integer, ForeignKey("sites.id"), nullable=True)
-    from_technician_id = Column(Integer, ForeignKey("technicians.id"), nullable=True)
+    from_technician_id = Column(Integer, ForeignKey("technicians.id"), nullable=True)  # Legacy
     from_warehouse_id = Column(Integer, ForeignKey("warehouses.id"), nullable=True)
+
+    # Address Book employee from (replaces from_technician_id)
+    from_address_book_id = Column(Integer, ForeignKey("address_book.id"), nullable=True)
 
     # To location (one of these)
     to_site_id = Column(Integer, ForeignKey("sites.id"), nullable=True)
-    to_technician_id = Column(Integer, ForeignKey("technicians.id"), nullable=True)
+    to_technician_id = Column(Integer, ForeignKey("technicians.id"), nullable=True)  # Legacy
     to_warehouse_id = Column(Integer, ForeignKey("warehouses.id"), nullable=True)
+
+    # Address Book employee to (replaces to_technician_id)
+    to_address_book_id = Column(Integer, ForeignKey("address_book.id"), nullable=True)
 
     # Transfer reason/notes
     reason = Column(String(100), nullable=True)  # initial_assignment, reassignment, return, maintenance
@@ -3915,10 +4047,12 @@ class ToolAllocationHistory(Base):
     # Relationships
     tool = relationship("Tool", back_populates="allocation_history")
     from_site = relationship("Site", foreign_keys=[from_site_id])
-    from_technician = relationship("Technician", foreign_keys=[from_technician_id])
+    from_technician = relationship("Technician", foreign_keys=[from_technician_id])  # Legacy
+    from_address_book = relationship("AddressBook", foreign_keys=[from_address_book_id])
     from_warehouse = relationship("Warehouse", foreign_keys=[from_warehouse_id])
     to_site = relationship("Site", foreign_keys=[to_site_id])
-    to_technician = relationship("Technician", foreign_keys=[to_technician_id])
+    to_technician = relationship("Technician", foreign_keys=[to_technician_id])  # Legacy
+    to_address_book = relationship("AddressBook", foreign_keys=[to_address_book_id])
     to_warehouse = relationship("Warehouse", foreign_keys=[to_warehouse_id])
     transferred_by_user = relationship("User", foreign_keys=[transferred_by])
 
@@ -4038,3 +4172,189 @@ class DisposalItemLine(Base):
     disposal = relationship("Disposal", back_populates="item_lines")
     item = relationship("ItemMaster", backref="disposal_lines")
     warehouse = relationship("Warehouse", backref="disposal_item_lines")
+
+
+class AddressBook(Base):
+    """
+    Address Book - Master repository for all business entities (Oracle JDE F0101 equivalent).
+    Consolidates Vendors, Clients, and Site branches into a unified structure.
+    Each entry has exactly one Search Type (not multi-type).
+
+    Search Types:
+    - V  = Vendor (supplier)
+    - C  = Customer (client)
+    - CB = Client Branch (site/location)
+    - E  = Employee
+    - MT = Maintenance Team
+    """
+    __tablename__ = "address_book"
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+
+    # Address Number - JDE AN8 equivalent (auto-generated or manual, unique per company)
+    address_number = Column(String(20), nullable=False, index=True)
+
+    # Search Type - Single type per entry (V, C, CB, E, MT)
+    search_type = Column(String(5), nullable=False, index=True)
+
+    # Names (JDE Alpha Name, Mailing Name)
+    alpha_name = Column(String(100), nullable=False, index=True)  # Primary search name
+    mailing_name = Column(String(100), nullable=True)  # Name for correspondence
+
+    # Tax/Registration Information
+    tax_id = Column(String(50), nullable=True, index=True)  # Tax ID / VAT number
+    registration_number = Column(String(50), nullable=True)  # Company registration
+
+    # Address Fields (JDE style - 4 lines)
+    address_line_1 = Column(String(200), nullable=True)
+    address_line_2 = Column(String(200), nullable=True)
+    address_line_3 = Column(String(200), nullable=True)
+    address_line_4 = Column(String(200), nullable=True)
+    city = Column(String(100), nullable=True)
+    state = Column(String(50), nullable=True)
+    postal_code = Column(String(20), nullable=True)
+    country = Column(String(50), nullable=True)
+
+    # Communication
+    phone_primary = Column(String(30), nullable=True)
+    phone_secondary = Column(String(30), nullable=True)
+    fax = Column(String(30), nullable=True)
+    email = Column(String(255), nullable=True)
+    website = Column(String(255), nullable=True)
+
+    # GPS Coordinates (for sites/branches)
+    latitude = Column(Float, nullable=True)
+    longitude = Column(Float, nullable=True)
+
+    # Parent Address Book (for hierarchies: CB -> C, MT -> C, etc.)
+    parent_address_book_id = Column(Integer, ForeignKey("address_book.id"), nullable=True)
+
+    # Business Unit Link - Each AB entry can have its own BU for cost tracking
+    business_unit_id = Column(Integer, ForeignKey("business_units.id"), nullable=True)
+
+    # Category Codes (JDE User Defined Codes - 10 fields for flexible classification)
+    category_code_01 = Column(String(10), nullable=True)  # Industry/Type
+    category_code_02 = Column(String(10), nullable=True)  # Region
+    category_code_03 = Column(String(10), nullable=True)  # Credit Status
+    category_code_04 = Column(String(10), nullable=True)  # Payment Terms
+    category_code_05 = Column(String(10), nullable=True)  # Priority
+    category_code_06 = Column(String(10), nullable=True)
+    category_code_07 = Column(String(10), nullable=True)
+    category_code_08 = Column(String(10), nullable=True)
+    category_code_09 = Column(String(10), nullable=True)
+    category_code_10 = Column(String(10), nullable=True)
+
+    # Status
+    is_active = Column(Boolean, default=True)
+
+    # Notes
+    notes = Column(Text, nullable=True)
+
+    # =========================================================================
+    # Employee Salary Fields (only applicable for search_type='E')
+    # =========================================================================
+
+    # Base Compensation
+    salary_type = Column(String(20), nullable=True)  # monthly, hourly, daily
+    base_salary = Column(Numeric(12, 2), nullable=True)  # Base salary amount
+    salary_currency = Column(String(3), default="USD")
+    hourly_rate = Column(Numeric(10, 2), nullable=True)  # Calculated or manual hourly rate
+    overtime_rate_multiplier = Column(Numeric(4, 2), default=1.5)  # e.g., 1.5x for overtime
+    working_hours_per_day = Column(Numeric(4, 2), default=8.0)
+    working_days_per_month = Column(Integer, default=22)
+
+    # Allowances
+    transport_allowance = Column(Numeric(10, 2), nullable=True)
+    housing_allowance = Column(Numeric(10, 2), nullable=True)
+    food_allowance = Column(Numeric(10, 2), nullable=True)
+    other_allowances = Column(Numeric(10, 2), nullable=True)
+    allowances_notes = Column(Text, nullable=True)  # Description of other allowances
+
+    # Deductions
+    social_security_rate = Column(Numeric(5, 4), nullable=True)  # e.g., 0.0725 for 7.25%
+    tax_rate = Column(Numeric(5, 4), nullable=True)  # Income tax rate
+    other_deductions = Column(Numeric(10, 2), nullable=True)
+    deductions_notes = Column(Text, nullable=True)
+
+    # Employee-specific fields
+    employee_id = Column(String(50), nullable=True)  # Internal employee ID
+    specialization = Column(String(100), nullable=True)  # e.g., "HVAC", "Electrical", "Plumbing"
+    hire_date = Column(Date, nullable=True)
+    termination_date = Column(Date, nullable=True)
+
+    # Audit Fields
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    updated_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    # Legacy IDs for migration/backward compatibility
+    legacy_vendor_id = Column(Integer, nullable=True)
+    legacy_client_id = Column(Integer, nullable=True)
+    legacy_site_id = Column(Integer, nullable=True)
+    legacy_technician_id = Column(Integer, nullable=True)
+
+    # Unique constraint: address_number must be unique within company
+    __table_args__ = (
+        UniqueConstraint('company_id', 'address_number', name='uq_address_book_number'),
+    )
+
+    # Relationships
+    company = relationship("Company", backref="address_book_entries")
+    parent = relationship("AddressBook", foreign_keys=[parent_address_book_id],
+                         remote_side=[id], backref="children")
+    business_unit = relationship("BusinessUnit", backref="address_book_entry")
+    contacts = relationship("AddressBookContact", back_populates="address_book",
+                           cascade="all, delete-orphan")
+    creator = relationship("User", foreign_keys=[created_by])
+    updater = relationship("User", foreign_keys=[updated_by])
+
+
+class AddressBookContact(Base):
+    """
+    Address Book Contacts - Who's Who (Oracle JDE F0111 equivalent).
+    Multiple contacts per Address Book entry with different roles/types.
+    """
+    __tablename__ = "address_book_contacts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    address_book_id = Column(Integer, ForeignKey("address_book.id", ondelete="CASCADE"),
+                            nullable=False)
+
+    # Contact identification
+    line_number = Column(Integer, nullable=False)  # Line ID within parent
+
+    # Contact Details
+    first_name = Column(String(50), nullable=True)
+    last_name = Column(String(50), nullable=True)
+    full_name = Column(String(100), nullable=False)  # Display name
+    title = Column(String(100), nullable=True)  # Job title
+
+    # Contact Type/Role
+    # primary, billing, shipping, technical, management, emergency, other
+    contact_type = Column(String(20), nullable=False, default="primary")
+
+    # Communication
+    phone_primary = Column(String(30), nullable=True)
+    phone_mobile = Column(String(30), nullable=True)
+    phone_fax = Column(String(30), nullable=True)
+    email = Column(String(255), nullable=True)
+
+    # Preferences
+    preferred_contact_method = Column(String(20), nullable=True)  # phone, email, mail
+    language = Column(String(10), nullable=True)  # Preferred language code
+
+    # Status
+    is_primary = Column(Boolean, default=False)  # Primary contact for this type
+    is_active = Column(Boolean, default=True)
+
+    # Notes
+    notes = Column(Text, nullable=True)
+
+    # Audit
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    # Relationships
+    address_book = relationship("AddressBook", back_populates="contacts")

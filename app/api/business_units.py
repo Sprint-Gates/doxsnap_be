@@ -19,7 +19,7 @@ from typing import Optional, List
 from datetime import date, datetime
 
 from app.database import get_db
-from app.models import BusinessUnit, User, Warehouse, JournalEntryLine, JournalEntry, Account
+from app.models import BusinessUnit, User, Warehouse, JournalEntryLine, JournalEntry, Account, AddressBook
 from app.api.auth import get_current_user
 from app.schemas import (
     BusinessUnitCreate, BusinessUnitUpdate, BusinessUnit as BusinessUnitSchema,
@@ -439,6 +439,7 @@ async def delete_business_unit(
     - Has posted journal entries
     - Has child business units
     - Has linked warehouses
+    - Has linked address book entries
     """
     bu = db.query(BusinessUnit).filter(
         BusinessUnit.id == bu_id,
@@ -451,34 +452,71 @@ async def delete_business_unit(
             detail="Business Unit not found"
         )
 
+    # Collect all dependencies
+    dependencies = []
+
     # Check for children
-    has_children = db.query(BusinessUnit).filter(
+    children = db.query(BusinessUnit).filter(
         BusinessUnit.parent_id == bu_id
-    ).first()
-    if has_children:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Cannot delete Business Unit with child units. Delete or reassign children first."
-        )
+    ).all()
+    if children:
+        child_list = [{"id": c.id, "code": c.code, "name": c.name} for c in children[:10]]
+        dependencies.append({
+            "type": "children",
+            "count": len(children),
+            "message": "Child Business Units",
+            "items": child_list,
+            "action": "Delete or reassign these child units first"
+        })
 
     # Check for linked warehouses
-    has_warehouses = db.query(Warehouse).filter(
+    warehouses = db.query(Warehouse).filter(
         Warehouse.business_unit_id == bu_id
-    ).first()
-    if has_warehouses:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Cannot delete Business Unit with linked warehouses. Unlink warehouses first."
-        )
+    ).all()
+    if warehouses:
+        warehouse_list = [{"id": w.id, "name": w.name} for w in warehouses[:10]]
+        dependencies.append({
+            "type": "warehouses",
+            "count": len(warehouses),
+            "message": "Linked Warehouses",
+            "items": warehouse_list,
+            "action": "Unlink these warehouses first"
+        })
 
     # Check for journal entries
-    has_entries = db.query(JournalEntryLine).filter(
+    entry_count = db.query(JournalEntryLine).filter(
         JournalEntryLine.business_unit_id == bu_id
-    ).first()
-    if has_entries:
+    ).count()
+    if entry_count > 0:
+        dependencies.append({
+            "type": "journal_entries",
+            "count": entry_count,
+            "message": "Journal Entry Lines",
+            "items": [],
+            "action": "Cannot delete - deactivate the Business Unit instead"
+        })
+
+    # Check for linked address book entries
+    address_books = db.query(AddressBook).filter(
+        AddressBook.business_unit_id == bu_id
+    ).all()
+    if address_books:
+        ab_list = [{"id": ab.id, "address_number": ab.address_number, "name": ab.alpha_name} for ab in address_books[:10]]
+        dependencies.append({
+            "type": "address_book",
+            "count": len(address_books),
+            "message": "Address Book Entries",
+            "items": ab_list,
+            "action": "Unlink these address book entries first"
+        })
+
+    if dependencies:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Cannot delete Business Unit with posted journal entries. Deactivate instead."
+            detail={
+                "message": f"Cannot delete Business Unit '{bu.name}' due to existing dependencies",
+                "dependencies": dependencies
+            }
         )
 
     db.delete(bu)

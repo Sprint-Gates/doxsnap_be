@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Query
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
@@ -228,8 +228,12 @@ def process_invoice_line_items(
     2. Create InvoiceItem records
     3. Match with Item Master by item_code/item_number (exact match)
     4. If no exact match, try fuzzy matching by description
-    5. Auto-receive matched items to main warehouse
-    6. Create ledger entries for stock movements
+
+    NOTE: Inventory is NOT auto-received from invoices.
+    Inventory receiving must be done through the GRN (Goods Receipt Note) workflow:
+    PO → Link Invoice to PO → Create GRN → Post GRN
+
+    This ensures proper three-way matching and Journal Entry creation.
 
     Returns summary of processed items including items needing manual review.
     """
@@ -388,96 +392,15 @@ def process_invoice_line_items(
             if matched_item:
                 matched_count += 1
 
-                # Auto-receive to main warehouse if available and quantity > 0
-                if main_warehouse and quantity > 0:
-                    try:
-                        # Get or create stock record
-                        stock = db.query(ItemStock).filter(
-                            ItemStock.company_id == company_id,
-                            ItemStock.item_id == matched_item.id,
-                            ItemStock.warehouse_id == main_warehouse.id
-                        ).first()
-
-                        if not stock:
-                            stock = ItemStock(
-                                company_id=company_id,
-                                item_id=matched_item.id,
-                                warehouse_id=main_warehouse.id,
-                                quantity_on_hand=0,
-                                average_cost=0,
-                                last_cost=0
-                            )
-                            db.add(stock)
-                            db.flush()
-
-                        # Calculate weighted average cost
-                        current_qty = float(stock.quantity_on_hand or 0)
-                        current_avg_cost = float(stock.average_cost or 0)
-                        new_qty = quantity
-
-                        if unit_price and unit_price > 0:
-                            if current_qty + new_qty > 0:
-                                new_avg_cost = ((current_qty * current_avg_cost) + (new_qty * unit_price)) / (current_qty + new_qty)
-                            else:
-                                new_avg_cost = unit_price
-                            stock.average_cost = new_avg_cost
-                            stock.last_cost = unit_price
-
-                        stock.quantity_on_hand = current_qty + new_qty
-                        stock.last_movement_date = datetime.utcnow()
-
-                        # Generate transaction number
-                        today = datetime.utcnow()
-                        date_prefix = today.strftime("%Y%m%d")
-                        last_txn = db.query(ItemLedger).filter(
-                            ItemLedger.transaction_number.like(f"TXN-{date_prefix}-%")
-                        ).order_by(ItemLedger.id.desc()).first()
-
-                        if last_txn:
-                            try:
-                                last_num = int(last_txn.transaction_number.split("-")[-1])
-                                txn_num = f"TXN-{date_prefix}-{str(last_num + 1).zfill(4)}"
-                            except:
-                                txn_num = f"TXN-{date_prefix}-0001"
-                        else:
-                            txn_num = f"TXN-{date_prefix}-0001"
-
-                        # Create ledger entry
-                        ledger_entry = ItemLedger(
-                            company_id=company_id,
-                            item_id=matched_item.id,
-                            transaction_number=txn_num,
-                            transaction_date=datetime.utcnow(),
-                            transaction_type="RECEIVE_INVOICE",
-                            quantity=quantity,
-                            unit=matched_item.unit or unit,
-                            unit_cost=unit_price,
-                            total_cost=unit_price * quantity if unit_price else None,
-                            to_warehouse_id=main_warehouse.id,
-                            invoice_id=invoice_id,
-                            balance_after=stock.quantity_on_hand,
-                            notes=f"Auto-received from invoice",
-                            created_by=user_id
-                        )
-                        db.add(ledger_entry)
-
-                        # Update invoice item status
-                        invoice_item.quantity_received = quantity
-                        invoice_item.receive_status = "received"
-                        invoice_item.received_to_warehouse_id = main_warehouse.id
-                        invoice_item.received_at = datetime.utcnow()
-                        invoice_item.received_by = user_id
-
-                        received_count += 1
-                        logger.info(f"Auto-received {quantity} of item {matched_item.item_number} to {main_warehouse.name}")
-
-                    except Exception as receive_error:
-                        logger.error(f"Error auto-receiving item {item_code}: {receive_error}")
-                        errors.append({
-                            "line": idx + 1,
-                            "item_code": item_code,
-                            "error": f"Failed to receive: {str(receive_error)}"
-                        })
+                # DISABLED: Auto-receive to warehouse
+                # Inventory should only be received through GRN (Goods Receipt Note) workflow for proper:
+                # - Three-way matching (PO ↔ GRN ↔ Invoice)
+                # - Journal Entry creation (DR: Inventory, CR: GRNI)
+                # - Complete audit trail
+                # The invoice item is linked to ItemMaster but NOT auto-received to inventory.
+                # User must create a GRN from the linked PO to receive inventory.
+                logger.info(f"Item matched: {matched_item.item_number} (invoice item #{idx + 1}). "
+                           f"Inventory NOT auto-received - use GRN workflow.")
 
         except Exception as item_error:
             logger.error(f"Error processing line item {idx + 1}: {item_error}")
@@ -955,9 +878,29 @@ async def delete_admin_image(
 ):
     """Delete an image (admin only)"""
     from app.services.s3 import delete_from_s3
+    from app.models import PurchaseOrderInvoice, PurchaseOrder
     import os
 
     image = get_company_image(image_id, admin_user, db)
+
+    # Check if invoice is linked to an active (non-cancelled) Purchase Order
+    po_link = db.query(PurchaseOrderInvoice).join(
+        PurchaseOrder, PurchaseOrder.id == PurchaseOrderInvoice.purchase_order_id
+    ).filter(
+        PurchaseOrderInvoice.invoice_id == image_id,
+        PurchaseOrder.status != 'cancelled'
+    ).first()
+
+    if po_link:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot delete invoice - it is linked to an active Purchase Order. Please unlink the invoice from the PO first."
+        )
+
+    # Clean up any orphaned PO links (from cancelled POs)
+    db.query(PurchaseOrderInvoice).filter(
+        PurchaseOrderInvoice.invoice_id == image_id
+    ).delete()
 
     errors = []
 
@@ -1100,9 +1043,8 @@ async def admin_get_vendor_lookup(
     admin_user: User = Depends(get_current_admin),
     db: Session = Depends(get_db)
 ):
-    """Get vendor lookup for an image (admin only)"""
-    from app.models import Vendor
-    from sqlalchemy import or_
+    """Get vendor lookup for an image (admin only). Uses Address Book with search_type='V'."""
+    from app.models import AddressBook
     import json
 
     image = get_company_image(image_id, admin_user, db)
@@ -1125,13 +1067,12 @@ async def admin_get_vendor_lookup(
             "message": "No supplier name found in document"
         }
 
-    # Try exact match first (case-insensitive) - check both name and display_name
-    vendor = db.query(Vendor).filter(
-        or_(
-            Vendor.name.ilike(supplier_name),
-            Vendor.display_name.ilike(supplier_name)
-        ),
-        Vendor.is_active == True
+    # Try exact match first using Address Book (search_type='V')
+    vendor = db.query(AddressBook).filter(
+        AddressBook.alpha_name.ilike(supplier_name),
+        AddressBook.search_type == 'V',
+        AddressBook.is_active == True,
+        AddressBook.company_id == admin_user.company_id
     ).first()
 
     if vendor:
@@ -1139,8 +1080,9 @@ async def admin_get_vendor_lookup(
             "found": True,
             "vendor": {
                 "id": vendor.id,
-                "name": vendor.name,
-                "display_name": vendor.display_name
+                "address_number": vendor.address_number,
+                "name": vendor.alpha_name,
+                "display_name": vendor.alpha_name
             },
             "suggestions": [],
             "extracted_name": supplier_name
@@ -1148,12 +1090,11 @@ async def admin_get_vendor_lookup(
 
     # No exact match - get suggestions
     search_term = f"%{supplier_name}%"
-    similar_vendors = db.query(Vendor).filter(
-        or_(
-            Vendor.name.ilike(search_term),
-            Vendor.display_name.ilike(search_term)
-        ),
-        Vendor.is_active == True
+    similar_vendors = db.query(AddressBook).filter(
+        AddressBook.alpha_name.ilike(search_term),
+        AddressBook.search_type == 'V',
+        AddressBook.is_active == True,
+        AddressBook.company_id == admin_user.company_id
     ).limit(5).all()
 
     return {
@@ -1162,8 +1103,9 @@ async def admin_get_vendor_lookup(
         "suggestions": [
             {
                 "id": v.id,
-                "name": v.name,
-                "display_name": v.display_name
+                "address_number": v.address_number,
+                "name": v.alpha_name,
+                "display_name": v.alpha_name
             }
             for v in similar_vendors
         ],
@@ -1174,25 +1116,27 @@ async def admin_get_vendor_lookup(
 @router.post("/admin/images/{image_id}/link-vendor")
 async def admin_link_vendor_to_image(
     image_id: int,
-    vendor_id: int,
+    address_book_id: int = Query(..., description="Address Book ID (search_type='V')"),
     admin_user: User = Depends(get_current_admin),
     db: Session = Depends(get_db)
 ):
-    """Link a vendor to an image (admin only)"""
-    from app.models import Vendor
+    """Link a vendor (Address Book entry) to an image (admin only)"""
+    from app.models import AddressBook
     import json
 
     image = get_company_image(image_id, admin_user, db)
 
-    vendor = db.query(Vendor).filter(
-        Vendor.id == vendor_id,
-        Vendor.is_active == True
+    vendor = db.query(AddressBook).filter(
+        AddressBook.id == address_book_id,
+        AddressBook.search_type == 'V',
+        AddressBook.is_active == True,
+        AddressBook.company_id == admin_user.company_id
     ).first()
 
     if not vendor:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Vendor not found"
+            detail="Vendor not found in Address Book"
         )
 
     # Update structured data with vendor info
@@ -1201,32 +1145,36 @@ async def admin_link_vendor_to_image(
         if image.structured_data:
             structured_data = json.loads(image.structured_data)
 
-        # Update supplier info with vendor data
+        # Update supplier info with Address Book data
         if "supplier" not in structured_data:
             structured_data["supplier"] = {}
 
-        structured_data["supplier"]["company_name"] = vendor.display_name
-        structured_data["supplier"]["vendor_id"] = vendor.id
+        structured_data["supplier"]["company_name"] = vendor.alpha_name
+        structured_data["supplier"]["address_book_id"] = vendor.id
         if vendor.email:
             structured_data["supplier"]["email"] = vendor.email
-        if vendor.phone:
-            structured_data["supplier"]["phone"] = vendor.phone
-        if vendor.address:
-            structured_data["supplier"]["company_address"] = vendor.address
-        if vendor.tax_number:
-            structured_data["supplier"]["tax_number"] = vendor.tax_number
+        if vendor.phone_primary:
+            structured_data["supplier"]["phone"] = vendor.phone_primary
+        if vendor.address_line_1:
+            structured_data["supplier"]["company_address"] = " ".join(filter(None, [
+                vendor.address_line_1, vendor.city, vendor.country
+            ]))
+        if vendor.tax_id:
+            structured_data["supplier"]["tax_number"] = vendor.tax_id
 
         image.structured_data = json.dumps(structured_data)
+        image.address_book_id = vendor.id  # Link to Address Book
         db.commit()
         db.refresh(image)
 
         return {
             "success": True,
-            "message": f"Vendor '{vendor.display_name}' linked to invoice successfully",
+            "message": f"Vendor '{vendor.alpha_name}' linked to invoice successfully",
             "vendor": {
                 "id": vendor.id,
-                "name": vendor.name,
-                "display_name": vendor.display_name
+                "address_number": vendor.address_number,
+                "name": vendor.alpha_name,
+                "display_name": vendor.alpha_name
             },
             "image_id": image_id
         }

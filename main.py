@@ -8,9 +8,9 @@ import os
 import logging
 import google.generativeai as genai
 
-from app.api import auth, images, otp, admin, document_types, technician_site_shifts, vendors, plans, companies, clients, branches, projects, operators, technicians, handheld_devices, assets, attendance, work_orders, warehouses, pm_checklists, pm_work_orders, dashboard, item_master, cycle_count, hhd_auth, users, sites, contracts, tickets, calendar, condition_reports, technician_evaluations, nps, petty_cash, docs, allocations, accounting, exchange_rates, purchase_requests, purchase_orders, goods_receipts, crm_leads, crm_opportunities, crm_activities, crm_campaigns, tools, disposals, business_units
+from app.api import auth, images, otp, admin, document_types, technician_site_shifts, plans, companies, branches, projects, operators, handheld_devices, assets, attendance, work_orders, warehouses, pm_checklists, pm_work_orders, dashboard, item_master, cycle_count, hhd_auth, users, sites, contracts, tickets, calendar, condition_reports, technician_evaluations, nps, petty_cash, docs, allocations, accounting, exchange_rates, purchase_requests, purchase_orders, goods_receipts, crm_leads, crm_opportunities, crm_activities, crm_campaigns, tools, disposals, business_units, address_book, clients
 from app.database import engine, get_db
-from app.models import Base, User, ProcessedImage, DocumentType, Vendor, Warehouse, Plan, Company, Client, Branch, Project, Technician, HandHeldDevice, Floor, Room, Equipment, SubEquipment, TechnicianAttendance, SparePart, WorkOrder, WorkOrderSparePart, WorkOrderTimeEntry, PMSchedule, ItemCategory, ItemMaster, ItemStock, ItemLedger, ItemTransfer, ItemTransferLine, InvoiceItem, CycleCount, CycleCountItem, RefreshToken, Site, Building, Space, Scope, Contract, ContractScope, Ticket, CalendarSlot, WorkOrderSlotAssignment, CalendarTemplate, InvoiceAllocation, AllocationPeriod, RecognitionLog, AccountType, Account, FiscalPeriod, JournalEntry, JournalEntryLine, AccountBalance, DefaultAccountMapping, ExchangeRate, ExchangeRateLog, PurchaseRequest, PurchaseRequestLine, PurchaseOrder, PurchaseOrderLine, PurchaseOrderInvoice, GoodsReceipt, GoodsReceiptLine, LeadSource, PipelineStage, Lead, Opportunity, CRMActivity, Campaign, CampaignLead, ToolCategory, Tool, ToolPurchase, ToolPurchaseLine, ToolAllocationHistory, Disposal, DisposalToolLine, DisposalItemLine, BusinessUnit
+from app.models import Base, User, ProcessedImage, DocumentType, Warehouse, Plan, Company, Client, Branch, Project, Technician, HandHeldDevice, Floor, Room, Equipment, SubEquipment, TechnicianAttendance, SparePart, WorkOrder, WorkOrderSparePart, WorkOrderTimeEntry, PMSchedule, ItemCategory, ItemMaster, ItemStock, ItemLedger, ItemTransfer, ItemTransferLine, InvoiceItem, CycleCount, CycleCountItem, RefreshToken, Site, Building, Space, Scope, Contract, ContractScope, Ticket, CalendarSlot, WorkOrderSlotAssignment, CalendarTemplate, InvoiceAllocation, AllocationPeriod, RecognitionLog, AccountType, Account, FiscalPeriod, JournalEntry, JournalEntryLine, AccountBalance, DefaultAccountMapping, ExchangeRate, ExchangeRateLog, PurchaseRequest, PurchaseRequestLine, PurchaseOrder, PurchaseOrderLine, PurchaseOrderInvoice, GoodsReceipt, GoodsReceiptLine, LeadSource, PipelineStage, Lead, Opportunity, CRMActivity, Campaign, CampaignLead, ToolCategory, Tool, ToolPurchase, ToolPurchaseLine, ToolAllocationHistory, Disposal, DisposalToolLine, DisposalItemLine, BusinessUnit, AddressBook, AddressBookContact
 from app.config import settings
 from app.utils.security import verify_token
 from sqlalchemy import text
@@ -35,6 +35,18 @@ def run_migrations():
         ("journal_entry_lines", "business_unit_id", "ALTER TABLE journal_entry_lines ADD COLUMN IF NOT EXISTS business_unit_id INTEGER REFERENCES business_units(id)"),
         ("account_balances", "business_unit_id", "ALTER TABLE account_balances ADD COLUMN IF NOT EXISTS business_unit_id INTEGER REFERENCES business_units(id)"),
         ("item_ledger", "business_unit_id", "ALTER TABLE item_ledger ADD COLUMN IF NOT EXISTS business_unit_id INTEGER REFERENCES business_units(id)"),
+        # Address Book link for clients (master data management)
+        ("clients", "address_book_id", "ALTER TABLE clients ADD COLUMN IF NOT EXISTS address_book_id INTEGER REFERENCES address_book(id)"),
+        # Address Book vendor references (replacing legacy vendor_id)
+        ("processed_images", "address_book_id", "ALTER TABLE processed_images ADD COLUMN IF NOT EXISTS address_book_id INTEGER REFERENCES address_book(id)"),
+        ("purchase_requests", "address_book_id", "ALTER TABLE purchase_requests ADD COLUMN IF NOT EXISTS address_book_id INTEGER REFERENCES address_book(id)"),
+        ("purchase_orders", "address_book_id", "ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS address_book_id INTEGER REFERENCES address_book(id)"),
+        ("item_master", "primary_address_book_id", "ALTER TABLE item_master ADD COLUMN IF NOT EXISTS primary_address_book_id INTEGER REFERENCES address_book(id)"),
+        ("item_aliases", "address_book_id", "ALTER TABLE item_aliases ADD COLUMN IF NOT EXISTS address_book_id INTEGER REFERENCES address_book(id)"),
+        ("tool_purchases", "address_book_id", "ALTER TABLE tool_purchases ADD COLUMN IF NOT EXISTS address_book_id INTEGER REFERENCES address_book(id)"),
+        ("tools", "vendor_address_book_id", "ALTER TABLE tools ADD COLUMN IF NOT EXISTS vendor_address_book_id INTEGER REFERENCES address_book(id)"),
+        ("goods_receipt_extra_costs", "address_book_id", "ALTER TABLE goods_receipt_extra_costs ADD COLUMN IF NOT EXISTS address_book_id INTEGER REFERENCES address_book(id)"),
+        ("journal_entry_lines", "address_book_id", "ALTER TABLE journal_entry_lines ADD COLUMN IF NOT EXISTS address_book_id INTEGER REFERENCES address_book(id)"),
     ]
 
     with engine.connect() as conn:
@@ -191,14 +203,13 @@ app.include_router(images.router, prefix="/api/images", tags=["Images"])
 app.include_router(otp.router, prefix="/api/otp", tags=["OTP"])
 app.include_router(admin.router, prefix="/api", tags=["Admin"])
 app.include_router(document_types.router, prefix="/api/document-types", tags=["Document Types"])
-app.include_router(vendors.router, prefix="/api/vendors", tags=["Vendors"])
+# REMOVED: Vendor API - Use Address Book with search_type='V' instead
+# app.include_router(vendors.router, prefix="/api/vendors", tags=["Vendors"])
 app.include_router(plans.router, prefix="/api", tags=["Plans"])
 app.include_router(companies.router, prefix="/api", tags=["Companies"])
-app.include_router(clients.router, prefix="/api", tags=["Clients"])
 app.include_router(branches.router, prefix="/api", tags=["Branches"])
 app.include_router(projects.router, prefix="/api", tags=["Projects"])
 app.include_router(operators.router, prefix="/api", tags=["Operators"])
-app.include_router(technicians.router, prefix="/api", tags=["Technicians"])
 app.include_router(handheld_devices.router, prefix="/api", tags=["HandHeld Devices"])
 app.include_router(assets.router, prefix="/api/assets", tags=["Assets"])
 app.include_router(attendance.router, prefix="/api", tags=["Attendance"])
@@ -240,6 +251,12 @@ app.include_router(tools.router, prefix="/api", tags=["Tools Management"])
 
 # Disposals Router
 app.include_router(disposals.router, prefix="/api", tags=["Disposals"])
+
+# Address Book Router (Oracle JDE F0101 equivalent)
+app.include_router(address_book.router, prefix="/api", tags=["Address Book"])
+
+# Clients Router
+app.include_router(clients.router, prefix="/api/clients", tags=["Clients"])
 
 @app.get("/")
 async def root():

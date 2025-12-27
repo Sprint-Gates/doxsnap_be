@@ -12,7 +12,8 @@ from sqlalchemy import or_
 import logging
 
 from app.models import (
-    AccountType, Account, Warehouse, ItemCategory
+    AccountType, Account, Warehouse, ItemCategory, Client, Site, Company,
+    AddressBook, BusinessUnit, DefaultAccountMapping
 )
 
 logger = logging.getLogger(__name__)
@@ -61,6 +62,7 @@ DEFAULT_ACCOUNTS = [
     {"code": "2100", "name": "Current Liabilities", "type_code": "LIABILITY", "is_header": True, "parent_code": "2000"},
     {"code": "2110", "name": "Accounts Payable", "type_code": "LIABILITY", "is_header": True, "parent_code": "2100"},
     {"code": "2111", "name": "Trade Payables", "type_code": "LIABILITY", "parent_code": "2110", "is_control_account": True},
+    {"code": "2115", "name": "Goods Received Not Invoiced (GRNI)", "type_code": "LIABILITY", "parent_code": "2110", "description": "Accrual for goods received but not yet invoiced"},
     {"code": "2120", "name": "Accrued Expenses", "type_code": "LIABILITY", "parent_code": "2100"},
     {"code": "2130", "name": "Unearned Revenue", "type_code": "LIABILITY", "parent_code": "2100"},
     {"code": "2140", "name": "Taxes Payable", "type_code": "LIABILITY", "is_header": True, "parent_code": "2100"},
@@ -124,6 +126,75 @@ DEFAULT_ITEM_CATEGORIES = [
     {"code": "LGH", "name": "Lighting", "sort_order": 6},
     {"code": "SAN", "name": "Sanitary", "sort_order": 7},
     {"code": "HVC", "name": "HVAC", "sort_order": 8},
+]
+
+
+# =============================================================================
+# DEFAULT ACCOUNT MAPPINGS
+# =============================================================================
+
+DEFAULT_ACCOUNT_MAPPINGS = [
+    # Goods Receipt / PO Receiving - DR: Inventory, CR: GRNI
+    {
+        "transaction_type": "po_receive_inventory",
+        "category": None,
+        "debit_account_code": "1140",  # Inventory
+        "credit_account_code": "2115",  # GRNI
+        "description": "Goods Receipt - Inventory items received"
+    },
+    {
+        "transaction_type": "inventory_increase",
+        "category": None,
+        "debit_account_code": "1140",  # Inventory
+        "credit_account_code": "2115",  # GRNI
+        "description": "Inventory increase from receiving"
+    },
+    # Invoice matching - clear GRNI to AP
+    {
+        "transaction_type": "invoice_match",
+        "category": None,
+        "debit_account_code": "2115",  # GRNI
+        "credit_account_code": "2111",  # Trade Payables
+        "description": "Invoice matched to GRN - clear GRNI to AP"
+    },
+    # Inventory adjustments
+    {
+        "transaction_type": "inventory_adjustment_increase",
+        "category": None,
+        "debit_account_code": "1140",  # Inventory
+        "credit_account_code": "5121",  # Spare Parts Used (variance)
+        "description": "Inventory adjustment - increase"
+    },
+    {
+        "transaction_type": "inventory_adjustment_decrease",
+        "category": None,
+        "debit_account_code": "5121",  # Spare Parts Used
+        "credit_account_code": "1140",  # Inventory
+        "description": "Inventory adjustment - decrease"
+    },
+    # Work order parts consumption
+    {
+        "transaction_type": "wo_parts_consumption",
+        "category": None,
+        "debit_account_code": "5121",  # Spare Parts Used
+        "credit_account_code": "1140",  # Inventory
+        "description": "Work order - spare parts consumed"
+    },
+    # Petty cash
+    {
+        "transaction_type": "petty_cash_expense",
+        "category": None,
+        "debit_account_code": "5250",  # Office Supplies (default expense)
+        "credit_account_code": "1111",  # Petty Cash
+        "description": "Petty cash expense"
+    },
+    {
+        "transaction_type": "petty_cash_replenishment",
+        "category": None,
+        "debit_account_code": "1111",  # Petty Cash
+        "credit_account_code": "1121",  # Main Bank Account
+        "description": "Petty cash replenishment"
+    },
 ]
 
 
@@ -291,14 +362,330 @@ def seed_item_categories(company_id: int, db: Session) -> dict:
     return stats
 
 
+def seed_account_mappings(company_id: int, db: Session) -> dict:
+    """
+    Create default account mappings for a company.
+
+    These mappings define which accounts are used for automatic journal entries
+    when processing transactions like goods receipts, invoices, etc.
+
+    Returns:
+        dict with statistics about what was created
+    """
+    stats = {
+        "created": [],
+        "skipped": [],
+        "errors": []
+    }
+
+    # Get accounts by code for this company
+    accounts = db.query(Account).filter(Account.company_id == company_id).all()
+    accounts_by_code = {acc.code: acc for acc in accounts}
+
+    for mapping_data in DEFAULT_ACCOUNT_MAPPINGS:
+        # Check if mapping already exists
+        existing = db.query(DefaultAccountMapping).filter(
+            DefaultAccountMapping.company_id == company_id,
+            DefaultAccountMapping.transaction_type == mapping_data["transaction_type"],
+            DefaultAccountMapping.category == mapping_data["category"]
+        ).first()
+
+        if existing:
+            stats["skipped"].append(mapping_data["transaction_type"])
+            continue
+
+        # Get debit and credit accounts
+        debit_account = accounts_by_code.get(mapping_data["debit_account_code"])
+        credit_account = accounts_by_code.get(mapping_data["credit_account_code"])
+
+        if not debit_account:
+            error_msg = f"{mapping_data['transaction_type']}: Debit account {mapping_data['debit_account_code']} not found"
+            stats["errors"].append(error_msg)
+            logger.warning(error_msg)
+            continue
+
+        if not credit_account:
+            error_msg = f"{mapping_data['transaction_type']}: Credit account {mapping_data['credit_account_code']} not found"
+            stats["errors"].append(error_msg)
+            logger.warning(error_msg)
+            continue
+
+        # Create the mapping
+        mapping = DefaultAccountMapping(
+            company_id=company_id,
+            transaction_type=mapping_data["transaction_type"],
+            category=mapping_data["category"],
+            debit_account_id=debit_account.id,
+            credit_account_id=credit_account.id,
+            description=mapping_data["description"],
+            is_active=True
+        )
+        db.add(mapping)
+        stats["created"].append(mapping_data["transaction_type"])
+
+    return stats
+
+
+def generate_address_number(company_id: int, db: Session) -> str:
+    """
+    Generate the next sequential address number for a company.
+    Format: 8-digit zero-padded number (e.g., "00000001")
+    """
+    # Get the highest address number for this company
+    last_entry = db.query(AddressBook).filter(
+        AddressBook.company_id == company_id
+    ).order_by(AddressBook.address_number.desc()).first()
+
+    if last_entry and last_entry.address_number:
+        try:
+            next_num = int(last_entry.address_number) + 1
+        except ValueError:
+            next_num = 1
+    else:
+        next_num = 1
+
+    return f"{next_num:08d}"
+
+
+def seed_default_client_and_site(company_id: int, db: Session) -> dict:
+    """
+    Create a default client and site for a company using Address Book.
+
+    This creates:
+    1. Address Book entry (type 'C' - Customer) as the master record
+    2. Legacy Client record linked to Address Book (for backward compatibility)
+    3. Address Book entry (type 'CB' - Branch) for the site
+    4. Legacy Site record linked to Address Book (for backward compatibility)
+
+    Each Address Book entry also gets a linked Business Unit for cost tracking.
+
+    Returns:
+        dict with the created entries info
+    """
+    result = {
+        "address_book_customer": None,
+        "address_book_branch": None,
+        "client": None,
+        "site": None
+    }
+
+    # Get company info for naming
+    company = db.query(Company).filter(Company.id == company_id).first()
+    if not company:
+        logger.warning(f"Company {company_id} not found for seeding client/site")
+        return result
+
+    # Check if Address Book customer entry already exists
+    existing_ab_customer = db.query(AddressBook).filter(
+        AddressBook.company_id == company_id,
+        AddressBook.search_type == 'C'
+    ).first()
+
+    if existing_ab_customer:
+        result["address_book_customer"] = {
+            "created": False,
+            "id": existing_ab_customer.id,
+            "address_number": existing_ab_customer.address_number,
+            "name": existing_ab_customer.alpha_name
+        }
+        ab_customer = existing_ab_customer
+    else:
+        # Generate address number for customer
+        customer_address_number = generate_address_number(company_id, db)
+
+        # Create Business Unit for the customer
+        customer_bu = BusinessUnit(
+            company_id=company_id,
+            code=customer_address_number,
+            name=f"{company.name} - Main Operations",
+            description="Default customer business unit",
+            is_active=True
+        )
+        db.add(customer_bu)
+        db.flush()
+
+        # Create Address Book entry for Customer (type C)
+        ab_customer = AddressBook(
+            company_id=company_id,
+            address_number=customer_address_number,
+            search_type='C',  # Customer
+            alpha_name=f"{company.name} - Main Operations",
+            mailing_name=company.name,
+            tax_id=company.tax_number,
+            address_line_1=company.address,
+            city=company.city,
+            country=company.country,
+            phone_primary=company.phone,
+            email=company.email,
+            business_unit_id=customer_bu.id,
+            is_active=True,
+            notes="Default customer created during company setup"
+        )
+        db.add(ab_customer)
+        db.flush()
+
+        result["address_book_customer"] = {
+            "created": True,
+            "id": ab_customer.id,
+            "address_number": ab_customer.address_number,
+            "name": ab_customer.alpha_name,
+            "business_unit_id": customer_bu.id
+        }
+        logger.info(f"Created Address Book customer '{ab_customer.alpha_name}' (#{ab_customer.address_number}) for company {company_id}")
+
+    # Check if legacy client already exists
+    existing_client = db.query(Client).filter(
+        Client.company_id == company_id
+    ).first()
+
+    if existing_client:
+        result["client"] = {
+            "created": False,
+            "client_id": existing_client.id,
+            "name": existing_client.name
+        }
+        client = existing_client
+        # Link to Address Book if not already linked
+        if not existing_client.address_book_id and ab_customer:
+            existing_client.address_book_id = ab_customer.id
+            db.flush()
+    else:
+        # Create legacy Client linked to Address Book
+        client = Client(
+            company_id=company_id,
+            name=ab_customer.alpha_name,
+            code=ab_customer.address_number,
+            email=company.email,
+            phone=company.phone,
+            address=company.address,
+            city=company.city,
+            country=company.country,
+            contact_person="Main Office",
+            address_book_id=ab_customer.id,
+            is_active=True
+        )
+        db.add(client)
+        db.flush()
+        result["client"] = {
+            "created": True,
+            "client_id": client.id,
+            "name": client.name,
+            "address_book_id": ab_customer.id
+        }
+        logger.info(f"Created legacy client '{client.name}' linked to Address Book #{ab_customer.address_number}")
+
+    # Check if Address Book branch entry already exists
+    existing_ab_branch = db.query(AddressBook).filter(
+        AddressBook.company_id == company_id,
+        AddressBook.search_type == 'CB',
+        AddressBook.parent_address_book_id == ab_customer.id
+    ).first()
+
+    if existing_ab_branch:
+        result["address_book_branch"] = {
+            "created": False,
+            "id": existing_ab_branch.id,
+            "address_number": existing_ab_branch.address_number,
+            "name": existing_ab_branch.alpha_name
+        }
+        ab_branch = existing_ab_branch
+    else:
+        # Generate address number for branch
+        branch_address_number = generate_address_number(company_id, db)
+
+        # Create Business Unit for the branch/site
+        branch_bu = BusinessUnit(
+            company_id=company_id,
+            code=branch_address_number,
+            name="Headquarters",
+            description="Default headquarters site",
+            is_active=True
+        )
+        db.add(branch_bu)
+        db.flush()
+
+        # Create Address Book entry for Branch (type CB)
+        ab_branch = AddressBook(
+            company_id=company_id,
+            address_number=branch_address_number,
+            search_type='CB',  # Customer Branch
+            alpha_name="Headquarters",
+            mailing_name="Headquarters",
+            address_line_1=company.address,
+            city=company.city,
+            country=company.country,
+            phone_primary=company.phone,
+            email=company.email,
+            parent_address_book_id=ab_customer.id,  # Link to parent customer
+            business_unit_id=branch_bu.id,
+            is_active=True,
+            notes="Default headquarters created during company setup"
+        )
+        db.add(ab_branch)
+        db.flush()
+
+        result["address_book_branch"] = {
+            "created": True,
+            "id": ab_branch.id,
+            "address_number": ab_branch.address_number,
+            "name": ab_branch.alpha_name,
+            "parent_id": ab_customer.id,
+            "business_unit_id": branch_bu.id
+        }
+        logger.info(f"Created Address Book branch '{ab_branch.alpha_name}' (#{ab_branch.address_number}) for company {company_id}")
+
+    # Check if legacy site already exists
+    existing_site = db.query(Site).filter(
+        Site.client_id == client.id
+    ).first()
+
+    if existing_site:
+        result["site"] = {
+            "created": False,
+            "site_id": existing_site.id,
+            "name": existing_site.name
+        }
+        # Link to Address Book if not already linked
+        if not existing_site.address_book_id and ab_branch:
+            existing_site.address_book_id = ab_branch.id
+            db.flush()
+    else:
+        # Create legacy Site linked to Address Book
+        site = Site(
+            client_id=client.id,
+            name=ab_branch.alpha_name,
+            code=ab_branch.address_number,
+            address=company.address,
+            city=company.city,
+            country=company.country,
+            email=company.email,
+            phone=company.phone,
+            address_book_id=ab_branch.id,
+            is_active=True
+        )
+        db.add(site)
+        db.flush()
+        result["site"] = {
+            "created": True,
+            "site_id": site.id,
+            "name": site.name,
+            "address_book_id": ab_branch.id
+        }
+        logger.info(f"Created legacy site '{site.name}' linked to Address Book #{ab_branch.address_number}")
+
+    return result
+
+
 def seed_company_defaults(company_id: int, db: Session) -> dict:
     """
     Seed all default data for a new company.
 
     This includes:
     - Chart of Accounts (Account Types and Accounts)
+    - Default Account Mappings (for automatic journal entries)
     - Main Warehouse
     - Default Item Categories
+    - Default Client and Site (for cost allocations)
 
     Args:
         company_id: The company ID to seed data for
@@ -311,8 +698,10 @@ def seed_company_defaults(company_id: int, db: Session) -> dict:
 
     results = {
         "chart_of_accounts": None,
+        "account_mappings": None,
         "warehouse": None,
         "item_categories": None,
+        "client_and_site": None,
         "errors": []
     }
 
@@ -324,6 +713,15 @@ def seed_company_defaults(company_id: int, db: Session) -> dict:
     except Exception as e:
         logger.error(f"Error seeding chart of accounts for company {company_id}: {e}")
         results["errors"].append(f"Chart of accounts: {str(e)}")
+
+    try:
+        # Seed Account Mappings (must be after chart of accounts)
+        mapping_stats = seed_account_mappings(company_id, db)
+        results["account_mappings"] = mapping_stats
+        logger.info(f"Account mappings seeded for company {company_id}: {mapping_stats}")
+    except Exception as e:
+        logger.error(f"Error seeding account mappings for company {company_id}: {e}")
+        results["errors"].append(f"Account mappings: {str(e)}")
 
     try:
         # Seed Main Warehouse
@@ -342,5 +740,14 @@ def seed_company_defaults(company_id: int, db: Session) -> dict:
     except Exception as e:
         logger.error(f"Error seeding item categories for company {company_id}: {e}")
         results["errors"].append(f"Item categories: {str(e)}")
+
+    try:
+        # Seed Default Client and Site (required for cost allocations)
+        client_site_result = seed_default_client_and_site(company_id, db)
+        results["client_and_site"] = client_site_result
+        logger.info(f"Client and site seeded for company {company_id}: {client_site_result}")
+    except Exception as e:
+        logger.error(f"Error seeding client and site for company {company_id}: {e}")
+        results["errors"].append(f"Client and site: {str(e)}")
 
     return results

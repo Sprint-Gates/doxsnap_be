@@ -19,8 +19,8 @@ from app.database import get_db
 from app.models import (
     User, WorkOrder, WorkOrderTimeEntry, WorkOrderChecklistItem, WorkOrderSnapshot,
     WorkOrderCompletion, Technician, Equipment, SubEquipment,
-    Branch, Floor, Room, Project, work_order_technicians, HandHeldDevice,
-    ItemMaster, ItemStock, ItemLedger, Account
+    Branch, Floor, Room, Project, work_order_technicians, work_order_technicians_ab,
+    HandHeldDevice, ItemMaster, ItemStock, ItemLedger, Account, AddressBook
 )
 from app.services.journal_posting import JournalPostingService
 from app.api.auth import verify_token
@@ -122,7 +122,8 @@ class WorkOrderCreate(BaseModel):
     is_billable: Optional[bool] = False
     labor_markup_percent: Optional[float] = 0
     parts_markup_percent: Optional[float] = 0
-    technician_ids: Optional[List[int]] = []
+    technician_ids: Optional[List[int]] = []  # Legacy - use employee_ids instead
+    employee_ids: Optional[List[int]] = []  # AddressBook IDs for employees
     assigned_hhd_id: Optional[int] = None  # Direct HHD assignment
 
 
@@ -401,14 +402,16 @@ def work_order_to_response(wo: WorkOrder, include_details: bool = False, db: Ses
     else:
         response["assigned_hhd"] = None
 
-    # Add assigned technicians count
+    # Add assigned technicians count (legacy)
     response["technicians_count"] = len(wo.assigned_technicians)
+    # Add assigned employees count (AddressBook-based)
+    response["employees_count"] = len(wo.assigned_employees) if hasattr(wo, 'assigned_employees') else 0
     response["time_entries_count"] = len(wo.time_entries)
     response["checklist_items_count"] = len(wo.checklist_items)
     response["checklist_completed_count"] = sum(1 for item in wo.checklist_items if item.is_completed)
 
     if include_details:
-        # Add full technician list
+        # Add full technician list (legacy)
         response["technicians"] = [
             {
                 "id": t.id,
@@ -417,6 +420,20 @@ def work_order_to_response(wo: WorkOrder, include_details: bool = False, db: Ses
                 "specialization": t.specialization
             }
             for t in wo.assigned_technicians
+        ]
+
+        # Add full employee list (AddressBook-based)
+        response["employees"] = [
+            {
+                "address_book_id": e.id,
+                "address_number": e.address_number,
+                "name": e.alpha_name,
+                "employee_id": e.employee_id,
+                "specialization": e.specialization,
+                "phone": e.phone_primary,
+                "email": e.email
+            }
+            for e in (wo.assigned_employees if hasattr(wo, 'assigned_employees') else [])
         ]
 
         # Add time entries
@@ -518,6 +535,7 @@ async def get_work_orders(
             joinedload(WorkOrder.project),
             joinedload(WorkOrder.assigned_hhd).joinedload(HandHeldDevice.assigned_technician),
             joinedload(WorkOrder.assigned_technicians),
+            joinedload(WorkOrder.assigned_employees),
             joinedload(WorkOrder.time_entries).joinedload(WorkOrderTimeEntry.technician),
             joinedload(WorkOrder.checklist_items)
         )
@@ -707,6 +725,33 @@ async def create_work_order(
                     work_order_technicians.insert().values(
                         work_order_id=wo.id,
                         technician_id=tech.id,
+                        hourly_rate=hourly_rate
+                    )
+                )
+
+        # Assign employees (AddressBook) if provided
+        if data.employee_ids:
+            employees = db.query(AddressBook).filter(
+                AddressBook.id.in_(data.employee_ids),
+                AddressBook.company_id == user.company_id,
+                AddressBook.search_type == 'E',  # Must be Employee type
+                AddressBook.is_active == True
+            ).all()
+
+            for emp in employees:
+                # Get hourly rate from employee's salary config
+                hourly_rate = None
+                if emp.hourly_rate:
+                    hourly_rate = emp.hourly_rate
+                elif emp.base_salary and emp.working_hours_per_day and emp.working_days_per_month:
+                    hours_per_month = float(emp.working_hours_per_day) * float(emp.working_days_per_month)
+                    if hours_per_month > 0:
+                        hourly_rate = float(emp.base_salary) / hours_per_month
+
+                db.execute(
+                    work_order_technicians_ab.insert().values(
+                        work_order_id=wo.id,
+                        address_book_id=emp.id,
                         hourly_rate=hourly_rate
                     )
                 )
@@ -1278,6 +1323,194 @@ async def unassign_technician(
     db.commit()
 
     return {"success": True, "message": "Technician removed from work order"}
+
+
+# ============ Employee Assignment Endpoints (AddressBook-based) ============
+
+@router.post("/work-orders/{wo_id}/employees/{address_book_id}")
+async def assign_employee(
+    wo_id: int,
+    address_book_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Assign an employee (AddressBook entry with search_type='E') to a work order"""
+    if not user.company_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No company associated")
+
+    wo = db.query(WorkOrder).filter(
+        WorkOrder.id == wo_id,
+        WorkOrder.company_id == user.company_id
+    ).first()
+    if not wo:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Work order not found")
+
+    # Get employee from AddressBook
+    employee = db.query(AddressBook).filter(
+        AddressBook.id == address_book_id,
+        AddressBook.company_id == user.company_id,
+        AddressBook.search_type == 'E',  # Must be Employee type
+        AddressBook.is_active == True
+    ).first()
+    if not employee:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Employee not found")
+
+    # Check if already assigned
+    existing = db.execute(
+        work_order_technicians_ab.select().where(
+            and_(
+                work_order_technicians_ab.c.work_order_id == wo_id,
+                work_order_technicians_ab.c.address_book_id == address_book_id
+            )
+        )
+    ).first()
+
+    if existing:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Employee already assigned")
+
+    # Calculate hourly rate from AddressBook salary fields
+    hourly_rate = None
+    if employee.hourly_rate:
+        hourly_rate = employee.hourly_rate
+    elif employee.base_salary and employee.working_hours_per_day and employee.working_days_per_month:
+        hours_per_month = float(employee.working_hours_per_day) * float(employee.working_days_per_month)
+        if hours_per_month > 0:
+            hourly_rate = float(employee.base_salary) / hours_per_month
+
+    db.execute(
+        work_order_technicians_ab.insert().values(
+            work_order_id=wo_id,
+            address_book_id=address_book_id,
+            hourly_rate=hourly_rate
+        )
+    )
+    db.commit()
+
+    return {"success": True, "message": f"Employee {employee.alpha_name} assigned to work order"}
+
+
+@router.delete("/work-orders/{wo_id}/employees/{address_book_id}")
+async def unassign_employee(
+    wo_id: int,
+    address_book_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Remove an employee from a work order"""
+    if not user.company_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No company associated")
+
+    wo = db.query(WorkOrder).filter(
+        WorkOrder.id == wo_id,
+        WorkOrder.company_id == user.company_id
+    ).first()
+    if not wo:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Work order not found")
+
+    db.execute(
+        work_order_technicians_ab.delete().where(
+            and_(
+                work_order_technicians_ab.c.work_order_id == wo_id,
+                work_order_technicians_ab.c.address_book_id == address_book_id
+            )
+        )
+    )
+    db.commit()
+
+    return {"success": True, "message": "Employee removed from work order"}
+
+
+@router.get("/work-orders/{wo_id}/employees")
+async def get_work_order_employees(
+    wo_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get all employees assigned to a work order (AddressBook-based)"""
+    if not user.company_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No company associated")
+
+    wo = db.query(WorkOrder).filter(
+        WorkOrder.id == wo_id,
+        WorkOrder.company_id == user.company_id
+    ).first()
+    if not wo:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Work order not found")
+
+    # Get employees from the junction table with their details
+    employees = db.query(
+        AddressBook,
+        work_order_technicians_ab.c.assigned_at,
+        work_order_technicians_ab.c.hours_worked,
+        work_order_technicians_ab.c.hourly_rate,
+        work_order_technicians_ab.c.notes
+    ).join(
+        work_order_technicians_ab,
+        AddressBook.id == work_order_technicians_ab.c.address_book_id
+    ).filter(
+        work_order_technicians_ab.c.work_order_id == wo_id
+    ).all()
+
+    return [
+        {
+            "address_book_id": emp.AddressBook.id,
+            "address_number": emp.AddressBook.address_number,
+            "name": emp.AddressBook.alpha_name,
+            "employee_id": emp.AddressBook.employee_id,
+            "specialization": emp.AddressBook.specialization,
+            "phone": emp.AddressBook.phone_primary,
+            "email": emp.AddressBook.email,
+            "assigned_at": emp.assigned_at.isoformat() if emp.assigned_at else None,
+            "hours_worked": float(emp.hours_worked) if emp.hours_worked else None,
+            "hourly_rate": float(emp.hourly_rate) if emp.hourly_rate else None,
+            "notes": emp.notes
+        }
+        for emp in employees
+    ]
+
+
+@router.patch("/work-orders/{wo_id}/employees/{address_book_id}")
+async def update_employee_assignment(
+    wo_id: int,
+    address_book_id: int,
+    hours_worked: Optional[float] = None,
+    hourly_rate: Optional[float] = None,
+    notes: Optional[str] = None,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Update employee assignment details (hours, rate, notes)"""
+    if not user.company_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No company associated")
+
+    wo = db.query(WorkOrder).filter(
+        WorkOrder.id == wo_id,
+        WorkOrder.company_id == user.company_id
+    ).first()
+    if not wo:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Work order not found")
+
+    # Build update values
+    update_values = {}
+    if hours_worked is not None:
+        update_values["hours_worked"] = hours_worked
+    if hourly_rate is not None:
+        update_values["hourly_rate"] = hourly_rate
+    if notes is not None:
+        update_values["notes"] = notes
+
+    if update_values:
+        db.execute(
+            work_order_technicians_ab.update().where(
+                and_(
+                    work_order_technicians_ab.c.work_order_id == wo_id,
+                    work_order_technicians_ab.c.address_book_id == address_book_id
+                )
+            ).values(**update_values)
+        )
+        db.commit()
+
+    return {"success": True, "message": "Employee assignment updated"}
 
 
 # ============ Work Order Item Issue (from HHD via Item Master) ============

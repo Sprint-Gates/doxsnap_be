@@ -12,7 +12,7 @@ from app.database import get_db
 from app.models import (
     User, WorkOrder, Technician, WorkOrderTimeEntry, Branch,
     work_order_technicians, WorkOrderSparePart, Contract, Client,
-    Vendor, ProcessedImage, ItemMaster, ItemStock, ItemTransfer,
+    AddressBook, ProcessedImage, ItemMaster, ItemStock, ItemTransfer,
     ItemLedger, Warehouse, PettyCashFund, PettyCashTransaction
 )
 from app.api.auth import get_current_user
@@ -431,12 +431,13 @@ async def get_procurement_dashboard(
     else:
         end_date = datetime(year, month + 1, 1)
 
-    # ===== VENDOR STATISTICS =====
+    # ===== VENDOR STATISTICS (from Address Book) =====
     vendor_stats = db.query(
-        func.count(Vendor.id).label('total_vendors'),
-        func.sum(case((Vendor.is_active == True, 1), else_=0)).label('active_vendors')
+        func.count(AddressBook.id).label('total_vendors'),
+        func.sum(case((AddressBook.is_active == True, 1), else_=0)).label('active_vendors')
     ).filter(
-        Vendor.company_id == company_id
+        AddressBook.company_id == company_id,
+        AddressBook.search_type == 'V'
     ).first()
 
     # ===== INVOICE STATISTICS =====
@@ -571,17 +572,18 @@ async def get_procurement_dashboard(
             "issuedValue": decimal_to_float(month_ledger.issued_value) or 0
         })
 
-    # ===== TOP VENDORS BY INVOICE COUNT =====
+    # ===== TOP VENDORS BY INVOICE COUNT (from Address Book) =====
     top_vendors = db.query(
-        Vendor.id,
-        Vendor.name,
+        AddressBook.id,
+        AddressBook.alpha_name.label('name'),
         func.count(ProcessedImage.id).label('invoice_count')
     ).outerjoin(
-        ProcessedImage, ProcessedImage.vendor_id == Vendor.id
+        ProcessedImage, ProcessedImage.address_book_id == AddressBook.id
     ).filter(
-        Vendor.company_id == company_id,
-        Vendor.is_active == True
-    ).group_by(Vendor.id, Vendor.name).order_by(
+        AddressBook.company_id == company_id,
+        AddressBook.search_type == 'V',
+        AddressBook.is_active == True
+    ).group_by(AddressBook.id, AddressBook.alpha_name).order_by(
         func.count(ProcessedImage.id).desc()
     ).limit(5).all()
 

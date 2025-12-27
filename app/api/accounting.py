@@ -14,7 +14,8 @@ from app.database import get_db
 from app.models import (
     User, Company, Site, BusinessUnit,
     AccountType, Account, FiscalPeriod, JournalEntry, JournalEntryLine,
-    AccountBalance, DefaultAccountMapping
+    AccountBalance, DefaultAccountMapping,
+    GoodsReceipt, GoodsReceiptLine, PurchaseOrder, PurchaseOrderLine, ItemStock, ItemLedger
 )
 from app.schemas import (
     AccountType as AccountTypeSchema, AccountTypeCreate, AccountTypeUpdate,
@@ -625,7 +626,7 @@ def create_journal_entry(
             site_id=line.site_id,
             contract_id=line.contract_id,
             work_order_id=line.work_order_id,
-            vendor_id=line.vendor_id,
+            address_book_id=line.vendor_id,  # Schema uses vendor_id, model uses address_book_id
             project_id=line.project_id,
             technician_id=line.technician_id,
             line_number=i + 1
@@ -703,6 +704,54 @@ def reverse_journal_entry(
     if original.reversed_by_id:
         raise HTTPException(status_code=400, detail="Entry has already been reversed")
 
+    # ==========================================================================
+    # SPECIAL HANDLING FOR GRN-LINKED JOURNAL ENTRIES
+    # When reversing a JE that came from a GRN, we need to also reverse:
+    # 1. The GRN status -> 'cancelled'
+    # 2. The inventory (ItemStock and ItemLedger)
+    # 3. The PO line received quantities
+    # ==========================================================================
+    grn_to_reverse = None
+    if original.source_type == 'goods_receipt' and original.source_id:
+        grn_to_reverse = db.query(GoodsReceipt).options(
+            joinedload(GoodsReceipt.lines).joinedload(GoodsReceiptLine.item),
+            joinedload(GoodsReceipt.lines).joinedload(GoodsReceiptLine.po_line),
+            joinedload(GoodsReceipt.purchase_order).joinedload(PurchaseOrder.lines)
+        ).filter(
+            GoodsReceipt.id == original.source_id,
+            GoodsReceipt.company_id == company_id
+        ).first()
+
+        if grn_to_reverse and grn_to_reverse.status == 'accepted':
+            # Validate stock availability before reversal
+            insufficient_stock = []
+            for grn_line in grn_to_reverse.lines:
+                if not grn_line.item_id:
+                    continue
+                warehouse_id = grn_line.warehouse_id or grn_to_reverse.warehouse_id
+                if not warehouse_id:
+                    continue
+                qty_to_reverse = float(grn_line.quantity_accepted or grn_line.quantity_received or 0)
+                if qty_to_reverse <= 0:
+                    continue
+
+                item_stock = db.query(ItemStock).filter(
+                    ItemStock.item_id == grn_line.item_id,
+                    ItemStock.warehouse_id == warehouse_id
+                ).first()
+
+                current_qty = float(item_stock.quantity_on_hand or 0) if item_stock else 0
+                if current_qty < qty_to_reverse:
+                    item = grn_line.item
+                    item_desc = item.description if item else f"Item #{grn_line.item_id}"
+                    insufficient_stock.append(f"{item_desc}: need {qty_to_reverse}, only {current_qty} in stock")
+
+            if insufficient_stock:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Cannot reverse - insufficient stock for items: {', '.join(insufficient_stock)}"
+                )
+
     rev_date = reversal_date or date.today()
 
     # Find fiscal period for reversal
@@ -752,7 +801,7 @@ def reverse_journal_entry(
             site_id=orig_line.site_id,
             contract_id=orig_line.contract_id,
             work_order_id=orig_line.work_order_id,
-            vendor_id=orig_line.vendor_id,
+            address_book_id=orig_line.address_book_id,
             project_id=orig_line.project_id,
             technician_id=orig_line.technician_id,
             line_number=orig_line.line_number
@@ -761,14 +810,125 @@ def reverse_journal_entry(
 
     # Mark original as reversed
     original.reversed_by_id = reversal.id
+    original.status = "reversed"
 
     # Update account balances
     update_account_balances(db, reversal)
 
+    # ==========================================================================
+    # REVERSE GRN IF APPLICABLE
+    # ==========================================================================
+    if grn_to_reverse and grn_to_reverse.status == 'accepted':
+        po = grn_to_reverse.purchase_order
+        po_lines_map = {line.id: line for line in po.lines} if po else {}
+
+        for grn_line in grn_to_reverse.lines:
+            qty_to_reverse = float(grn_line.quantity_accepted or grn_line.quantity_received or 0)
+            if qty_to_reverse <= 0:
+                continue
+
+            # Reverse PO line received quantity
+            po_line = po_lines_map.get(grn_line.po_line_id) if grn_line.po_line_id else None
+            if po_line:
+                current_received = float(po_line.quantity_received or 0)
+                new_received = max(0, current_received - qty_to_reverse)
+                po_line.quantity_received = Decimal(str(new_received))
+
+                # Update PO line status
+                qty_ordered = float(po_line.quantity_ordered or 0)
+                if new_received <= 0:
+                    po_line.receive_status = 'pending'
+                elif new_received >= qty_ordered:
+                    po_line.receive_status = 'received'
+                else:
+                    po_line.receive_status = 'partial'
+
+            # Reverse inventory (ItemStock and ItemLedger)
+            if grn_line.item_id:
+                warehouse_id = grn_line.warehouse_id or grn_to_reverse.warehouse_id
+                if warehouse_id:
+                    item_stock = db.query(ItemStock).filter(
+                        ItemStock.item_id == grn_line.item_id,
+                        ItemStock.warehouse_id == warehouse_id
+                    ).first()
+
+                    if item_stock:
+                        current_qty = float(item_stock.quantity_on_hand or 0)
+                        new_qty = current_qty - qty_to_reverse
+                        item_stock.quantity_on_hand = Decimal(str(max(0, new_qty)))
+                        item_stock.updated_at = datetime.utcnow()
+
+                        # Create ItemLedger reversal entry
+                        today = datetime.now().strftime("%Y%m%d")
+                        tx_prefix = f"JE-REV-{today}-"
+                        last_tx = db.query(ItemLedger).filter(
+                            ItemLedger.company_id == company_id,
+                            ItemLedger.transaction_number.like(f"{tx_prefix}%")
+                        ).order_by(ItemLedger.id.desc()).first()
+
+                        next_num = 1
+                        if last_tx:
+                            try:
+                                next_num = int(last_tx.transaction_number.split("-")[-1]) + 1
+                            except:
+                                pass
+
+                        tx_number = f"{tx_prefix}{next_num:05d}"
+
+                        unit_cost = float(grn_line.unit_price or 0)
+                        total_cost = unit_cost * qty_to_reverse
+
+                        ledger_entry = ItemLedger(
+                            company_id=company_id,
+                            item_id=grn_line.item_id,
+                            transaction_type="JE_REVERSAL",
+                            transaction_number=tx_number,
+                            transaction_date=datetime.now().date(),
+                            quantity=-Decimal(str(qty_to_reverse)),
+                            unit=grn_line.unit,
+                            unit_cost=Decimal(str(unit_cost)),
+                            total_cost=-Decimal(str(total_cost)),
+                            from_warehouse_id=warehouse_id,
+                            balance_after=Decimal(str(max(0, new_qty))),
+                            notes=f"Reversal via JE {reversal.entry_number} of GRN {grn_to_reverse.grn_number}",
+                            created_by=current_user.id
+                        )
+                        db.add(ledger_entry)
+
+        # Update PO status based on remaining received quantities
+        if po:
+            all_received = all(
+                (float(l.quantity_received or 0) >= float(l.quantity_ordered or 0))
+                for l in po.lines
+            )
+            any_received = any(
+                (float(l.quantity_received or 0) > 0)
+                for l in po.lines
+            )
+
+            if all_received:
+                po.status = 'received'
+            elif any_received:
+                po.status = 'partial'
+            else:
+                # Check if PO was sent/acknowledged before
+                if po.status in ['partial', 'received']:
+                    po.status = 'acknowledged'
+
+        # Update GRN status to cancelled
+        grn_to_reverse.status = 'cancelled'
+        grn_to_reverse.reversal_journal_entry_id = reversal.id
+
+        logger.info(f"GRN {grn_to_reverse.grn_number} reversed via JE reversal {reversal.entry_number}")
+
     db.commit()
 
+    message = "Journal entry reversed successfully"
+    if grn_to_reverse:
+        message = f"Journal entry and GRN {grn_to_reverse.grn_number} reversed successfully"
+
     return {
-        "message": "Journal entry reversed successfully",
+        "message": message,
         "original_entry": original.entry_number,
         "reversal_entry": reversal.entry_number
     }
@@ -1120,6 +1280,149 @@ def get_trial_balance(
     )
 
 
+@router.post("/reports/recompute-balances")
+def recompute_account_balances(
+    year: int,
+    month: Optional[int] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Recompute account balances from journal entries for a specific period.
+
+    This endpoint recalculates all account balances from the underlying
+    journal entry lines for the specified year (and optionally month).
+    Use this to fix any discrepancies in the AccountBalance table.
+
+    Parameters:
+    - year: The fiscal year to recompute (e.g., 2025)
+    - month: Optional month (1-12). If not provided, recomputes entire year.
+
+    Returns:
+    - Summary of accounts updated with their new balances
+    """
+    company_id = get_company_id(current_user, db)
+
+    # Validate month if provided
+    if month is not None and (month < 1 or month > 12):
+        raise HTTPException(status_code=400, detail="Month must be between 1 and 12")
+
+    # Calculate date range
+    if month:
+        start_date = date(year, month, 1)
+        if month == 12:
+            end_date = date(year + 1, 1, 1)
+        else:
+            end_date = date(year, month + 1, 1)
+    else:
+        start_date = date(year, 1, 1)
+        end_date = date(year + 1, 1, 1)
+
+    # Get the fiscal period for this date range (if it exists)
+    fiscal_period = db.query(FiscalPeriod).filter(
+        FiscalPeriod.company_id == company_id,
+        FiscalPeriod.start_date <= start_date,
+        FiscalPeriod.end_date >= start_date
+    ).first()
+
+    # Clear existing account balances for this period
+    if fiscal_period:
+        deleted = db.query(AccountBalance).filter(
+            AccountBalance.company_id == company_id,
+            AccountBalance.fiscal_period_id == fiscal_period.id
+        ).delete()
+        logger.info(f"Deleted {deleted} existing AccountBalance records for period {fiscal_period.id}")
+
+    # Query all journal entry lines within the date range
+    query = db.query(
+        JournalEntryLine.account_id,
+        JournalEntryLine.site_id,
+        JournalEntryLine.business_unit_id,
+        func.sum(JournalEntryLine.debit).label('total_debit'),
+        func.sum(JournalEntryLine.credit).label('total_credit')
+    ).join(
+        JournalEntry, JournalEntryLine.journal_entry_id == JournalEntry.id
+    ).filter(
+        JournalEntry.company_id == company_id,
+        JournalEntry.status == "posted",
+        JournalEntry.entry_date >= start_date,
+        JournalEntry.entry_date < end_date
+    ).group_by(
+        JournalEntryLine.account_id,
+        JournalEntryLine.site_id,
+        JournalEntryLine.business_unit_id
+    )
+
+    results = query.all()
+
+    accounts_updated = []
+    total_entries_created = 0
+
+    for row in results:
+        # Get account details for normal balance
+        account = db.query(Account).options(
+            joinedload(Account.account_type)
+        ).filter(Account.id == row.account_id).first()
+
+        if not account:
+            continue
+
+        period_debit = float(row.total_debit or 0)
+        period_credit = float(row.total_credit or 0)
+
+        # Calculate closing balance based on normal balance
+        if account.account_type and account.account_type.normal_balance == "debit":
+            closing_balance = period_debit - period_credit
+        else:
+            closing_balance = period_credit - period_debit
+
+        # Create or update AccountBalance record if fiscal period exists
+        if fiscal_period:
+            balance = AccountBalance(
+                company_id=company_id,
+                account_id=row.account_id,
+                fiscal_period_id=fiscal_period.id,
+                site_id=row.site_id,
+                business_unit_id=row.business_unit_id,
+                period_debit=period_debit,
+                period_credit=period_credit,
+                opening_balance=0,  # Would need prior period logic
+                closing_balance=closing_balance
+            )
+            db.add(balance)
+            total_entries_created += 1
+
+        accounts_updated.append({
+            "account_code": account.code,
+            "account_name": account.name,
+            "site_id": row.site_id,
+            "business_unit_id": row.business_unit_id,
+            "period_debit": period_debit,
+            "period_credit": period_credit,
+            "closing_balance": closing_balance
+        })
+
+    db.commit()
+
+    # Calculate totals for verification
+    total_debit = sum(a["period_debit"] for a in accounts_updated)
+    total_credit = sum(a["period_credit"] for a in accounts_updated)
+
+    period_str = f"{year}-{month:02d}" if month else str(year)
+
+    return {
+        "message": f"Recomputed account balances for {period_str}",
+        "period": period_str,
+        "fiscal_period_id": fiscal_period.id if fiscal_period else None,
+        "accounts_processed": len(accounts_updated),
+        "balance_entries_created": total_entries_created,
+        "total_debit": total_debit,
+        "total_credit": total_credit,
+        "is_balanced": abs(total_debit - total_credit) < 0.01,
+        "accounts": accounts_updated
+    }
+
+
 @router.get("/reports/profit-loss", response_model=ProfitLossReport)
 def get_profit_loss(
     start_date: date,
@@ -1202,6 +1505,27 @@ def get_profit_loss(
 
         return query.all()
 
+    # Helper function to get all descendant account IDs recursively
+    def get_descendant_ids(parent_id: int, include_parent: bool = False) -> list:
+        """Get all descendant account IDs under a parent account"""
+        if not parent_id:
+            return []
+
+        descendant_ids = [parent_id] if include_parent else []
+
+        # Get direct children
+        children = db.query(Account.id).filter(
+            Account.company_id == company_id,
+            Account.parent_id == parent_id
+        ).all()
+
+        for child in children:
+            descendant_ids.append(child.id)
+            # Recursively get grandchildren
+            descendant_ids.extend(get_descendant_ids(child.id, include_parent=False))
+
+        return descendant_ids
+
     # Get parent account codes for categorization
     direct_cost_parent = db.query(Account).filter(
         Account.company_id == company_id,
@@ -1246,6 +1570,9 @@ def get_profit_loss(
     total_cost_of_sales = 0.0
 
     if direct_cost_parent:
+        # Get all descendant account IDs under 5100 (Cost of Services)
+        cost_account_ids = get_descendant_ids(direct_cost_parent.id)
+
         cost_query = db.query(
             Account.id,
             Account.code,
@@ -1263,7 +1590,7 @@ def get_profit_loss(
             )
         ).filter(
             Account.company_id == company_id,
-            Account.parent_id == direct_cost_parent.id,
+            Account.id.in_(cost_account_ids) if cost_account_ids else Account.parent_id == direct_cost_parent.id,
             Account.is_active == True,
             Account.is_header == False
         )
@@ -1309,13 +1636,14 @@ def get_profit_loss(
     operating_items = []
     total_operating_expenses = 0.0
 
-    parent_ids = []
+    # Get all descendant IDs for operating and administrative expenses
+    opex_account_ids = []
     if operating_exp_parent:
-        parent_ids.append(operating_exp_parent.id)
+        opex_account_ids.extend(get_descendant_ids(operating_exp_parent.id))
     if admin_exp_parent:
-        parent_ids.append(admin_exp_parent.id)
+        opex_account_ids.extend(get_descendant_ids(admin_exp_parent.id))
 
-    if parent_ids:
+    if opex_account_ids:
         opex_query = db.query(
             Account.id,
             Account.code,
@@ -1333,7 +1661,7 @@ def get_profit_loss(
             )
         ).filter(
             Account.company_id == company_id,
-            Account.parent_id.in_(parent_ids),
+            Account.id.in_(opex_account_ids),
             Account.is_active == True,
             Account.is_header == False
         )
@@ -1445,6 +1773,21 @@ def get_balance_sheet(
     if not all([asset_type_id, liability_type_id, equity_type_id]):
         raise HTTPException(status_code=400, detail="Chart of accounts not properly initialized")
 
+    # Helper function to get all descendant account IDs under a parent account (recursive)
+    def get_descendant_ids(parent_id: int) -> list:
+        """Get all descendant account IDs under a parent account"""
+        if not parent_id:
+            return []
+        descendant_ids = []
+        children = db.query(Account.id).filter(
+            Account.company_id == company_id,
+            Account.parent_id == parent_id
+        ).all()
+        for child in children:
+            descendant_ids.append(child.id)
+            descendant_ids.extend(get_descendant_ids(child.id))
+        return descendant_ids
+
     # Helper to get account balances
     def get_account_balances(account_type_id: int, parent_code: str = None):
         query = db.query(
@@ -1494,7 +1837,13 @@ def get_balance_sheet(
                 Account.code == parent_code
             ).first()
             if parent:
-                query = query.filter(Account.parent_id == parent.id)
+                # Get all descendant account IDs under this parent (recursive)
+                descendant_ids = get_descendant_ids(parent.id)
+                if descendant_ids:
+                    query = query.filter(Account.id.in_(descendant_ids))
+                else:
+                    # No descendants, return empty result
+                    return []
 
         query = query.group_by(
             Account.id, Account.code, Account.name, Account.parent_id, AccountType.normal_balance
@@ -1731,7 +2080,7 @@ def get_balance_sheet_diagnostic(
     company_id = get_company_id(current_user, db)
 
     # First, get the balance sheet totals
-    balance_sheet = get_balance_sheet(as_of_date, None, db, current_user)
+    balance_sheet = get_balance_sheet(as_of_date, None, None, db, current_user)
     imbalance_amount = balance_sheet.total_assets - balance_sheet.total_liabilities_and_equity
 
     # Find all unbalanced journal entries
@@ -1994,6 +2343,10 @@ def initialize_chart_of_accounts(
         {"transaction_type": "petty_cash_expense", "category": "tools", "debit": "5250", "credit": "1120", "desc": "Petty cash - tools"},
         {"transaction_type": "petty_cash_expense", "category": "materials", "debit": "5120", "credit": "1120", "desc": "Petty cash - materials"},
         {"transaction_type": "petty_cash_replenishment", "category": None, "debit": "1120", "credit": "1110", "desc": "Petty cash replenishment"},
+        # Goods Receipt (GRN) accounting
+        {"transaction_type": "po_receive_inventory", "category": None, "debit": "1140", "credit": "2110", "desc": "Goods receipt - inventory increase"},
+        {"transaction_type": "po_receive_vat", "category": None, "debit": "1130", "credit": "2110", "desc": "Goods receipt - VAT on receiving"},
+        {"transaction_type": "grni", "category": None, "debit": None, "credit": "2110", "desc": "Goods Received Not Invoiced"},
     ]
 
     for map_data in mappings_data:

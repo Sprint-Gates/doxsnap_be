@@ -10,7 +10,7 @@ from PIL import Image
 
 from app.database import get_db
 from app.schemas import ProcessedImage, ProcessedImageList
-from app.models import ProcessedImage as ProcessedImageModel, User, InvoiceItem, ItemLedger
+from app.models import ProcessedImage as ProcessedImageModel, User, InvoiceItem, ItemLedger, PurchaseOrderInvoice, PurchaseOrder
 from app.api.auth import get_current_user
 from app.services.s3 import upload_to_s3, process_image, generate_presigned_url, delete_from_s3
 from app.services.email import EmailService
@@ -254,7 +254,8 @@ class ManualDocumentCreate(BaseModel):
     """Request body for creating a manual document"""
     document_type: str = "invoice"  # invoice, receipt, purchase_order, etc.
     invoice_category: Optional[str] = None  # service, spare_parts
-    vendor_id: Optional[int] = None
+    vendor_id: Optional[int] = None  # Legacy vendor table
+    address_book_id: Optional[int] = None  # Address Book vendor (preferred)
     site_id: Optional[int] = None
     contract_id: Optional[int] = None
 
@@ -298,37 +299,64 @@ async def create_manual_document(
             detail=f"Invalid document type. Must be one of: {', '.join(valid_types)}"
         )
 
-    # Build structured data from the manual entry
+    # Build structured data from the manual entry - use nested structure matching frontend expectations
     structured_data = {
-        "supplier_name": None,
-        "invoice_number": document.document_number,
-        "invoice_date": document.document_date,
-        "due_date": document.due_date,
-        "currency": document.currency,
-        "subtotal": document.subtotal,
-        "tax": document.tax_amount,
-        "discount": document.discount_amount,
-        "total": document.total_amount,
-        "notes": document.notes,
-        "line_items": []
+        "document_info": {
+            "invoice_number": document.document_number,
+            "invoice_date": document.document_date,
+            "due_date": document.due_date,
+            "currency": document.currency or "USD"
+        },
+        "supplier": {
+            "company_name": None,
+            "company_address": None,
+            "email": None,
+            "phone": None,
+            "vendor_id": document.vendor_id,
+            "address_book_id": document.address_book_id
+        },
+        "customer": {
+            "contact_person": None,
+            "company_name": None,
+            "address": None
+        },
+        "financial_details": {
+            "subtotal": document.subtotal or 0,
+            "total_tax_amount": document.tax_amount or 0,
+            "discount": document.discount_amount or 0,
+            "total_after_tax": document.total_amount or 0
+        },
+        "line_items": [],
+        "notes": document.notes
     }
 
-    # Get vendor name if vendor_id provided
-    if document.vendor_id:
-        from app.models import Vendor
-        vendor = db.query(Vendor).filter(Vendor.id == document.vendor_id).first()
-        if vendor:
-            structured_data["supplier_name"] = vendor.display_name or vendor.name
+    # Get supplier info - prefer Address Book, fall back to legacy Vendor
+    if document.address_book_id:
+        from app.models import AddressBook
+        ab_entry = db.query(AddressBook).filter(AddressBook.id == document.address_book_id).first()
+        if ab_entry:
+            structured_data["supplier"]["company_name"] = ab_entry.alpha_name
+            structured_data["supplier"]["company_address"] = " ".join(filter(None, [
+                ab_entry.address_line_1,
+                ab_entry.address_line_2,
+                ab_entry.city,
+                ab_entry.country
+            ]))
+            structured_data["supplier"]["email"] = ab_entry.email
+            structured_data["supplier"]["phone"] = ab_entry.phone_primary
+            structured_data["supplier"]["tax_number"] = ab_entry.tax_id
+            structured_data["supplier"]["address_book_id"] = ab_entry.id
+    # Legacy vendor_id handling removed - use address_book_id instead
 
-    # Add line items
+    # Add line items with proper structure
     for item in document.line_items or []:
         structured_data["line_items"].append({
             "description": item.description,
             "item_number": item.item_number,
-            "quantity": item.quantity,
+            "quantity": item.quantity or 0,
             "unit": item.unit,
-            "unit_price": item.unit_price,
-            "total": item.total_price
+            "unit_price": item.unit_price or 0,
+            "total_line_amount": item.total_price or 0
         })
 
     # Create document title based on type and number
@@ -348,7 +376,7 @@ async def create_manual_document(
             invoice_category=document.invoice_category if document.document_type == "invoice" else None,
             site_id=document.site_id,
             contract_id=document.contract_id,
-            vendor_id=document.vendor_id,
+            address_book_id=document.address_book_id or document.vendor_id,  # Support legacy vendor_id
             ocr_extracted_words=0,
             ocr_average_confidence=1.0,  # Manual entry has perfect "confidence"
             ocr_preprocessing_methods=0,
@@ -546,8 +574,10 @@ async def get_vendor_lookup_for_image(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Get vendor lookup result for a processed image based on extracted supplier name."""
-    from app.models import Vendor
+    """Get vendor lookup result for a processed image based on extracted supplier name.
+    Uses Address Book (search_type='V') for vendor lookup.
+    """
+    from app.models import AddressBook
     from sqlalchemy import or_
     import json
 
@@ -582,13 +612,12 @@ async def get_vendor_lookup_for_image(
             "message": "No supplier name found in document"
         }
 
-    # Try exact match first (case-insensitive) - check both name and display_name
-    vendor = db.query(Vendor).filter(
-        or_(
-            Vendor.name.ilike(supplier_name),
-            Vendor.display_name.ilike(supplier_name)
-        ),
-        Vendor.is_active == True
+    # Try exact match first (case-insensitive) - using Address Book with search_type='V'
+    vendor = db.query(AddressBook).filter(
+        AddressBook.alpha_name.ilike(supplier_name),
+        AddressBook.search_type == 'V',
+        AddressBook.is_active == True,
+        AddressBook.company_id == current_user.company_id
     ).first()
 
     if vendor:
@@ -596,12 +625,13 @@ async def get_vendor_lookup_for_image(
             "found": True,
             "vendor": {
                 "id": vendor.id,
-                "name": vendor.name,
-                "display_name": vendor.display_name,
+                "address_number": vendor.address_number,
+                "name": vendor.alpha_name,
+                "display_name": vendor.alpha_name,
                 "email": vendor.email,
-                "phone": vendor.phone,
-                "address": vendor.address,
-                "tax_number": vendor.tax_number
+                "phone": vendor.phone_primary,
+                "address": " ".join(filter(None, [vendor.address_line_1, vendor.city, vendor.country])),
+                "tax_number": vendor.tax_id
             },
             "suggestions": [],
             "extracted_name": supplier_name
@@ -609,12 +639,11 @@ async def get_vendor_lookup_for_image(
 
     # Try partial match for suggestions
     search_term = f"%{supplier_name}%"
-    similar_vendors = db.query(Vendor).filter(
-        or_(
-            Vendor.name.ilike(search_term),
-            Vendor.display_name.ilike(search_term)
-        ),
-        Vendor.is_active == True
+    similar_vendors = db.query(AddressBook).filter(
+        AddressBook.alpha_name.ilike(search_term),
+        AddressBook.search_type == 'V',
+        AddressBook.is_active == True,
+        AddressBook.company_id == current_user.company_id
     ).limit(5).all()
 
     return {
@@ -623,8 +652,9 @@ async def get_vendor_lookup_for_image(
         "suggestions": [
             {
                 "id": v.id,
-                "name": v.name,
-                "display_name": v.display_name
+                "address_number": v.address_number,
+                "name": v.alpha_name,
+                "display_name": v.alpha_name
             }
             for v in similar_vendors
         ],
@@ -635,12 +665,12 @@ async def get_vendor_lookup_for_image(
 @router.post("/{image_id}/link-vendor")
 async def link_vendor_to_image(
     image_id: int,
-    vendor_id: int,
+    address_book_id: int = Query(..., description="Address Book ID (search_type='V')"),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Link a vendor to an image and update the structured data with vendor info."""
-    from app.models import Vendor
+    """Link a vendor (Address Book entry) to an image and update the structured data with vendor info."""
+    from app.models import AddressBook
     import json
 
     image = db.query(ProcessedImageModel)\
@@ -656,15 +686,17 @@ async def link_vendor_to_image(
             detail="Image not found"
         )
 
-    vendor = db.query(Vendor).filter(
-        Vendor.id == vendor_id,
-        Vendor.is_active == True
+    vendor = db.query(AddressBook).filter(
+        AddressBook.id == address_book_id,
+        AddressBook.search_type == 'V',
+        AddressBook.is_active == True,
+        AddressBook.company_id == current_user.company_id
     ).first()
 
     if not vendor:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Vendor not found"
+            detail="Vendor not found in Address Book"
         )
 
     # Update structured data with vendor info
@@ -673,32 +705,36 @@ async def link_vendor_to_image(
         if image.structured_data:
             structured_data = json.loads(image.structured_data)
 
-        # Update supplier info with vendor data
+        # Update supplier info with Address Book data
         if "supplier" not in structured_data:
             structured_data["supplier"] = {}
 
-        structured_data["supplier"]["company_name"] = vendor.display_name
-        structured_data["supplier"]["vendor_id"] = vendor.id
+        structured_data["supplier"]["company_name"] = vendor.alpha_name
+        structured_data["supplier"]["address_book_id"] = vendor.id
         if vendor.email:
             structured_data["supplier"]["email"] = vendor.email
-        if vendor.phone:
-            structured_data["supplier"]["phone"] = vendor.phone
-        if vendor.address:
-            structured_data["supplier"]["company_address"] = vendor.address
-        if vendor.tax_number:
-            structured_data["supplier"]["tax_number"] = vendor.tax_number
+        if vendor.phone_primary:
+            structured_data["supplier"]["phone"] = vendor.phone_primary
+        if vendor.address_line_1:
+            structured_data["supplier"]["company_address"] = " ".join(filter(None, [
+                vendor.address_line_1, vendor.city, vendor.country
+            ]))
+        if vendor.tax_id:
+            structured_data["supplier"]["tax_number"] = vendor.tax_id
 
         image.structured_data = json.dumps(structured_data)
+        image.address_book_id = vendor.id  # Link to Address Book
         db.commit()
         db.refresh(image)
 
         return {
             "success": True,
-            "message": f"Vendor '{vendor.display_name}' linked to invoice successfully",
+            "message": f"Vendor '{vendor.alpha_name}' linked to invoice successfully",
             "vendor": {
                 "id": vendor.id,
-                "name": vendor.name,
-                "display_name": vendor.display_name
+                "address_number": vendor.address_number,
+                "name": vendor.alpha_name,
+                "display_name": vendor.alpha_name
             },
             "image_id": image_id
         }
@@ -728,13 +764,32 @@ async def delete_image(
             ProcessedImageModel.user_id == current_user.id
         )\
         .first()
-    
+
     if not image:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Image not found"
         )
-    
+
+    # Check if invoice is linked to an active (non-cancelled) Purchase Order
+    po_link = db.query(PurchaseOrderInvoice).join(
+        PurchaseOrder, PurchaseOrder.id == PurchaseOrderInvoice.purchase_order_id
+    ).filter(
+        PurchaseOrderInvoice.invoice_id == image_id,
+        PurchaseOrder.status != 'cancelled'
+    ).first()
+
+    if po_link:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot delete invoice - it is linked to an active Purchase Order. Please unlink the invoice from the PO first."
+        )
+
+    # Clean up any orphaned PO links (from cancelled POs)
+    db.query(PurchaseOrderInvoice).filter(
+        PurchaseOrderInvoice.invoice_id == image_id
+    ).delete()
+
     errors = []
 
     try:

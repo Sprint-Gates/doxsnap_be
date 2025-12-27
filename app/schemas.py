@@ -1,6 +1,7 @@
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field, computed_field, model_validator
 from datetime import datetime, date
-from typing import Optional, List, Literal
+from decimal import Decimal
+from typing import Optional, List, Literal, Any
 
 
 class UserBase(BaseModel):
@@ -124,6 +125,52 @@ class OTPResponse(BaseModel):
     message: str
     expires_in_minutes: int
     max_attempts: int
+
+# ============================================================================
+# Client Schemas
+# ============================================================================
+
+class ClientBase(BaseModel):
+    name: str
+    code: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    address: Optional[str] = None
+    city: Optional[str] = None
+    country: Optional[str] = None
+    tax_number: Optional[str] = None
+    contact_person: Optional[str] = None
+    notes: Optional[str] = None
+    is_active: bool = True
+
+
+class ClientCreate(ClientBase):
+    pass
+
+
+class ClientUpdate(BaseModel):
+    name: Optional[str] = None
+    code: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    address: Optional[str] = None
+    city: Optional[str] = None
+    country: Optional[str] = None
+    tax_number: Optional[str] = None
+    contact_person: Optional[str] = None
+    notes: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
+class Client(ClientBase):
+    id: int
+    company_id: int
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
 
 # ============================================================================
 # Site Schemas
@@ -1431,11 +1478,11 @@ class PurchaseRequest(BaseModel):
     description: Optional[str] = None
     required_date: Optional[date] = None
     priority: str
-    estimated_total: float
+    estimated_total: Optional[float] = 0
     currency: str
     created_by: int
-    created_at: datetime
-    updated_at: datetime
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
     submitted_at: Optional[datetime] = None
     submitted_by: Optional[int] = None
     approved_at: Optional[datetime] = None
@@ -1445,6 +1492,31 @@ class PurchaseRequest(BaseModel):
     rejected_by: Optional[int] = None
     notes: Optional[str] = None
     lines: List[PurchaseRequestLine] = []
+
+    @model_validator(mode='before')
+    @classmethod
+    def map_address_book_to_vendor(cls, data: Any) -> Any:
+        """Map address_book_id from ORM model to vendor_id for the schema"""
+        if hasattr(data, '__dict__'):
+            # It's an ORM model, convert to dict-like access
+            obj_dict = {}
+            for key in ['id', 'company_id', 'pr_number', 'status', 'work_order_id',
+                       'contract_id', 'address_book_id', 'title', 'description',
+                       'required_date', 'priority', 'estimated_total', 'currency',
+                       'created_by', 'created_at', 'updated_at', 'submitted_at',
+                       'submitted_by', 'approved_at', 'approved_by', 'rejection_reason',
+                       'rejected_at', 'rejected_by', 'notes', 'lines']:
+                if hasattr(data, key):
+                    obj_dict[key] = getattr(data, key)
+            # Map address_book_id to vendor_id
+            if 'address_book_id' in obj_dict:
+                obj_dict['vendor_id'] = obj_dict.pop('address_book_id')
+            return obj_dict
+        elif isinstance(data, dict):
+            # It's already a dict
+            if 'address_book_id' in data and 'vendor_id' not in data:
+                data['vendor_id'] = data.pop('address_book_id')
+        return data
 
     class Config:
         from_attributes = True
@@ -1558,7 +1630,7 @@ class PurchaseOrder(BaseModel):
     po_number: str
     purchase_request_id: Optional[int] = None
     status: str
-    vendor_id: int
+    vendor_id: Optional[int] = None  # Vendor from Address Book (mapped from address_book_id)
     work_order_id: Optional[int] = None
     contract_id: Optional[int] = None
     order_date: Optional[date] = None
@@ -1574,6 +1646,31 @@ class PurchaseOrder(BaseModel):
     updated_at: datetime
     notes: Optional[str] = None
     lines: List[PurchaseOrderLine] = []
+    has_grn: bool = False  # True if PO has any Goods Receipt Notes
+
+    @model_validator(mode='before')
+    @classmethod
+    def map_address_book_to_vendor(cls, data: Any) -> Any:
+        """Map address_book_id from ORM model to vendor_id for the schema"""
+        if hasattr(data, '__dict__'):
+            # It's an ORM model, convert to dict-like access
+            obj_dict = {}
+            for key in ['id', 'company_id', 'po_number', 'purchase_request_id', 'status',
+                       'address_book_id', 'work_order_id', 'contract_id', 'order_date',
+                       'expected_date', 'subtotal', 'tax_amount', 'total_amount', 'currency',
+                       'payment_terms', 'shipping_address', 'created_by', 'created_at',
+                       'updated_at', 'notes', 'lines', 'has_grn']:
+                if hasattr(data, key):
+                    obj_dict[key] = getattr(data, key)
+            # Map address_book_id to vendor_id
+            if 'address_book_id' in obj_dict:
+                obj_dict['vendor_id'] = obj_dict.pop('address_book_id')
+            return obj_dict
+        elif isinstance(data, dict):
+            # It's already a dict
+            if 'address_book_id' in data and 'vendor_id' not in data:
+                data['vendor_id'] = data.pop('address_book_id')
+        return data
 
     class Config:
         from_attributes = True
@@ -2282,3 +2379,282 @@ class BusinessUnitSummary(BaseModel):
     net_balance: float
     warehouse_count: int
     transaction_count: int
+
+
+# ============================================================================
+# Address Book Schemas (Oracle JDE F0101/F0111 equivalent)
+# ============================================================================
+
+# Type literals for validation
+AddressBookSearchType = Literal["V", "C", "CB", "E", "MT"]
+ContactType = Literal["primary", "billing", "shipping", "technical", "management", "emergency", "other"]
+
+
+class AddressBookContactBase(BaseModel):
+    """Base schema for Address Book Contact (Who's Who)"""
+    full_name: str
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    title: Optional[str] = None
+    contact_type: ContactType = "primary"
+    phone_primary: Optional[str] = None
+    phone_mobile: Optional[str] = None
+    phone_fax: Optional[str] = None
+    email: Optional[EmailStr] = None
+    preferred_contact_method: Optional[str] = None
+    language: Optional[str] = None
+    is_primary: bool = False
+    is_active: bool = True
+    notes: Optional[str] = None
+
+
+class AddressBookContactCreate(AddressBookContactBase):
+    """Create schema for Address Book Contact"""
+    pass
+
+
+class AddressBookContactUpdate(BaseModel):
+    """Update schema for Address Book Contact - all fields optional"""
+    full_name: Optional[str] = None
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    title: Optional[str] = None
+    contact_type: Optional[ContactType] = None
+    phone_primary: Optional[str] = None
+    phone_mobile: Optional[str] = None
+    phone_fax: Optional[str] = None
+    email: Optional[EmailStr] = None
+    preferred_contact_method: Optional[str] = None
+    language: Optional[str] = None
+    is_primary: Optional[bool] = None
+    is_active: Optional[bool] = None
+    notes: Optional[str] = None
+
+
+class AddressBookContact(AddressBookContactBase):
+    """Full Address Book Contact response schema"""
+    id: int
+    address_book_id: int
+    line_number: int
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class AddressBookBase(BaseModel):
+    """Base schema for Address Book entry"""
+    search_type: AddressBookSearchType
+    alpha_name: str
+    mailing_name: Optional[str] = None
+    tax_id: Optional[str] = None
+    registration_number: Optional[str] = None
+
+    # Address
+    address_line_1: Optional[str] = None
+    address_line_2: Optional[str] = None
+    address_line_3: Optional[str] = None
+    address_line_4: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    postal_code: Optional[str] = None
+    country: Optional[str] = None
+
+    # Communication
+    phone_primary: Optional[str] = None
+    phone_secondary: Optional[str] = None
+    fax: Optional[str] = None
+    email: Optional[EmailStr] = None
+    website: Optional[str] = None
+
+    # Location (GPS)
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+
+    # Hierarchy
+    parent_address_book_id: Optional[int] = None
+
+    # Category Codes
+    category_code_01: Optional[str] = None
+    category_code_02: Optional[str] = None
+    category_code_03: Optional[str] = None
+    category_code_04: Optional[str] = None
+    category_code_05: Optional[str] = None
+    category_code_06: Optional[str] = None
+    category_code_07: Optional[str] = None
+    category_code_08: Optional[str] = None
+    category_code_09: Optional[str] = None
+    category_code_10: Optional[str] = None
+
+    # Employee Salary Fields (only for search_type='E')
+    salary_type: Optional[str] = None  # monthly, hourly, daily
+    base_salary: Optional[Decimal] = None
+    salary_currency: Optional[str] = "USD"
+    hourly_rate: Optional[Decimal] = None
+    overtime_rate_multiplier: Optional[Decimal] = Field(default=Decimal("1.5"))
+    working_hours_per_day: Optional[Decimal] = Field(default=Decimal("8.0"))
+    working_days_per_month: Optional[int] = 22
+
+    # Allowances
+    transport_allowance: Optional[Decimal] = None
+    housing_allowance: Optional[Decimal] = None
+    food_allowance: Optional[Decimal] = None
+    other_allowances: Optional[Decimal] = None
+    allowances_notes: Optional[str] = None
+
+    # Deductions
+    social_security_rate: Optional[Decimal] = None
+    tax_rate: Optional[Decimal] = None
+    other_deductions: Optional[Decimal] = None
+    deductions_notes: Optional[str] = None
+
+    # Employee-specific fields
+    employee_id: Optional[str] = None
+    specialization: Optional[str] = None
+    hire_date: Optional[date] = None
+    termination_date: Optional[date] = None
+
+    # Other
+    notes: Optional[str] = None
+    is_active: bool = True
+
+
+class AddressBookCreate(AddressBookBase):
+    """Create schema - address_number can be auto-generated"""
+    address_number: Optional[str] = None  # If None, auto-generate
+    auto_create_bu: bool = True  # Auto-create linked Business Unit
+    contacts: Optional[List[AddressBookContactCreate]] = []
+
+
+class AddressBookUpdate(BaseModel):
+    """Update schema - all fields optional"""
+    alpha_name: Optional[str] = None
+    mailing_name: Optional[str] = None
+    tax_id: Optional[str] = None
+    registration_number: Optional[str] = None
+    address_line_1: Optional[str] = None
+    address_line_2: Optional[str] = None
+    address_line_3: Optional[str] = None
+    address_line_4: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    postal_code: Optional[str] = None
+    country: Optional[str] = None
+    phone_primary: Optional[str] = None
+    phone_secondary: Optional[str] = None
+    fax: Optional[str] = None
+    email: Optional[EmailStr] = None
+    website: Optional[str] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    parent_address_book_id: Optional[int] = None
+    business_unit_id: Optional[int] = None
+    category_code_01: Optional[str] = None
+    category_code_02: Optional[str] = None
+    category_code_03: Optional[str] = None
+    category_code_04: Optional[str] = None
+    category_code_05: Optional[str] = None
+    category_code_06: Optional[str] = None
+    category_code_07: Optional[str] = None
+    category_code_08: Optional[str] = None
+    category_code_09: Optional[str] = None
+    category_code_10: Optional[str] = None
+
+    # Employee Salary Fields (only for search_type='E')
+    salary_type: Optional[str] = None
+    base_salary: Optional[Decimal] = None
+    salary_currency: Optional[str] = None
+    hourly_rate: Optional[Decimal] = None
+    overtime_rate_multiplier: Optional[Decimal] = None
+    working_hours_per_day: Optional[Decimal] = None
+    working_days_per_month: Optional[int] = None
+
+    # Allowances
+    transport_allowance: Optional[Decimal] = None
+    housing_allowance: Optional[Decimal] = None
+    food_allowance: Optional[Decimal] = None
+    other_allowances: Optional[Decimal] = None
+    allowances_notes: Optional[str] = None
+
+    # Deductions
+    social_security_rate: Optional[Decimal] = None
+    tax_rate: Optional[Decimal] = None
+    other_deductions: Optional[Decimal] = None
+    deductions_notes: Optional[str] = None
+
+    # Employee-specific fields
+    employee_id: Optional[str] = None
+    specialization: Optional[str] = None
+    hire_date: Optional[date] = None
+    termination_date: Optional[date] = None
+
+    notes: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
+class AddressBookBrief(BaseModel):
+    """Brief schema for dropdowns and quick references"""
+    id: int
+    address_number: str
+    search_type: str
+    alpha_name: str
+    city: Optional[str] = None
+    is_active: bool
+
+    class Config:
+        from_attributes = True
+
+
+class AddressBookResponse(AddressBookBase):
+    """Full Address Book response schema"""
+    id: int
+    company_id: int
+    address_number: str
+    business_unit_id: Optional[int] = None
+    legacy_vendor_id: Optional[int] = None
+    legacy_client_id: Optional[int] = None
+    legacy_site_id: Optional[int] = None
+    legacy_technician_id: Optional[int] = None
+    created_by: Optional[int] = None
+    updated_by: Optional[int] = None
+    created_at: datetime
+    updated_at: datetime
+
+    # Nested
+    contacts: List[AddressBookContact] = []
+    parent_name: Optional[str] = None  # Parent's alpha_name
+    business_unit_code: Optional[str] = None
+
+    # Calculated salary fields (for convenience)
+    total_allowances: Optional[Decimal] = None
+    total_deductions: Optional[Decimal] = None
+    net_salary: Optional[Decimal] = None
+
+    class Config:
+        from_attributes = True
+
+
+class AddressBookWithChildren(AddressBookResponse):
+    """Address Book with nested children for hierarchy display"""
+    children: List["AddressBookWithChildren"] = []
+
+    class Config:
+        from_attributes = True
+
+
+class AddressBookHierarchy(BaseModel):
+    """Hierarchical view of Address Book entries grouped by type"""
+    vendors: List[AddressBookWithChildren] = []
+    customers: List[AddressBookWithChildren] = []
+    branches: List[AddressBookWithChildren] = []
+    employees: List[AddressBookWithChildren] = []
+    teams: List[AddressBookWithChildren] = []
+
+
+class AddressBookList(BaseModel):
+    """Paginated list response"""
+    entries: List[AddressBookResponse]
+    total: int
+    page: int
+    size: int

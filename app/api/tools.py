@@ -19,7 +19,7 @@ import logging
 
 from app.database import get_db
 from app.models import (
-    User, Vendor, Site, Technician, Warehouse, Account, Client,
+    User, AddressBook, Site, Technician, Warehouse, Account, Client,
     ToolCategory, Tool, ToolPurchase, ToolPurchaseLine, ToolAllocationHistory,
     JournalEntry, JournalEntryLine, FiscalPeriod
 )
@@ -107,8 +107,8 @@ def tool_to_response(tool: Tool, include_category: bool = True) -> dict:
         "purchase_id": tool.purchase_id,
         "purchase_date": tool.purchase_date,
         "purchase_cost": float(tool.purchase_cost) if tool.purchase_cost else None,
-        "vendor_id": tool.vendor_id,
-        "vendor_name": tool.vendor.name if tool.vendor else None,
+        "vendor_id": tool.vendor_address_book_id,
+        "vendor_name": tool.vendor_address_book.alpha_name if tool.vendor_address_book else None,
         "capitalization_date": tool.capitalization_date,
         "useful_life_months": tool.useful_life_months,
         "salvage_value": float(tool.salvage_value) if tool.salvage_value else None,
@@ -152,8 +152,8 @@ def purchase_to_response(purchase: ToolPurchase, include_lines: bool = True) -> 
         "company_id": purchase.company_id,
         "purchase_number": purchase.purchase_number,
         "purchase_date": purchase.purchase_date,
-        "vendor_id": purchase.vendor_id,
-        "vendor_name": purchase.vendor.name if purchase.vendor else None,
+        "vendor_id": purchase.address_book_id,
+        "vendor_name": purchase.address_book.alpha_name if purchase.address_book else None,
         "currency": purchase.currency,
         "subtotal": float(purchase.subtotal or 0),
         "tax_amount": float(purchase.tax_amount or 0),
@@ -467,7 +467,7 @@ async def list_tools(
 
     query = db.query(Tool).options(
         joinedload(Tool.category),
-        joinedload(Tool.vendor),
+        joinedload(Tool.vendor_address_book),
         joinedload(Tool.assigned_site),
         joinedload(Tool.assigned_technician),
         joinedload(Tool.assigned_warehouse)
@@ -574,7 +574,7 @@ async def create_tool(
         photo_url=photo_url,
         purchase_date=purchase_date,
         purchase_cost=purchase_cost,
-        vendor_id=vendor_id,
+        vendor_address_book_id=vendor_id,
         capitalization_date=purchase_date if category.asset_type == "fixed_asset" else None,
         useful_life_months=useful_life_months,
         salvage_value=salvage_value,
@@ -614,7 +614,7 @@ async def create_tool(
     # Reload with relationships
     tool = db.query(Tool).options(
         joinedload(Tool.category),
-        joinedload(Tool.vendor),
+        joinedload(Tool.vendor_address_book),
         joinedload(Tool.assigned_site),
         joinedload(Tool.assigned_technician),
         joinedload(Tool.assigned_warehouse)
@@ -632,7 +632,7 @@ async def get_tool(
     """Get a specific tool with full details"""
     tool = db.query(Tool).options(
         joinedload(Tool.category),
-        joinedload(Tool.vendor),
+        joinedload(Tool.vendor_address_book),
         joinedload(Tool.assigned_site),
         joinedload(Tool.assigned_technician),
         joinedload(Tool.assigned_warehouse),
@@ -717,7 +717,7 @@ async def update_tool(
     # Reload with relationships
     tool = db.query(Tool).options(
         joinedload(Tool.category),
-        joinedload(Tool.vendor),
+        joinedload(Tool.vendor_address_book),
         joinedload(Tool.assigned_site),
         joinedload(Tool.assigned_technician),
         joinedload(Tool.assigned_warehouse)
@@ -830,7 +830,7 @@ async def allocate_tool(
     # Reload with relationships
     tool = db.query(Tool).options(
         joinedload(Tool.category),
-        joinedload(Tool.vendor),
+        joinedload(Tool.vendor_address_book),
         joinedload(Tool.assigned_site),
         joinedload(Tool.assigned_technician),
         joinedload(Tool.assigned_warehouse)
@@ -962,14 +962,14 @@ async def list_tool_purchases(
         raise HTTPException(status_code=400, detail="User must be associated with a company")
 
     query = db.query(ToolPurchase).options(
-        joinedload(ToolPurchase.vendor),
+        joinedload(ToolPurchase.address_book),
         joinedload(ToolPurchase.initial_warehouse)
     ).filter(ToolPurchase.company_id == current_user.company_id)
 
     if status:
         query = query.filter(ToolPurchase.status == status)
     if vendor_id:
-        query = query.filter(ToolPurchase.vendor_id == vendor_id)
+        query = query.filter(ToolPurchase.address_book_id == vendor_id)
     if start_date:
         query = query.filter(ToolPurchase.purchase_date >= start_date)
     if end_date:
@@ -990,14 +990,15 @@ async def create_tool_purchase(
     if not current_user.company_id:
         raise HTTPException(status_code=400, detail="User must be associated with a company")
 
-    # Validate vendor
-    vendor = db.query(Vendor).filter(
-        Vendor.id == data.vendor_id,
-        Vendor.company_id == current_user.company_id
+    # Validate vendor from Address Book (search_type='V')
+    vendor = db.query(AddressBook).filter(
+        AddressBook.id == data.vendor_id,
+        AddressBook.company_id == current_user.company_id,
+        AddressBook.search_type == 'V'
     ).first()
 
     if not vendor:
-        raise HTTPException(status_code=404, detail="Vendor not found")
+        raise HTTPException(status_code=404, detail="Vendor not found in Address Book")
 
     # Validate warehouse if provided
     if data.initial_warehouse_id:
@@ -1015,7 +1016,7 @@ async def create_tool_purchase(
         company_id=current_user.company_id,
         purchase_number=purchase_number,
         purchase_date=data.purchase_date,
-        vendor_id=data.vendor_id,
+        address_book_id=data.vendor_id,
         currency=data.currency,
         initial_warehouse_id=data.initial_warehouse_id,
         tax_amount=data.tax_amount,
@@ -1069,7 +1070,7 @@ async def create_tool_purchase(
 
     # Reload with relationships
     purchase = db.query(ToolPurchase).options(
-        joinedload(ToolPurchase.vendor),
+        joinedload(ToolPurchase.address_book),
         joinedload(ToolPurchase.initial_warehouse),
         joinedload(ToolPurchase.lines).joinedload(ToolPurchaseLine.category)
     ).filter(ToolPurchase.id == purchase.id).first()
@@ -1085,7 +1086,7 @@ async def get_tool_purchase(
 ):
     """Get a specific tool purchase"""
     purchase = db.query(ToolPurchase).options(
-        joinedload(ToolPurchase.vendor),
+        joinedload(ToolPurchase.address_book),
         joinedload(ToolPurchase.initial_warehouse),
         joinedload(ToolPurchase.lines).joinedload(ToolPurchaseLine.category),
         joinedload(ToolPurchase.approver),
@@ -1129,7 +1130,7 @@ async def update_tool_purchase(
     if purchase_date is not None:
         purchase.purchase_date = purchase_date
     if vendor_id is not None:
-        purchase.vendor_id = vendor_id
+        purchase.address_book_id = vendor_id
     if currency is not None:
         purchase.currency = currency
     if initial_warehouse_id is not None:
@@ -1149,7 +1150,7 @@ async def update_tool_purchase(
 
     # Reload with relationships
     purchase = db.query(ToolPurchase).options(
-        joinedload(ToolPurchase.vendor),
+        joinedload(ToolPurchase.address_book),
         joinedload(ToolPurchase.initial_warehouse),
         joinedload(ToolPurchase.lines).joinedload(ToolPurchaseLine.category)
     ).filter(ToolPurchase.id == purchase.id).first()
@@ -1341,7 +1342,7 @@ async def receive_tool_purchase(
     """
     purchase = db.query(ToolPurchase).options(
         joinedload(ToolPurchase.lines).joinedload(ToolPurchaseLine.category),
-        joinedload(ToolPurchase.vendor)
+        joinedload(ToolPurchase.address_book)
     ).filter(
         ToolPurchase.id == purchase_id,
         ToolPurchase.company_id == current_user.company_id
@@ -1389,7 +1390,7 @@ async def receive_tool_purchase(
                     purchase_id=purchase.id,
                     purchase_date=purchase.purchase_date,
                     purchase_cost=unit_cost,
-                    vendor_id=purchase.vendor_id,
+                    vendor_address_book_id=purchase.address_book_id,
                     capitalization_date=purchase.purchase_date if category.asset_type == "fixed_asset" else None,
                     useful_life_months=category.useful_life_months,
                     salvage_value=salvage_value,
@@ -1550,7 +1551,7 @@ def create_tool_purchase_journal_entry(
         ).first()
 
         # Create journal entry
-        vendor_name = purchase.vendor.name if purchase.vendor else "Unknown Vendor"
+        vendor_name = purchase.address_book.alpha_name if purchase.address_book else "Unknown Vendor"
 
         entry = JournalEntry(
             company_id=company_id,
@@ -1612,7 +1613,7 @@ def create_tool_purchase_journal_entry(
                 debit=float(fixed_asset_total),
                 credit=0,
                 description=f"Tools & Equipment - {purchase.purchase_number}",
-                vendor_id=purchase.vendor_id,
+                address_book_id=purchase.address_book_id,
                 line_number=line_number
             )
             db.add(asset_line)
@@ -1627,7 +1628,7 @@ def create_tool_purchase_journal_entry(
                 debit=float(consumable_total),
                 credit=0,
                 description=f"Tools Expense - {purchase.purchase_number}",
-                vendor_id=purchase.vendor_id,
+                address_book_id=purchase.address_book_id,
                 line_number=line_number
             )
             db.add(expense_line)
@@ -1648,7 +1649,7 @@ def create_tool_purchase_journal_entry(
                 debit=0,
                 credit=float(total_with_tax),
                 description=f"Payable for {purchase.purchase_number} - {vendor_name}",
-                vendor_id=purchase.vendor_id,
+                address_book_id=purchase.address_book_id,
                 line_number=line_number
             )
             db.add(ap_line)
