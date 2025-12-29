@@ -109,6 +109,7 @@ class CompanyUpdate(BaseModel):
     industry: Optional[str] = None
     size: Optional[str] = None
     primary_currency: Optional[str] = None  # ISO 4217 currency code
+    default_vat_rate: Optional[float] = None  # Default VAT rate (e.g., 15.0 for 15%)
 
 
 # Supported currencies for the application
@@ -298,6 +299,7 @@ async def get_my_company(user: User = Depends(get_current_user), db: Session = D
         "website": company.website,
         "logo_url": company.logo_url,
         "primary_currency": company.primary_currency or "USD",
+        "default_vat_rate": float(company.default_vat_rate) if company.default_vat_rate else 15.0,
         "industry": company.industry,
         "size": company.size,
         "subscription_status": company.subscription_status,
@@ -557,19 +559,26 @@ async def flush_company_data(
 ):
     """
     Flush all operational data for a company (admin only).
+    Resets the company to a fresh state as if newly created.
 
     This will DELETE:
-    - Clients, Sites, Buildings, Spaces, Blocks
-    - Contracts, Contract Scopes
-    - Work Orders, Tickets, Calendar data
-    - Technicians, Attendance, Evaluations
-    - Invoices, Allocations, Petty Cash
-    - Inventory (Items, Stock, Ledger, Transfers, Cycle Counts)
-    - Purchase Orders, Purchase Requests
-    - Accounting data (Journal Entries, Account Balances)
-    - Vendors, Warehouses, Handheld Devices
-    - Condition Reports, NPS Surveys
-    - Assets (Equipment, Sub-equipment, Floors, Rooms)
+    - All Address Book entries (Vendors, Customers, Branches)
+    - All Supplier Invoices, Payments, and related data
+    - All Goods Receipts
+    - All Purchase Orders and Purchase Requests
+    - All Clients, Sites, Buildings, Spaces, Blocks
+    - All Contracts and Contract Scopes
+    - All Work Orders, Tickets, Calendar data
+    - All Technicians, Attendance, Evaluations
+    - All Invoices and Allocations
+    - All Petty Cash funds and transactions
+    - All Inventory (Items, Stock, Ledger, Transfers, Cycle Counts)
+    - All Accounting data (Journal Entries, Account Balances)
+    - All Warehouses
+    - All Condition Reports, NPS Surveys
+    - All Assets (Equipment, Sub-equipment, Floors, Rooms)
+    - All Business Units
+    - All CRM data (Leads, Opportunities, Activities)
 
     This will PRESERVE:
     - Company record and settings
@@ -579,6 +588,11 @@ async def flush_company_data(
     - Document Types
     - Item Categories
     - Account Types and Chart of Accounts structure
+    - Default Account Mappings
+
+    After deletion, it will RE-SEED:
+    - Main Warehouse
+    - Default Client and Site
     """
     if not request.confirm:
         raise HTTPException(
@@ -599,129 +613,186 @@ async def flush_company_data(
         # Using raw SQL for efficiency and to handle complex FK relationships
 
         delete_queries = [
-            # Purchase Order related
+            # =================================================================
+            # SUPPLIER INVOICES & PAYMENTS (P2P)
+            # =================================================================
+            ("supplier_payment_allocations", "DELETE FROM supplier_payment_allocations WHERE payment_id IN (SELECT id FROM supplier_payments WHERE company_id = :company_id)"),
+            ("supplier_payments", "DELETE FROM supplier_payments WHERE company_id = :company_id"),
+            ("supplier_invoice_lines", "DELETE FROM supplier_invoice_lines WHERE supplier_invoice_id IN (SELECT id FROM supplier_invoices WHERE company_id = :company_id)"),
+            ("supplier_invoices", "DELETE FROM supplier_invoices WHERE company_id = :company_id"),
+
+            # =================================================================
+            # GOODS RECEIPTS
+            # =================================================================
+            ("goods_receipt_extra_costs", "DELETE FROM goods_receipt_extra_costs WHERE goods_receipt_id IN (SELECT id FROM goods_receipts WHERE company_id = :company_id)"),
+            ("goods_receipt_lines", "DELETE FROM goods_receipt_lines WHERE goods_receipt_id IN (SELECT id FROM goods_receipts WHERE company_id = :company_id)"),
+            ("goods_receipts", "DELETE FROM goods_receipts WHERE company_id = :company_id"),
+
+            # =================================================================
+            # PURCHASE ORDERS & REQUESTS
+            # =================================================================
             ("purchase_order_invoices", "DELETE FROM purchase_order_invoices WHERE purchase_order_id IN (SELECT id FROM purchase_orders WHERE company_id = :company_id)"),
             ("purchase_order_lines", "DELETE FROM purchase_order_lines WHERE purchase_order_id IN (SELECT id FROM purchase_orders WHERE company_id = :company_id)"),
             ("purchase_orders", "DELETE FROM purchase_orders WHERE company_id = :company_id"),
             ("purchase_request_lines", "DELETE FROM purchase_request_lines WHERE purchase_request_id IN (SELECT id FROM purchase_requests WHERE company_id = :company_id)"),
             ("purchase_requests", "DELETE FROM purchase_requests WHERE company_id = :company_id"),
 
-            # Accounting - Journal entries and balances
+            # =================================================================
+            # ACCOUNTING (Journal Entries, Balances, Fiscal Periods)
+            # =================================================================
             ("journal_entry_lines", "DELETE FROM journal_entry_lines WHERE journal_entry_id IN (SELECT id FROM journal_entries WHERE company_id = :company_id)"),
             ("journal_entries", "DELETE FROM journal_entries WHERE company_id = :company_id"),
             ("account_balances", "DELETE FROM account_balances WHERE account_id IN (SELECT id FROM accounts WHERE company_id = :company_id)"),
+            ("fiscal_periods", "DELETE FROM fiscal_periods WHERE company_id = :company_id"),
 
-            # Invoice allocations
-            ("recognition_logs", "DELETE FROM recognition_logs WHERE allocation_id IN (SELECT id FROM invoice_allocations WHERE company_id = :company_id)"),
-            ("allocation_periods", "DELETE FROM allocation_periods WHERE allocation_id IN (SELECT id FROM invoice_allocations WHERE company_id = :company_id)"),
-            ("invoice_allocations", "DELETE FROM invoice_allocations WHERE company_id = :company_id"),
+            # =================================================================
+            # INVOICE ALLOCATIONS (linked via contract_id -> contracts.company_id)
+            # =================================================================
+            ("allocation_periods", "DELETE FROM allocation_periods WHERE allocation_id IN (SELECT id FROM invoice_allocations WHERE contract_id IN (SELECT id FROM contracts WHERE company_id = :company_id))"),
+            ("invoice_allocations", "DELETE FROM invoice_allocations WHERE contract_id IN (SELECT id FROM contracts WHERE company_id = :company_id)"),
 
-            # Petty cash
-            ("petty_cash_receipts", "DELETE FROM petty_cash_receipts WHERE transaction_id IN (SELECT id FROM petty_cash_transactions WHERE fund_id IN (SELECT id FROM petty_cash_funds WHERE company_id = :company_id))"),
-            ("petty_cash_replenishments", "DELETE FROM petty_cash_replenishments WHERE fund_id IN (SELECT id FROM petty_cash_funds WHERE company_id = :company_id)"),
-            ("petty_cash_transactions", "DELETE FROM petty_cash_transactions WHERE fund_id IN (SELECT id FROM petty_cash_funds WHERE company_id = :company_id)"),
+            # =================================================================
+            # PETTY CASH
+            # =================================================================
+            ("petty_cash_receipts", "DELETE FROM petty_cash_receipts WHERE company_id = :company_id"),
+            ("petty_cash_replenishments", "DELETE FROM petty_cash_replenishments WHERE company_id = :company_id"),
+            ("petty_cash_transactions", "DELETE FROM petty_cash_transactions WHERE company_id = :company_id"),
             ("petty_cash_funds", "DELETE FROM petty_cash_funds WHERE company_id = :company_id"),
 
-            # NPS Surveys
-            ("nps_surveys", "DELETE FROM nps_surveys WHERE company_id = :company_id"),
+            # =================================================================
+            # CRM DATA
+            # =================================================================
+            ("crm_activities", "DELETE FROM crm_activities WHERE company_id = :company_id"),
+            ("campaign_leads", "DELETE FROM campaign_leads WHERE lead_id IN (SELECT id FROM leads WHERE company_id = :company_id)"),
+            ("opportunities", "DELETE FROM opportunities WHERE company_id = :company_id"),
+            ("leads", "DELETE FROM leads WHERE company_id = :company_id"),
+            ("campaigns", "DELETE FROM campaigns WHERE company_id = :company_id"),
 
-            # Technician evaluations
+            # =================================================================
+            # SURVEYS & EVALUATIONS
+            # =================================================================
+            ("nps_surveys", "DELETE FROM nps_surveys WHERE company_id = :company_id"),
             ("technician_evaluations", "DELETE FROM technician_evaluations WHERE company_id = :company_id"),
 
-            # Condition reports
-            ("condition_report_images", "DELETE FROM condition_report_images WHERE report_id IN (SELECT id FROM condition_reports WHERE company_id = :company_id)"),
+            # =================================================================
+            # CONDITION REPORTS
+            # =================================================================
+            ("condition_report_images", "DELETE FROM condition_report_images WHERE condition_report_id IN (SELECT id FROM condition_reports WHERE company_id = :company_id)"),
             ("condition_reports", "DELETE FROM condition_reports WHERE company_id = :company_id"),
 
-            # Calendar and work order assignments
-            ("work_order_slot_assignments", "DELETE FROM work_order_slot_assignments WHERE slot_id IN (SELECT id FROM calendar_slots WHERE company_id = :company_id)"),
-            ("calendar_slots", "DELETE FROM calendar_slots WHERE company_id = :company_id"),
-            ("calendar_templates", "DELETE FROM calendar_templates WHERE company_id = :company_id"),
-
-            # Tickets
-            ("tickets", "DELETE FROM tickets WHERE company_id = :company_id"),
-
-            # Work orders and related
-            ("work_order_snapshots", "DELETE FROM work_order_snapshots WHERE work_order_id IN (SELECT id FROM work_orders WHERE company_id = :company_id)"),
-            ("work_order_completions", "DELETE FROM work_order_completions WHERE work_order_id IN (SELECT id FROM work_orders WHERE company_id = :company_id)"),
-            ("work_order_checklist_items", "DELETE FROM work_order_checklist_items WHERE work_order_id IN (SELECT id FROM work_orders WHERE company_id = :company_id)"),
-            ("work_order_time_entries", "DELETE FROM work_order_time_entries WHERE work_order_id IN (SELECT id FROM work_orders WHERE company_id = :company_id)"),
-            ("work_order_spare_parts", "DELETE FROM work_order_spare_parts WHERE work_order_id IN (SELECT id FROM work_orders WHERE company_id = :company_id)"),
-            ("work_orders", "DELETE FROM work_orders WHERE company_id = :company_id"),
-
-            # PM Schedules (keep templates)
-            ("pm_schedules", "DELETE FROM pm_schedules WHERE company_id = :company_id"),
-
-            # Cycle counts
+            # =================================================================
+            # INVENTORY (must be before work orders due to item_ledger.work_order_id FK)
+            # =================================================================
             ("cycle_count_items", "DELETE FROM cycle_count_items WHERE cycle_count_id IN (SELECT id FROM cycle_counts WHERE company_id = :company_id)"),
             ("cycle_counts", "DELETE FROM cycle_counts WHERE company_id = :company_id"),
-
-            # Item inventory
             ("item_ledger", "DELETE FROM item_ledger WHERE company_id = :company_id"),
             ("item_transfer_lines", "DELETE FROM item_transfer_lines WHERE transfer_id IN (SELECT id FROM item_transfers WHERE company_id = :company_id)"),
             ("item_transfers", "DELETE FROM item_transfers WHERE company_id = :company_id"),
             ("item_stock", "DELETE FROM item_stock WHERE item_id IN (SELECT id FROM item_master WHERE company_id = :company_id)"),
             ("item_aliases", "DELETE FROM item_aliases WHERE item_id IN (SELECT id FROM item_master WHERE company_id = :company_id)"),
-            ("item_master", "DELETE FROM item_master WHERE company_id = :company_id"),
-
-            # Invoice items (from vendors/processed images)
-            ("invoice_items", "DELETE FROM invoice_items WHERE company_id = :company_id"),
-
-            # Spare parts
+            # Delete tables with FK to item_master before deleting item_master
+            ("invoice_items", "DELETE FROM invoice_items WHERE invoice_id IN (SELECT id FROM processed_images WHERE user_id IN (SELECT id FROM users WHERE company_id = :company_id))"),
+            ("debit_note_lines", "DELETE FROM debit_note_lines WHERE debit_note_id IN (SELECT id FROM debit_notes WHERE company_id = :company_id)"),
+            ("disposal_item_lines", "DELETE FROM disposal_item_lines WHERE disposal_id IN (SELECT id FROM disposals WHERE company_id = :company_id)"),
             ("spare_parts", "DELETE FROM spare_parts WHERE company_id = :company_id"),
+            ("item_master", "DELETE FROM item_master WHERE company_id = :company_id"),
+            ("debit_notes", "DELETE FROM debit_notes WHERE company_id = :company_id"),
+            ("disposals", "DELETE FROM disposals WHERE company_id = :company_id"),
 
-            # Attendance
+            # =================================================================
+            # CALENDAR & WORK ORDERS
+            # =================================================================
+            ("work_order_slot_assignments", "DELETE FROM work_order_slot_assignments WHERE calendar_slot_id IN (SELECT id FROM calendar_slots WHERE company_id = :company_id)"),
+            ("calendar_slots", "DELETE FROM calendar_slots WHERE company_id = :company_id"),
+            ("calendar_templates", "DELETE FROM calendar_templates WHERE company_id = :company_id"),
+            ("tickets", "DELETE FROM tickets WHERE company_id = :company_id"),
+            ("work_order_snapshots", "DELETE FROM work_order_snapshots WHERE work_order_id IN (SELECT id FROM work_orders WHERE company_id = :company_id)"),
+            ("work_order_completions", "DELETE FROM work_order_completions WHERE work_order_id IN (SELECT id FROM work_orders WHERE company_id = :company_id)"),
+            ("work_order_checklist_items", "DELETE FROM work_order_checklist_items WHERE work_order_id IN (SELECT id FROM work_orders WHERE company_id = :company_id)"),
+            ("work_order_time_entries", "DELETE FROM work_order_time_entries WHERE work_order_id IN (SELECT id FROM work_orders WHERE company_id = :company_id)"),
+            ("work_order_spare_parts", "DELETE FROM work_order_spare_parts WHERE work_order_id IN (SELECT id FROM work_orders WHERE company_id = :company_id)"),
+            ("work_order_technicians", "DELETE FROM work_order_technicians WHERE work_order_id IN (SELECT id FROM work_orders WHERE company_id = :company_id)"),
+            ("work_order_technicians_ab", "DELETE FROM work_order_technicians_ab WHERE work_order_id IN (SELECT id FROM work_orders WHERE company_id = :company_id)"),
+            ("work_orders", "DELETE FROM work_orders WHERE company_id = :company_id"),
+            ("pm_schedules", "DELETE FROM pm_schedules WHERE company_id = :company_id"),
+
+            # =================================================================
+            # TOOLS
+            # =================================================================
+            ("tool_allocation_history", "DELETE FROM tool_allocation_history WHERE tool_id IN (SELECT id FROM tools WHERE company_id = :company_id)"),
+            ("tool_purchases", "DELETE FROM tool_purchases WHERE company_id = :company_id"),
+            ("tools", "DELETE FROM tools WHERE company_id = :company_id"),
+
+            # =================================================================
+            # TECHNICIANS
+            # =================================================================
             ("technician_attendance", "DELETE FROM technician_attendance WHERE company_id = :company_id"),
-
-            # Technician site shifts
             ("technician_site_shifts", "DELETE FROM technician_site_shifts WHERE technician_id IN (SELECT id FROM technicians WHERE company_id = :company_id)"),
+            ("technicians", "DELETE FROM technicians WHERE company_id = :company_id"),
 
-            # Assets - Equipment hierarchy
-            ("sub_equipment", "DELETE FROM sub_equipment WHERE equipment_id IN (SELECT id FROM equipment WHERE company_id = :company_id)"),
-            ("equipment", "DELETE FROM equipment WHERE company_id = :company_id"),
-            ("desks", "DELETE FROM desks WHERE room_id IN (SELECT id FROM rooms WHERE floor_id IN (SELECT id FROM floors WHERE company_id = :company_id))"),
-            ("rooms", "DELETE FROM rooms WHERE floor_id IN (SELECT id FROM floors WHERE company_id = :company_id)"),
-            ("units", "DELETE FROM units WHERE floor_id IN (SELECT id FROM floors WHERE company_id = :company_id)"),
-            ("floors", "DELETE FROM floors WHERE company_id = :company_id"),
+            # =================================================================
+            # ASSETS & EQUIPMENT (linked via client_id -> clients.company_id)
+            # =================================================================
+            ("sub_equipment", "DELETE FROM sub_equipment WHERE equipment_id IN (SELECT id FROM equipment WHERE client_id IN (SELECT id FROM clients WHERE company_id = :company_id))"),
+            ("equipment", "DELETE FROM equipment WHERE client_id IN (SELECT id FROM clients WHERE company_id = :company_id)"),
+            ("desks", "DELETE FROM desks WHERE room_id IN (SELECT id FROM rooms WHERE floor_id IN (SELECT id FROM floors WHERE building_id IN (SELECT id FROM buildings WHERE site_id IN (SELECT id FROM sites WHERE client_id IN (SELECT id FROM clients WHERE company_id = :company_id)))))"),
+            ("rooms", "DELETE FROM rooms WHERE floor_id IN (SELECT id FROM floors WHERE building_id IN (SELECT id FROM buildings WHERE site_id IN (SELECT id FROM sites WHERE client_id IN (SELECT id FROM clients WHERE company_id = :company_id))))"),
+            ("units", "DELETE FROM units WHERE floor_id IN (SELECT id FROM floors WHERE building_id IN (SELECT id FROM buildings WHERE site_id IN (SELECT id FROM sites WHERE client_id IN (SELECT id FROM clients WHERE company_id = :company_id))))"),
+            ("floors", "DELETE FROM floors WHERE building_id IN (SELECT id FROM buildings WHERE site_id IN (SELECT id FROM sites WHERE client_id IN (SELECT id FROM clients WHERE company_id = :company_id)))"),
 
-            # Contract scopes
+            # =================================================================
+            # CONTRACTS & SCOPES
+            # =================================================================
             ("contract_scopes", "DELETE FROM contract_scopes WHERE contract_id IN (SELECT id FROM contracts WHERE company_id = :company_id)"),
             ("contracts", "DELETE FROM contracts WHERE company_id = :company_id"),
-
-            # Scopes
             ("scopes", "DELETE FROM scopes WHERE company_id = :company_id"),
 
-            # Spaces, Buildings, Blocks
+            # =================================================================
+            # SITES, BUILDINGS, SPACES
+            # =================================================================
             ("spaces", "DELETE FROM spaces WHERE building_id IN (SELECT id FROM buildings WHERE site_id IN (SELECT id FROM sites WHERE client_id IN (SELECT id FROM clients WHERE company_id = :company_id)))"),
             ("buildings", "DELETE FROM buildings WHERE site_id IN (SELECT id FROM sites WHERE client_id IN (SELECT id FROM clients WHERE company_id = :company_id))"),
             ("blocks", "DELETE FROM blocks WHERE site_id IN (SELECT id FROM sites WHERE client_id IN (SELECT id FROM clients WHERE company_id = :company_id))"),
-
-            # Sites
             ("sites", "DELETE FROM sites WHERE client_id IN (SELECT id FROM clients WHERE company_id = :company_id)"),
 
-            # Technicians
-            ("technicians", "DELETE FROM technicians WHERE company_id = :company_id"),
-
-            # Handheld devices
+            # =================================================================
+            # DEVICES & PROJECTS
+            # =================================================================
+            ("handheld_device_technicians_ab", "DELETE FROM handheld_device_technicians_ab WHERE handheld_device_id IN (SELECT id FROM handheld_devices WHERE company_id = :company_id)"),
             ("handheld_devices", "DELETE FROM handheld_devices WHERE company_id = :company_id"),
-
-            # Projects, Branches
-            ("projects", "DELETE FROM projects WHERE company_id = :company_id"),
+            ("projects", "DELETE FROM projects WHERE site_id IN (SELECT id FROM sites WHERE client_id IN (SELECT id FROM clients WHERE company_id = :company_id))"),
             ("branches", "DELETE FROM branches WHERE client_id IN (SELECT id FROM clients WHERE company_id = :company_id)"),
 
-            # Clients
+            # =================================================================
+            # CLIENTS (legacy)
+            # =================================================================
             ("clients", "DELETE FROM clients WHERE company_id = :company_id"),
 
-            # Vendors
-            ("vendors", "DELETE FROM vendors WHERE company_id = :company_id"),
 
-            # Warehouses
+            # =================================================================
+            # ADDRESS BOOK & BUSINESS UNITS
+            # =================================================================
+            # Delete address_book_contacts first (FK to address_book)
+            ("address_book_contacts", "DELETE FROM address_book_contacts WHERE address_book_id IN (SELECT id FROM address_book WHERE company_id = :company_id)"),
+            # Clear self-referential FK before deleting address_book entries
+            ("address_book_clear_parent", "UPDATE address_book SET parent_address_book_id = NULL WHERE company_id = :company_id"),
+            ("address_book", "DELETE FROM address_book WHERE company_id = :company_id"),
+            ("business_units", "DELETE FROM business_units WHERE company_id = :company_id"),
+
+            # =================================================================
+            # WAREHOUSES
+            # =================================================================
             ("warehouses", "DELETE FROM warehouses WHERE company_id = :company_id"),
 
-            # Processed images
+            # =================================================================
+            # PROCESSED IMAGES
+            # =================================================================
             ("processed_images", "DELETE FROM processed_images WHERE user_id IN (SELECT id FROM users WHERE company_id = :company_id)"),
 
-            # Exchange rate logs
-            ("exchange_rate_logs", "DELETE FROM exchange_rate_logs WHERE rate_id IN (SELECT id FROM exchange_rates WHERE company_id = :company_id)"),
+            # =================================================================
+            # EXCHANGE RATES
+            # =================================================================
+            ("exchange_rate_logs", "DELETE FROM exchange_rate_logs WHERE company_id = :company_id"),
             ("exchange_rates", "DELETE FROM exchange_rates WHERE company_id = :company_id"),
         ]
 
@@ -730,22 +801,45 @@ async def flush_company_data(
         for table_name, query in delete_queries:
             try:
                 result = db.execute(text(query), {"company_id": company_id})
+                db.commit()  # Commit after each successful delete
                 deleted_counts[table_name] = result.rowcount
             except Exception as e:
+                db.rollback()  # Rollback failed transaction so next query can run
                 logger.warning(f"Error deleting from {table_name}: {e}")
                 deleted_counts[table_name] = f"error: {str(e)}"
-
-        db.commit()
 
         # Calculate total deleted
         total_deleted = sum(v for v in deleted_counts.values() if isinstance(v, int))
 
         logger.info(f"Company data flush completed for company {company_id} by {user.email}. Total records deleted: {total_deleted}")
 
+        # =================================================================
+        # RE-SEED DEFAULT DATA
+        # =================================================================
+        seed_results = {}
+        try:
+            # Re-seed main warehouse
+            from app.utils.company_seed import seed_main_warehouse, seed_default_client_and_site
+
+            warehouse_result = seed_main_warehouse(company_id, db)
+            seed_results["warehouse"] = warehouse_result
+            logger.info(f"Main warehouse re-seeded for company {company_id}: {warehouse_result}")
+
+            # Re-seed default client and site
+            client_site_result = seed_default_client_and_site(company_id, db)
+            seed_results["client_and_site"] = client_site_result
+            logger.info(f"Default client/site re-seeded for company {company_id}: {client_site_result}")
+
+            db.commit()
+        except Exception as seed_error:
+            logger.warning(f"Failed to re-seed company defaults after flush: {seed_error}")
+            seed_results["error"] = str(seed_error)
+
         return {
             "success": True,
-            "message": f"Successfully flushed all operational data. {total_deleted} records deleted.",
-            "details": deleted_counts
+            "message": f"Successfully flushed all operational data and reset to fresh state. {total_deleted} records deleted.",
+            "details": deleted_counts,
+            "reseeded": seed_results
         }
 
     except Exception as e:

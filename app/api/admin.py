@@ -5,9 +5,11 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 from typing import List, Optional, Tuple, Dict, Any
 from datetime import datetime
+from decimal import Decimal
 from app.database import get_db
 from app.models import User, InvoiceItem, ItemMaster, Warehouse, ItemStock, ItemLedger, ItemAlias
 from app.utils.security import verify_password, create_access_token, verify_token
+from app.services.journal_posting import JournalPostingService
 import json
 import logging
 
@@ -244,26 +246,12 @@ def process_invoice_line_items(
     if not line_items:
         return {"processed": 0, "matched": 0, "received": 0, "errors": [], "needs_review": [], "warnings": []}
 
-    # Get main warehouse for auto-receiving
-    main_warehouse = db.query(Warehouse).filter(
-        Warehouse.company_id == company_id,
-        Warehouse.is_main == True,
-        Warehouse.is_active == True
-    ).first()
-
     processed_count = 0
     matched_count = 0
-    received_count = 0
+    received_count = 0  # Always 0 - items are NOT auto-received, user must click "Post Invoice"
     errors = []
     warnings = []
     needs_review = []  # Items that need manual linking
-
-    # Check if main warehouse is configured
-    if not main_warehouse:
-        warnings.append({
-            "type": "no_main_warehouse",
-            "message": "No main warehouse configured. Items will be matched but not auto-received to inventory. Please configure a main warehouse in Settings > Warehouses to enable automatic inventory updates."
-        })
 
     for idx, line_item in enumerate(line_items):
         try:
@@ -391,16 +379,10 @@ def process_invoice_line_items(
 
             if matched_item:
                 matched_count += 1
-
-                # DISABLED: Auto-receive to warehouse
-                # Inventory should only be received through GRN (Goods Receipt Note) workflow for proper:
-                # - Three-way matching (PO ↔ GRN ↔ Invoice)
-                # - Journal Entry creation (DR: Inventory, CR: GRNI)
-                # - Complete audit trail
-                # The invoice item is linked to ItemMaster but NOT auto-received to inventory.
-                # User must create a GRN from the linked PO to receive inventory.
+                # Item is matched but NOT auto-received
+                # User must click "Post Invoice" to receive items to inventory and create journal entries
                 logger.info(f"Item matched: {matched_item.item_number} (invoice item #{idx + 1}). "
-                           f"Inventory NOT auto-received - use GRN workflow.")
+                           f"Pending - use 'Post Invoice' to receive to inventory.")
 
         except Exception as item_error:
             logger.error(f"Error processing line item {idx + 1}: {item_error}")
@@ -408,6 +390,13 @@ def process_invoice_line_items(
                 "line": idx + 1,
                 "error": str(item_error)
             })
+
+    # NOTE: Items are NOT auto-received to inventory during invoice processing.
+    # User must click "Post Invoice" to:
+    # 1. Create ItemLedger entries
+    # 2. Update ItemStock quantities
+    # 3. Create Journal Entry (DR: Inventory, DR: VAT Input, CR: GRNI)
+    # This ensures proper control over when inventory is received and journal entries are created.
 
     # Commit all changes
     try:
@@ -428,7 +417,6 @@ def process_invoice_line_items(
         "processed": processed_count,
         "matched": matched_count,
         "received": received_count,
-        "main_warehouse": main_warehouse.name if main_warehouse else None,
         "needs_review": needs_review,  # Items needing manual linking
         "warnings": warnings,
         "errors": errors[:10]  # Return first 10 errors
@@ -637,6 +625,18 @@ async def get_all_invoices(
                     }
                 ]
             }
+
+        # Ensure required keys exist (in case structured_data was partially extracted)
+        if "line_items" not in structured_data:
+            structured_data["line_items"] = []
+        if "document_info" not in structured_data:
+            structured_data["document_info"] = {}
+        if "supplier" not in structured_data:
+            structured_data["supplier"] = {}
+        if "customer" not in structured_data:
+            structured_data["customer"] = {}
+        if "financial_details" not in structured_data:
+            structured_data["financial_details"] = {}
         
         invoice_data = {
             "id": str(image.id),
@@ -646,6 +646,7 @@ async def get_all_invoices(
             "original_filename": image.original_filename or f"invoice_{image.id}.jpg",
             "document_type": getattr(image, 'document_type', 'invoice'),
             "invoice_category": getattr(image, 'invoice_category', None),
+            "posting_status": getattr(image, 'posting_status', None),
             "created_at": image.created_at.isoformat() if image.created_at else "",
             "processing_method": getattr(image, 'processing_method', None) or 'STANDARD',
             "extraction_confidence": getattr(image, 'extraction_confidence', None) or 0.0,
@@ -1561,4 +1562,376 @@ async def admin_upload_bulk_images(
         "skipped_duplicates": len(duplicates),
         "results": results,
         "errors": errors
+    }
+
+
+@router.post("/admin/invoices/{invoice_id}/post")
+async def post_invoice_items(
+    invoice_id: int,
+    admin_user: User = Depends(get_current_admin),
+    db: Session = Depends(get_db)
+):
+    """
+    Post/receive linked invoice items to inventory.
+
+    This endpoint is used after manually linking invoice items to Item Master.
+    It creates:
+    1. ItemLedger entries for each linked item
+    2. Updates ItemStock quantities
+    3. Creates a consolidated Journal Entry (DR: Inventory, DR: VAT Input, CR: GRNI)
+
+    Only processes items that:
+    - Have item_id linked (matched to Item Master)
+    - Have receive_status = 'pending'
+    - Have quantity > 0
+    """
+    import json
+    from app.models import User as UserModel, ProcessedImage
+
+    # Get the invoice (join with User to verify company ownership)
+    invoice = db.query(ProcessedImage).join(
+        UserModel, ProcessedImage.user_id == UserModel.id
+    ).filter(
+        ProcessedImage.id == invoice_id,
+        UserModel.company_id == admin_user.company_id
+    ).first()
+
+    if not invoice:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Invoice not found"
+        )
+
+    # Get pending invoice items that are linked to Item Master
+    # Include items with status 'pending' or NULL (not yet processed)
+    from sqlalchemy import or_
+    pending_items = db.query(InvoiceItem).filter(
+        InvoiceItem.invoice_id == invoice_id,
+        InvoiceItem.item_id.isnot(None),  # Must be linked to Item Master
+        or_(
+            InvoiceItem.receive_status == "pending",
+            InvoiceItem.receive_status.is_(None)
+        ),
+        InvoiceItem.quantity > 0
+    ).all()
+
+    if not pending_items:
+        return {
+            "success": False,
+            "message": "No pending linked items to post. Make sure items are linked to Item Master.",
+            "received_count": 0,
+            "journal_entry": None
+        }
+
+    # Get main warehouse
+    main_warehouse = db.query(Warehouse).filter(
+        Warehouse.company_id == admin_user.company_id,
+        Warehouse.is_main == True,
+        Warehouse.is_active == True
+    ).first()
+
+    if not main_warehouse:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No main warehouse configured. Please set up a main warehouse first."
+        )
+
+    # Parse structured data for VAT info
+    structured_data = {}
+    if invoice.structured_data:
+        try:
+            structured_data = json.loads(invoice.structured_data)
+        except (json.JSONDecodeError, TypeError):
+            structured_data = {}
+
+    # Get VAT amount from financial details
+    financial_details = structured_data.get("financial_details", {})
+    vat_amount = Decimal("0")
+    try:
+        tax_str = financial_details.get("total_tax_amount") or financial_details.get("vat_amount") or "0"
+        if isinstance(tax_str, str):
+            tax_str = tax_str.replace("$", "").replace(",", "").strip()
+        vat_amount = Decimal(str(tax_str)) if tax_str else Decimal("0")
+    except (ValueError, TypeError, Exception) as e:
+        logger.warning(f"Could not parse VAT amount: {e}")
+        vat_amount = Decimal("0")
+
+    # Process each pending item
+    received_count = 0
+    total_inventory_cost = Decimal("0")
+    received_items_summary = []
+    first_ledger_entry_id = None
+    first_transaction_number = None
+    errors = []
+
+    for inv_item in pending_items:
+        try:
+            # Get the linked Item Master
+            item = db.query(ItemMaster).filter(
+                ItemMaster.id == inv_item.item_id,
+                ItemMaster.company_id == admin_user.company_id
+            ).first()
+
+            if not item:
+                errors.append(f"Item ID {inv_item.item_id} not found")
+                continue
+
+            qty_decimal = Decimal(str(inv_item.quantity))
+            unit_price = Decimal(str(inv_item.unit_price)) if inv_item.unit_price else Decimal("0")
+            # Calculate net total (unit_price * quantity) - NOT the invoice total_price which may include VAT
+            line_total_net = qty_decimal * unit_price
+
+            # Get or create ItemStock
+            stock = db.query(ItemStock).filter(
+                ItemStock.item_id == item.id,
+                ItemStock.warehouse_id == main_warehouse.id
+            ).first()
+
+            if not stock:
+                stock = ItemStock(
+                    company_id=admin_user.company_id,
+                    item_id=item.id,
+                    warehouse_id=main_warehouse.id,
+                    quantity_on_hand=Decimal("0"),
+                    quantity_reserved=Decimal("0"),
+                    average_cost=unit_price,
+                    last_movement_date=datetime.utcnow()
+                )
+                db.add(stock)
+                db.flush()
+
+            # Update stock quantity
+            old_qty = stock.quantity_on_hand or Decimal("0")
+            new_qty = old_qty + qty_decimal
+            stock.quantity_on_hand = new_qty
+            stock.last_movement_date = datetime.utcnow()
+
+            # Update average cost (weighted average)
+            if unit_price and unit_price > 0:
+                old_cost = stock.average_cost or Decimal("0")
+                if old_qty > 0 and old_cost > 0:
+                    total_old_value = old_qty * old_cost
+                    total_new_value = qty_decimal * unit_price
+                    stock.average_cost = (total_old_value + total_new_value) / new_qty
+                else:
+                    stock.average_cost = unit_price
+
+            # Generate transaction number
+            transaction_number = f"INV-RCV-{invoice_id}-{inv_item.id}"
+
+            # Create ItemLedger entry - use net cost (unit_price * qty), not invoice total which includes VAT
+            ledger_entry = ItemLedger(
+                company_id=admin_user.company_id,
+                item_id=item.id,
+                transaction_number=transaction_number,
+                transaction_type="RECEIVE_INVOICE",
+                transaction_date=datetime.utcnow(),
+                quantity=qty_decimal,
+                unit=inv_item.unit[:20] if inv_item.unit else "EA",
+                unit_cost=unit_price,
+                total_cost=line_total_net,
+                to_warehouse_id=main_warehouse.id,
+                invoice_id=invoice_id,
+                balance_after=new_qty,
+                notes=f"Posted from invoice (manual post)",
+                created_by=admin_user.id
+            )
+            db.add(ledger_entry)
+            db.flush()
+
+            # Track totals for journal entry (net cost, VAT is tracked separately)
+            total_inventory_cost += line_total_net
+            received_items_summary.append(f"{item.item_number} x {qty_decimal}")
+
+            if first_ledger_entry_id is None:
+                first_ledger_entry_id = ledger_entry.id
+                first_transaction_number = transaction_number
+
+            # Update invoice item status
+            inv_item.quantity_received = qty_decimal
+            inv_item.receive_status = "received"
+            inv_item.received_to_warehouse_id = main_warehouse.id
+            inv_item.received_at = datetime.utcnow()
+            inv_item.received_by = admin_user.id
+
+            received_count += 1
+            logger.info(f"Posted invoice item: {item.item_number} x {qty_decimal} to {main_warehouse.name}")
+
+        except Exception as e:
+            logger.error(f"Error posting invoice item {inv_item.id}: {e}")
+            errors.append(f"Item {inv_item.item_description or inv_item.id}: {str(e)}")
+
+    # Create consolidated journal entry if items were received
+    journal_entry_number = None
+    logger.info(f"Post invoice: received_count={received_count}, total_inventory_cost={total_inventory_cost}, vat_amount={vat_amount}")
+    if received_count > 0 and total_inventory_cost > 0:
+        try:
+            from app.services.journal_posting import JournalPostingService
+            from app.models import JournalEntry, JournalEntryLine
+            from datetime import date
+
+            journal_service = JournalPostingService(db, admin_user.company_id, admin_user.id)
+
+            # Get account mapping - try multiple mapping types
+            mapping = journal_service._get_mapping("invoice_receive_inventory")
+            mapping_type = "invoice_receive_inventory"
+            if not mapping:
+                mapping = journal_service._get_mapping("po_receive_inventory")
+                mapping_type = "po_receive_inventory"
+            if not mapping:
+                mapping = journal_service._get_mapping("inventory_increase")
+                mapping_type = "inventory_increase"
+            if not mapping:
+                mapping = journal_service._get_mapping("goods_received")
+                mapping_type = "goods_received"
+
+            logger.info(f"Journal mapping search - found: {mapping is not None}, type: {mapping_type if mapping else 'none'}")
+            logger.info(f"total_inventory_cost={total_inventory_cost}, received_count={received_count}")
+
+            if not mapping:
+                logger.warning(f"No journal mapping found for invoice posting. Tried: invoice_receive_inventory, po_receive_inventory, inventory_increase, goods_received")
+                errors.append("No journal entry mapping configured for invoice posting. Please configure account mapping.")
+
+            if mapping:
+                # Get business unit
+                business_unit_id = journal_service._get_business_unit_from_warehouse(main_warehouse.id)
+                if not business_unit_id:
+                    business_unit_id = journal_service._get_default_business_unit("balance_sheet")
+
+                # Get fiscal period
+                entry_date = date.today()
+                fiscal_period = journal_service._get_fiscal_period(entry_date)
+
+                # Build description
+                items_desc = ", ".join(received_items_summary[:3])
+                if len(received_items_summary) > 3:
+                    items_desc += f" (+{len(received_items_summary) - 3} more)"
+
+                # Create journal entry
+                entry = JournalEntry(
+                    company_id=admin_user.company_id,
+                    entry_number=journal_service._generate_entry_number(),
+                    entry_date=entry_date,
+                    description=f"Invoice Post - {items_desc}",
+                    source_type="invoice_post",
+                    source_id=first_ledger_entry_id,
+                    source_number=first_transaction_number,
+                    reference=f"INV-{invoice_id}",
+                    status="posted",
+                    fiscal_period_id=fiscal_period.id if fiscal_period else None,
+                    created_by=admin_user.id,
+                    is_auto_generated=True
+                )
+                db.add(entry)
+                db.flush()
+
+                je_lines = []
+                line_number = 1
+
+                # total_inventory_cost is already the NET amount (unit_price * qty for each item)
+                # Journal Entry:
+                # DR: Inventory (net amount) = total_inventory_cost
+                # DR: VAT Input = vat_amount
+                # CR: GRNI (total including VAT) = total_inventory_cost + vat_amount
+
+                # DR: Inventory (net amount)
+                if mapping.debit_account_id:
+                    inv_line = JournalEntryLine(
+                        journal_entry_id=entry.id,
+                        account_id=mapping.debit_account_id,
+                        debit=float(total_inventory_cost),
+                        credit=0,
+                        description=f"Inventory - {items_desc}",
+                        line_number=line_number,
+                        business_unit_id=business_unit_id
+                    )
+                    db.add(inv_line)
+                    je_lines.append(inv_line)
+                    line_number += 1
+
+                # DR: VAT Input (if VAT exists)
+                vat_posted = False
+                if vat_amount > 0:
+                    vat_mapping = journal_service._get_mapping("po_receive_vat")
+                    if not vat_mapping:
+                        vat_mapping = journal_service._get_mapping("vat_input")
+                    if not vat_mapping:
+                        vat_mapping = journal_service._get_mapping("tax_input")
+
+                    if vat_mapping and vat_mapping.debit_account_id:
+                        vat_line = JournalEntryLine(
+                            journal_entry_id=entry.id,
+                            account_id=vat_mapping.debit_account_id,
+                            debit=float(vat_amount),
+                            credit=0,
+                            description=f"VAT Input - Invoice post",
+                            line_number=line_number,
+                            business_unit_id=business_unit_id
+                        )
+                        db.add(vat_line)
+                        je_lines.append(vat_line)
+                        line_number += 1
+                        vat_posted = True
+
+                # CR: GRNI (total including VAT = net inventory + VAT)
+                total_credit = total_inventory_cost + vat_amount
+                if mapping.credit_account_id:
+                    ap_line = JournalEntryLine(
+                        journal_entry_id=entry.id,
+                        account_id=mapping.credit_account_id,
+                        debit=0,
+                        credit=float(total_credit),
+                        description=f"GRNI for invoice post",
+                        line_number=line_number,
+                        business_unit_id=business_unit_id
+                    )
+                    db.add(ap_line)
+                    je_lines.append(ap_line)
+
+                # Update totals
+                entry.total_debit = sum(float(l.debit) for l in je_lines)
+                entry.total_credit = sum(float(l.credit) for l in je_lines)
+
+                # Update account balances
+                journal_service._update_account_balance(entry)
+
+                journal_entry_number = entry.entry_number
+                logger.info(f"Created journal entry {entry.entry_number} for invoice post: "
+                           f"Inventory(net)={total_inventory_cost}, VAT={vat_amount if vat_posted else 0}, Total={total_credit}")
+
+        except Exception as je_error:
+            logger.error(f"Error creating journal entry for invoice post: {je_error}")
+            import traceback
+            logger.error(f"Journal entry traceback: {traceback.format_exc()}")
+            errors.append(f"Journal entry creation failed: {str(je_error)}")
+    else:
+        logger.warning(f"Skipping journal entry: received_count={received_count}, total_inventory_cost={total_inventory_cost}")
+
+    # Update invoice status
+    if received_count > 0:
+        # Check if all items are received
+        all_items = db.query(InvoiceItem).filter(
+            InvoiceItem.invoice_id == invoice_id
+        ).all()
+
+        all_received = all(
+            item.receive_status == "received" or item.item_id is None
+            for item in all_items
+        )
+
+        if all_received:
+            invoice.posting_status = "posted"
+        else:
+            invoice.posting_status = "partial"
+
+    db.commit()
+
+    return {
+        "success": received_count > 0,
+        "message": f"Posted {received_count} items to inventory" + (f" with {len(errors)} errors" if errors else ""),
+        "received_count": received_count,
+        "total_amount": float(total_inventory_cost),
+        "vat_amount": float(vat_amount),
+        "journal_entry": journal_entry_number,
+        "errors": errors if errors else None
     }

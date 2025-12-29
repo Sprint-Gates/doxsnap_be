@@ -16,11 +16,11 @@ import json
 import logging
 
 from app.models import (
-    User, Company, Site, Warehouse, BusinessUnit,
+    User, Company, Site, Warehouse, BusinessUnit, Client, Contract, AddressBook,
     AccountType, Account, FiscalPeriod, JournalEntry, JournalEntryLine,
     AccountBalance, DefaultAccountMapping,
     ProcessedImage, InvoiceAllocation, AllocationPeriod,
-    WorkOrder, WorkOrderSparePart, WorkOrderTimeEntry,
+    WorkOrder, WorkOrderSparePart, WorkOrderTimeEntry, ItemLedger as WorkOrderItemLedger,
     PettyCashTransaction, PettyCashReplenishment,
     PurchaseOrder, PurchaseOrderLine, ItemLedger, ItemMaster, ExchangeRate,
     GoodsReceiptExtraCost
@@ -470,6 +470,356 @@ class JournalPostingService:
 
         self.db.commit()
         logger.info(f"Created journal entry {entry.entry_number} for work order {work_order.id}")
+
+        return entry
+
+    def post_work_order_billing(
+        self,
+        work_order: WorkOrder,
+        post_immediately: bool = True
+    ) -> Optional[JournalEntry]:
+        """
+        Create journal entries when a billable work order is approved.
+        This handles proper accounting for charging the client.
+
+        As a CFO, the correct journal entries for a billable work order are:
+
+        ENTRY 1 - Revenue Recognition (Charge to Client):
+        ================================================
+        DR: Accounts Receivable (Client)     = Billable Amount + VAT
+          CR: Service Revenue                = Net Billable Amount
+          CR: VAT Output (if applicable)     = VAT Amount
+
+        ENTRY 2 - Cost Recognition (COGS for Labor):
+        =============================================
+        DR: Cost of Goods Sold - Labor       = Actual Labor Cost
+          CR: Accrued Labor / Labor Payable  = Actual Labor Cost
+
+        ENTRY 3 - Cost Recognition (COGS for Parts/Inventory):
+        ======================================================
+        DR: Cost of Goods Sold - Parts       = Actual Parts Cost
+          CR: Inventory                      = Actual Parts Cost
+
+        This ensures:
+        - Revenue is matched with costs (matching principle)
+        - Client is properly charged (AR created)
+        - Inventory is properly relieved
+        - VAT is correctly recorded for tax reporting
+        - Profit margin is visible (Revenue - COGS)
+        """
+        if not work_order.is_billable:
+            logger.info(f"Work order {work_order.id} is not billable, skipping billing entry")
+            return None
+
+        if work_order.approved_at is None:
+            logger.warning(f"Work order {work_order.id} is not approved yet")
+            return None
+
+        site_id = work_order.site_id
+        contract_id = work_order.contract_id
+
+        # Get client info from site
+        client_id = None
+        client_address_book_id = None
+        client_name = "Client"
+
+        if site_id:
+            site = self.db.query(Site).filter(Site.id == site_id).first()
+            if site and site.client_id:
+                client = self.db.query(Client).filter(Client.id == site.client_id).first()
+                if client:
+                    client_id = client.id
+                    client_address_book_id = client.address_book_id
+                    client_name = client.name
+
+        # Calculate costs
+        # Labor cost from time entries
+        labor_cost = Decimal("0")
+        time_entries = self.db.query(WorkOrderTimeEntry).filter(
+            WorkOrderTimeEntry.work_order_id == work_order.id
+        ).all()
+        for te in time_entries:
+            labor_cost += Decimal(str(te.total_cost or 0))
+
+        # Parts cost from issued items (ItemLedger)
+        parts_cost = Decimal("0")
+        issued_items = self.db.query(ItemLedger).filter(
+            ItemLedger.work_order_id == work_order.id,
+            ItemLedger.transaction_type == "ISSUE_WORK_ORDER"
+        ).all()
+        for item in issued_items:
+            parts_cost += Decimal(str(abs(item.total_cost or 0)))
+
+        # Subtract returned items
+        returned_items = self.db.query(ItemLedger).filter(
+            ItemLedger.work_order_id == work_order.id,
+            ItemLedger.transaction_type == "RETURN_WORK_ORDER"
+        ).all()
+        for item in returned_items:
+            parts_cost -= Decimal(str(abs(item.total_cost or 0)))
+
+        parts_cost = max(Decimal("0"), parts_cost)
+
+        # Calculate billable amount with markup
+        labor_markup = Decimal(str(work_order.labor_markup_percent or 0)) / Decimal("100")
+        parts_markup = Decimal(str(work_order.parts_markup_percent or 0)) / Decimal("100")
+
+        billable_labor = labor_cost * (Decimal("1") + labor_markup)
+        billable_parts = parts_cost * (Decimal("1") + parts_markup)
+
+        # Use work order's billable_amount if set, otherwise calculate
+        if work_order.billable_amount:
+            billable_amount = Decimal(str(work_order.billable_amount))
+        else:
+            billable_amount = billable_labor + billable_parts
+
+        if billable_amount <= 0 and labor_cost <= 0 and parts_cost <= 0:
+            logger.info(f"Work order {work_order.id} has no billable amount or costs")
+            return None
+
+        # Get VAT rate from company
+        company = self.db.query(Company).filter(Company.id == self.company_id).first()
+        vat_rate = Decimal(str(company.default_vat_rate or 0)) / Decimal("100") if company else Decimal("0")
+
+        # Calculate VAT on billable amount
+        vat_amount = billable_amount * vat_rate
+        total_receivable = billable_amount + vat_amount
+
+        # Get account mappings
+        revenue_mapping = self._get_mapping("work_order_revenue")
+        ar_mapping = self._get_mapping("accounts_receivable")
+        vat_output_mapping = self._get_mapping("vat_output")
+        labor_cogs_mapping = self._get_mapping("work_order_labor_cogs") or self._get_mapping("work_order_labor")
+        parts_cogs_mapping = self._get_mapping("work_order_parts_cogs") or self._get_mapping("work_order_parts")
+
+        if not revenue_mapping and not ar_mapping:
+            logger.warning("No account mappings for work order billing (revenue/AR)")
+            return None
+
+        # ============================================
+        # COST CENTER DETERMINATION
+        # ============================================
+        # Priority: Site's AddressBook -> Client's AddressBook -> Contract -> Default P&L Business Unit
+        # This ensures costs are properly allocated to the correct cost center
+        #
+        # In JDE-style accounting, Business Unit (BU) is the primary cost center dimension.
+        # Each site/client can have its own BU for P&L tracking.
+        business_unit_id = None
+
+        # 1. Try to get business unit from site's address book (site = cost center)
+        if site_id:
+            site = self.db.query(Site).filter(Site.id == site_id).first()
+            if site and site.address_book_id:
+                site_ab = self.db.query(AddressBook).filter(AddressBook.id == site.address_book_id).first()
+                if site_ab and site_ab.business_unit_id:
+                    business_unit_id = site_ab.business_unit_id
+                    logger.debug(f"Using site address book business unit: {business_unit_id}")
+
+        # 2. Try client's address book if no site BU
+        if not business_unit_id and client_address_book_id:
+            client_ab = self.db.query(AddressBook).filter(AddressBook.id == client_address_book_id).first()
+            if client_ab and client_ab.business_unit_id:
+                business_unit_id = client_ab.business_unit_id
+                logger.debug(f"Using client address book business unit: {business_unit_id}")
+
+        # 3. Try contract's address book
+        if not business_unit_id and contract_id:
+            contract = self.db.query(Contract).filter(Contract.id == contract_id).first()
+            if contract and contract.address_book_id:
+                contract_ab = self.db.query(AddressBook).filter(AddressBook.id == contract.address_book_id).first()
+                if contract_ab and contract_ab.business_unit_id:
+                    business_unit_id = contract_ab.business_unit_id
+                    logger.debug(f"Using contract address book business unit: {business_unit_id}")
+
+        # 4. Fall back to default P&L business unit
+        if not business_unit_id:
+            business_unit_id = self._get_default_business_unit("profit_loss")
+            logger.debug(f"Using default P&L business unit: {business_unit_id}")
+
+        # Create journal entry
+        entry_date = work_order.approved_at.date() if work_order.approved_at else date.today()
+        fiscal_period = self._get_fiscal_period(entry_date)
+
+        entry = JournalEntry(
+            company_id=self.company_id,
+            entry_number=self._generate_entry_number(),
+            entry_date=entry_date,
+            description=f"Work Order Billing - {work_order.wo_number} - {work_order.title or 'Services'}",
+            reference=work_order.wo_number,
+            source_type="work_order_billing",
+            source_id=work_order.id,
+            source_number=work_order.wo_number,
+            fiscal_period_id=fiscal_period.id if fiscal_period else None,
+            status="draft",
+            is_auto_generated=True,
+            created_by=self.user_id
+        )
+        self.db.add(entry)
+        self.db.flush()
+
+        lines = []
+        line_number = 1
+
+        # ============================================
+        # REVENUE RECOGNITION - Charge to Client
+        # ============================================
+
+        # DR: Accounts Receivable (total amount including VAT)
+        ar_account_id = ar_mapping.debit_account_id if ar_mapping else None
+        if ar_account_id and total_receivable > 0:
+            ar_line = JournalEntryLine(
+                journal_entry_id=entry.id,
+                account_id=ar_account_id,
+                debit=float(total_receivable),
+                credit=0,
+                description=f"Accounts Receivable - {client_name} - WO {work_order.wo_number}",
+                site_id=site_id,
+                contract_id=contract_id,
+                work_order_id=work_order.id,
+                address_book_id=client_address_book_id,
+                business_unit_id=business_unit_id,
+                line_number=line_number
+            )
+            self.db.add(ar_line)
+            lines.append(ar_line)
+            line_number += 1
+
+        # CR: Service Revenue (net of VAT)
+        revenue_account_id = revenue_mapping.credit_account_id if revenue_mapping else None
+        if revenue_account_id and billable_amount > 0:
+            revenue_line = JournalEntryLine(
+                journal_entry_id=entry.id,
+                account_id=revenue_account_id,
+                debit=0,
+                credit=float(billable_amount),
+                description=f"Service Revenue - WO {work_order.wo_number}",
+                site_id=site_id,
+                contract_id=contract_id,
+                work_order_id=work_order.id,
+                address_book_id=client_address_book_id,
+                business_unit_id=business_unit_id,
+                line_number=line_number
+            )
+            self.db.add(revenue_line)
+            lines.append(revenue_line)
+            line_number += 1
+
+        # CR: VAT Output (if applicable)
+        vat_account_id = vat_output_mapping.credit_account_id if vat_output_mapping else None
+        if vat_account_id and vat_amount > 0:
+            vat_line = JournalEntryLine(
+                journal_entry_id=entry.id,
+                account_id=vat_account_id,
+                debit=0,
+                credit=float(vat_amount),
+                description=f"VAT Output - WO {work_order.wo_number}",
+                site_id=site_id,
+                work_order_id=work_order.id,
+                business_unit_id=business_unit_id,
+                line_number=line_number
+            )
+            self.db.add(vat_line)
+            lines.append(vat_line)
+            line_number += 1
+
+        # ============================================
+        # COST RECOGNITION - Labor COGS
+        # ============================================
+        if labor_cost > 0 and labor_cogs_mapping:
+            # DR: Cost of Goods Sold - Labor
+            if labor_cogs_mapping.debit_account_id:
+                labor_cogs_line = JournalEntryLine(
+                    journal_entry_id=entry.id,
+                    account_id=labor_cogs_mapping.debit_account_id,
+                    debit=float(labor_cost),
+                    credit=0,
+                    description=f"COGS - Labor - WO {work_order.wo_number}",
+                    site_id=site_id,
+                    contract_id=contract_id,
+                    work_order_id=work_order.id,
+                    business_unit_id=business_unit_id,
+                    line_number=line_number
+                )
+                self.db.add(labor_cogs_line)
+                lines.append(labor_cogs_line)
+                line_number += 1
+
+            # CR: Accrued Labor / Labor Payable
+            if labor_cogs_mapping.credit_account_id:
+                labor_payable_line = JournalEntryLine(
+                    journal_entry_id=entry.id,
+                    account_id=labor_cogs_mapping.credit_account_id,
+                    debit=0,
+                    credit=float(labor_cost),
+                    description=f"Labor Payable - WO {work_order.wo_number}",
+                    site_id=site_id,
+                    work_order_id=work_order.id,
+                    business_unit_id=business_unit_id,
+                    line_number=line_number
+                )
+                self.db.add(labor_payable_line)
+                lines.append(labor_payable_line)
+                line_number += 1
+
+        # ============================================
+        # COST RECOGNITION - Parts/Inventory COGS
+        # ============================================
+        if parts_cost > 0 and parts_cogs_mapping:
+            # DR: Cost of Goods Sold - Parts
+            if parts_cogs_mapping.debit_account_id:
+                parts_cogs_line = JournalEntryLine(
+                    journal_entry_id=entry.id,
+                    account_id=parts_cogs_mapping.debit_account_id,
+                    debit=float(parts_cost),
+                    credit=0,
+                    description=f"COGS - Parts/Materials - WO {work_order.wo_number}",
+                    site_id=site_id,
+                    contract_id=contract_id,
+                    work_order_id=work_order.id,
+                    business_unit_id=business_unit_id,
+                    line_number=line_number
+                )
+                self.db.add(parts_cogs_line)
+                lines.append(parts_cogs_line)
+                line_number += 1
+
+            # CR: Inventory
+            if parts_cogs_mapping.credit_account_id:
+                inventory_line = JournalEntryLine(
+                    journal_entry_id=entry.id,
+                    account_id=parts_cogs_mapping.credit_account_id,
+                    debit=0,
+                    credit=float(parts_cost),
+                    description=f"Inventory Relief - WO {work_order.wo_number}",
+                    site_id=site_id,
+                    work_order_id=work_order.id,
+                    business_unit_id=business_unit_id,
+                    line_number=line_number
+                )
+                self.db.add(inventory_line)
+                lines.append(inventory_line)
+                line_number += 1
+
+        # Update totals
+        entry.total_debit = sum(float(l.debit) for l in lines)
+        entry.total_credit = sum(float(l.credit) for l in lines)
+
+        # Update work order with calculated amounts
+        work_order.actual_labor_cost = float(labor_cost)
+        work_order.actual_parts_cost = float(parts_cost)
+        work_order.actual_total_cost = float(labor_cost + parts_cost)
+        work_order.billable_amount = float(billable_amount)
+        work_order.billing_status = "pending"  # Mark as pending invoice/payment
+
+        if post_immediately:
+            entry.status = "posted"
+            entry.posted_at = datetime.utcnow()
+            entry.posted_by = self.user_id
+            self._update_account_balance(entry)
+
+        self.db.commit()
+        logger.info(f"Created billing journal entry {entry.entry_number} for work order {work_order.id} - "
+                   f"Revenue: {billable_amount}, VAT: {vat_amount}, Labor COGS: {labor_cost}, Parts COGS: {parts_cost}")
 
         return entry
 

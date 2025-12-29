@@ -1173,50 +1173,62 @@ def get_trial_balance(
     company_id = get_company_id(current_user, db)
 
     # Get all accounts with their balances
+    # Create a subquery to sum journal entry lines from posted entries up to as_of_date
+    line_sums = db.query(
+        JournalEntryLine.account_id,
+        JournalEntryLine.site_id,
+        JournalEntryLine.business_unit_id,
+        func.sum(JournalEntryLine.debit).label('total_debit'),
+        func.sum(JournalEntryLine.credit).label('total_credit')
+    ).join(
+        JournalEntry, JournalEntryLine.journal_entry_id == JournalEntry.id
+    ).filter(
+        JournalEntry.company_id == company_id,
+        JournalEntry.status == "posted",
+        JournalEntry.entry_date <= as_of_date
+    )
+
+    # Apply site/business unit filters if specified
+    if site_id:
+        line_sums = line_sums.filter(JournalEntryLine.site_id == site_id)
+
+    if business_unit_id:
+        line_sums = line_sums.filter(JournalEntryLine.business_unit_id == business_unit_id)
+
+    line_sums = line_sums.group_by(
+        JournalEntryLine.account_id,
+        JournalEntryLine.site_id,
+        JournalEntryLine.business_unit_id
+    ).subquery()
+
+    # Aggregate all lines per account (across all sites/BUs unless filtered)
+    account_totals = db.query(
+        line_sums.c.account_id,
+        func.sum(line_sums.c.total_debit).label('total_debit'),
+        func.sum(line_sums.c.total_credit).label('total_credit')
+    ).group_by(line_sums.c.account_id).subquery()
+
+    # Join with accounts to get account details
     query = db.query(
         Account.id,
         Account.code,
         Account.name,
         AccountType.code.label('type_code'),
         AccountType.normal_balance,
-        func.coalesce(func.sum(JournalEntryLine.debit), 0).label('total_debit'),
-        func.coalesce(func.sum(JournalEntryLine.credit), 0).label('total_credit')
+        func.coalesce(account_totals.c.total_debit, 0).label('total_debit'),
+        func.coalesce(account_totals.c.total_credit, 0).label('total_credit')
     ).join(
         AccountType, Account.account_type_id == AccountType.id
     ).outerjoin(
-        JournalEntryLine, Account.id == JournalEntryLine.account_id
-    ).outerjoin(
-        JournalEntry, and_(
-            JournalEntryLine.journal_entry_id == JournalEntry.id,
-            JournalEntry.status == "posted",
-            JournalEntry.entry_date <= as_of_date
-        )
+        account_totals, Account.id == account_totals.c.account_id
     ).filter(
         Account.company_id == company_id,
         Account.is_active == True,
         Account.is_header == False
     )
 
-    if site_id:
-        query = query.filter(
-            or_(
-                JournalEntryLine.site_id == site_id,
-                JournalEntryLine.site_id == None
-            )
-        )
-
-    if business_unit_id:
-        query = query.filter(
-            or_(
-                JournalEntryLine.business_unit_id == business_unit_id,
-                JournalEntryLine.business_unit_id == None
-            )
-        )
-
-    query = query.group_by(
-        Account.id, Account.code, Account.name,
-        AccountType.code, AccountType.normal_balance
-    ).order_by(Account.code)
+    # No need for group_by since we're using subquery aggregation
+    query = query.order_by(Account.code)
 
     results = query.all()
 
@@ -2269,6 +2281,7 @@ def initialize_chart_of_accounts(
         {"code": "2000", "name": "Liabilities", "type": "LIABILITY", "is_header": True},
         {"code": "2100", "name": "Current Liabilities", "type": "LIABILITY", "is_header": True, "parent": "2000"},
         {"code": "2110", "name": "Accounts Payable", "type": "LIABILITY", "is_control_account": True, "parent": "2100"},
+        {"code": "2115", "name": "Goods Received Not Invoiced (GRNI)", "type": "LIABILITY", "parent": "2100"},
         {"code": "2120", "name": "VAT Output (Payable)", "type": "LIABILITY", "parent": "2100"},
         {"code": "2130", "name": "Accrued Labor", "type": "LIABILITY", "parent": "2100"},
         {"code": "2140", "name": "Accrued Expenses", "type": "LIABILITY", "parent": "2100"},
@@ -2301,6 +2314,9 @@ def initialize_chart_of_accounts(
         {"code": "5310", "name": "Office Supplies", "type": "EXPENSE", "parent": "5300"},
         {"code": "5320", "name": "Insurance", "type": "EXPENSE", "parent": "5300"},
         {"code": "5330", "name": "Depreciation Expense", "type": "EXPENSE", "parent": "5300"},
+        {"code": "5400", "name": "Procurement Variances", "type": "EXPENSE", "is_header": True, "parent": "5000"},
+        {"code": "5410", "name": "Purchase Price Variance", "type": "EXPENSE", "parent": "5400"},
+        {"code": "5420", "name": "Purchase Discount", "type": "EXPENSE", "parent": "5400"},
     ]
 
     # Create accounts
@@ -2344,9 +2360,19 @@ def initialize_chart_of_accounts(
         {"transaction_type": "petty_cash_expense", "category": "materials", "debit": "5120", "credit": "1120", "desc": "Petty cash - materials"},
         {"transaction_type": "petty_cash_replenishment", "category": None, "debit": "1120", "credit": "1110", "desc": "Petty cash replenishment"},
         # Goods Receipt (GRN) accounting
-        {"transaction_type": "po_receive_inventory", "category": None, "debit": "1140", "credit": "2110", "desc": "Goods receipt - inventory increase"},
-        {"transaction_type": "po_receive_vat", "category": None, "debit": "1130", "credit": "2110", "desc": "Goods receipt - VAT on receiving"},
-        {"transaction_type": "grni", "category": None, "debit": None, "credit": "2110", "desc": "Goods Received Not Invoiced"},
+        {"transaction_type": "po_receive_inventory", "category": None, "debit": "1140", "credit": "2115", "desc": "Goods receipt - inventory increase"},
+        {"transaction_type": "po_receive_vat", "category": None, "debit": "1130", "credit": "2115", "desc": "Goods receipt - VAT on receiving"},
+        {"transaction_type": "grni", "category": None, "debit": None, "credit": "2115", "desc": "Goods Received Not Invoiced"},
+        # Supplier Invoice & Payment (Procure-to-Pay)
+        {"transaction_type": "accounts_payable", "category": None, "debit": None, "credit": "2110", "desc": "Accounts Payable"},
+        {"transaction_type": "cash", "category": None, "debit": "1110", "credit": None, "desc": "Cash/Bank Account"},
+        {"transaction_type": "purchase_price_variance", "category": None, "debit": "5410", "credit": "5410", "desc": "Purchase Price Variance"},
+        {"transaction_type": "purchase_discount", "category": None, "debit": None, "credit": "5420", "desc": "Purchase Discount Earned"},
+        # Landed Cost mappings
+        {"transaction_type": "landed_cost_freight", "category": None, "debit": None, "credit": "2110", "desc": "Freight Cost Payable"},
+        {"transaction_type": "landed_cost_duty", "category": None, "debit": None, "credit": "2110", "desc": "Customs Duty Payable"},
+        {"transaction_type": "landed_cost_customs", "category": None, "debit": None, "credit": "2110", "desc": "Customs Charges Payable"},
+        {"transaction_type": "landed_cost_insurance", "category": None, "debit": None, "credit": "2110", "desc": "Insurance Cost Payable"},
     ]
 
     for map_data in mappings_data:

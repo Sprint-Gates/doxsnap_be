@@ -12,12 +12,23 @@ operator_branches = Table(
     Column('assigned_at', DateTime, default=func.now())
 )
 
-# Association table for HandHeldDevice-Technician many-to-many relationship
+# Association table for HandHeldDevice-Technician many-to-many relationship (Legacy)
 handheld_device_technicians = Table(
     'handheld_device_technicians',
     Base.metadata,
     Column('handheld_device_id', Integer, ForeignKey('handheld_devices.id', ondelete='CASCADE'), primary_key=True),
     Column('technician_id', Integer, ForeignKey('technicians.id', ondelete='CASCADE'), primary_key=True),
+    Column('assigned_at', DateTime, default=func.now()),
+    Column('is_primary', Boolean, default=False),
+    Column('notes', Text, nullable=True)
+)
+
+# Association table for HandHeldDevice-AddressBook (Employee) many-to-many relationship
+handheld_device_technicians_ab = Table(
+    'handheld_device_technicians_ab',
+    Base.metadata,
+    Column('handheld_device_id', Integer, ForeignKey('handheld_devices.id', ondelete='CASCADE'), primary_key=True),
+    Column('address_book_id', Integer, ForeignKey('address_book.id', ondelete='CASCADE'), primary_key=True),
     Column('assigned_at', DateTime, default=func.now()),
     Column('is_primary', Boolean, default=False),
     Column('notes', Text, nullable=True)
@@ -87,6 +98,9 @@ class Company(Base):
     primary_currency = Column(String(3), default='USD')  # ISO 4217 currency code
     industry = Column(String, nullable=True)
     size = Column(String, nullable=True)  # "1-10", "11-50", "51-200", etc.
+
+    # Tax Settings
+    default_vat_rate = Column(Numeric(5, 2), default=15.00)  # Default VAT/Tax rate (e.g., 15.00 for 15%)
 
     # Subscription info
     plan_id = Column(Integer, ForeignKey("plans.id"), nullable=True)
@@ -224,6 +238,7 @@ class ProcessedImage(Base):
     processing_status = Column(String, default="pending")  # pending, completed, failed
     document_type = Column(String, default="invoice")  # invoice, receipt, purchase_order, bill_of_lading, etc.
     invoice_category = Column(String, nullable=True)  # service (subcontractor invoice) or spare_parts
+    posting_status = Column(String, nullable=True)  # pending, posted - tracks if invoice items were posted to inventory
 
     # Project linkage for multi-tenant structure
     project_id = Column(Integer, ForeignKey("projects.id"), nullable=True)
@@ -2545,7 +2560,9 @@ class InvoiceAllocation(Base):
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
 
     # Relationships
-    invoice = relationship("ProcessedImage", backref="allocation")
+    # passive_deletes=True tells SQLAlchemy to let the DB handle cascade deletion
+    # instead of trying to set invoice_id to NULL (which violates NOT NULL constraint)
+    invoice = relationship("ProcessedImage", backref=backref("allocation", passive_deletes=True))
     contract = relationship("Contract", backref="allocations")
     site = relationship("Site", backref="allocations")
     project = relationship("Project", backref="allocations")
@@ -4358,3 +4375,420 @@ class AddressBookContact(Base):
 
     # Relationships
     address_book = relationship("AddressBook", back_populates="contacts")
+
+
+# =============================================================================
+# SUPPLIER INVOICE & PAYMENT MODELS (Complete Procure-to-Pay Cycle)
+# =============================================================================
+
+class SupplierInvoice(Base):
+    """
+    Supplier Invoice - Formal invoice document from supplier for goods/services.
+    Links to PO and GRN for three-way matching. Triggers GRNI clearing when matched.
+
+    Workflow: draft → pending_approval → approved → partially_paid → paid → cancelled
+    """
+    __tablename__ = "supplier_invoices"
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+    invoice_number = Column(String(50), nullable=False)  # SI-YYYY-NNNNN (internal)
+
+    # Supplier Details
+    address_book_id = Column(Integer, ForeignKey("address_book.id"), nullable=False)  # Vendor
+    supplier_invoice_number = Column(String(100), nullable=True)  # Supplier's own invoice number
+
+    # Dates
+    invoice_date = Column(Date, nullable=False)
+    received_date = Column(Date, nullable=True)  # When invoice was received
+    due_date = Column(Date, nullable=True)  # Payment due date (calculated from payment terms)
+
+    # Payment Terms
+    payment_terms = Column(String(50), nullable=True)  # Net30, Net60, 2/10Net30, etc.
+    payment_terms_days = Column(Integer, default=30)  # Days until due
+    early_payment_discount_percent = Column(Numeric(5, 2), default=0)  # e.g., 2% for 2/10
+    early_payment_discount_days = Column(Integer, nullable=True)  # e.g., 10 days for 2/10
+
+    # Linkages
+    purchase_order_id = Column(Integer, ForeignKey("purchase_orders.id"), nullable=True)
+    goods_receipt_id = Column(Integer, ForeignKey("goods_receipts.id"), nullable=True)  # Primary GRN for matching
+    processed_image_id = Column(Integer, ForeignKey("processed_images.id"), nullable=True)  # Scanned invoice image
+
+    # Financial Details
+    currency = Column(String(3), default='USD')
+    exchange_rate = Column(Numeric(18, 6), default=1.0)
+    subtotal = Column(Numeric(18, 2), default=0)  # Before tax
+    tax_amount = Column(Numeric(18, 2), default=0)
+    total_amount = Column(Numeric(18, 2), default=0)  # subtotal + tax
+
+    # Amounts in base currency
+    subtotal_base = Column(Numeric(18, 2), default=0)
+    tax_amount_base = Column(Numeric(18, 2), default=0)
+    total_amount_base = Column(Numeric(18, 2), default=0)
+
+    # Payment tracking
+    amount_paid = Column(Numeric(18, 2), default=0)
+    amount_remaining = Column(Numeric(18, 2), default=0)
+
+    # Status workflow: draft → pending_approval → approved → partially_paid → paid → cancelled
+    status = Column(String(30), default='draft')
+
+    # Three-way match status
+    match_status = Column(String(30), nullable=True)  # pending, matched, variance, failed
+    po_variance_amount = Column(Numeric(18, 2), default=0)  # Difference from PO
+    grn_variance_amount = Column(Numeric(18, 2), default=0)  # Difference from GRN
+    variance_explanation = Column(Text, nullable=True)
+
+    # Approval workflow
+    approval_status = Column(String(20), default='pending')  # pending, approved, rejected
+    approved_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    approved_at = Column(DateTime, nullable=True)
+    rejection_reason = Column(Text, nullable=True)
+
+    # Hold status (for payment hold)
+    is_on_hold = Column(Boolean, default=False)
+    hold_reason = Column(Text, nullable=True)
+    hold_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    hold_at = Column(DateTime, nullable=True)
+
+    # Journal entries
+    journal_entry_id = Column(Integer, ForeignKey("journal_entries.id"), nullable=True)  # AP posting
+    grni_clearing_entry_id = Column(Integer, ForeignKey("journal_entries.id"), nullable=True)  # GRNI clearing
+
+    # GRNI clearing status
+    is_grni_cleared = Column(Boolean, default=False)
+
+    notes = Column(Text, nullable=True)
+
+    # Audit fields
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        UniqueConstraint('company_id', 'invoice_number', name='uq_supplier_invoice_number'),
+        UniqueConstraint('company_id', 'address_book_id', 'supplier_invoice_number',
+                        name='uq_supplier_invoice_vendor_ref'),
+    )
+
+    # Relationships
+    company = relationship("Company", backref="supplier_invoices")
+    address_book = relationship("AddressBook", backref="supplier_invoices")
+    purchase_order = relationship("PurchaseOrder", backref="supplier_invoices")
+    goods_receipt = relationship("GoodsReceipt", backref="supplier_invoices")
+    processed_image = relationship("ProcessedImage", backref="supplier_invoice")
+    lines = relationship("SupplierInvoiceLine", back_populates="invoice", cascade="all, delete-orphan")
+    payments = relationship("SupplierPaymentAllocation", back_populates="invoice")
+    journal_entry = relationship("JournalEntry", foreign_keys=[journal_entry_id])
+    grni_clearing_entry = relationship("JournalEntry", foreign_keys=[grni_clearing_entry_id])
+    creator = relationship("User", foreign_keys=[created_by])
+    approver = relationship("User", foreign_keys=[approved_by])
+    holder = relationship("User", foreign_keys=[hold_by])
+
+
+class SupplierInvoiceLine(Base):
+    """
+    Supplier Invoice Line - Individual line items on an invoice.
+    Links to PO line and GRN line for detailed matching.
+    """
+    __tablename__ = "supplier_invoice_lines"
+
+    id = Column(Integer, primary_key=True, index=True)
+    supplier_invoice_id = Column(Integer, ForeignKey("supplier_invoices.id", ondelete="CASCADE"), nullable=False)
+    line_number = Column(Integer, nullable=False)
+
+    # Item details
+    item_id = Column(Integer, ForeignKey("item_master.id"), nullable=True)
+    item_code = Column(String(50), nullable=True)
+    description = Column(String(500), nullable=False)
+
+    # Quantities and pricing
+    quantity = Column(Numeric(18, 4), nullable=False)
+    unit = Column(String(20), default='EA')
+    unit_price = Column(Numeric(18, 4), nullable=False)
+    total_price = Column(Numeric(18, 2), nullable=False)
+    tax_amount = Column(Numeric(18, 2), default=0)
+
+    # Linkages for matching
+    po_line_id = Column(Integer, ForeignKey("purchase_order_lines.id"), nullable=True)
+    grn_line_id = Column(Integer, ForeignKey("goods_receipt_lines.id"), nullable=True)
+
+    # Variance tracking
+    quantity_variance = Column(Numeric(18, 4), default=0)  # Difference from PO/GRN
+    price_variance = Column(Numeric(18, 4), default=0)  # Price difference
+    has_variance = Column(Boolean, default=False)
+
+    # GL Account override (if different from default)
+    account_id = Column(Integer, ForeignKey("accounts.id"), nullable=True)
+
+    notes = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=func.now())
+
+    # Relationships
+    invoice = relationship("SupplierInvoice", back_populates="lines")
+    item = relationship("ItemMaster")
+    po_line = relationship("PurchaseOrderLine")
+    grn_line = relationship("GoodsReceiptLine")
+    account = relationship("Account")
+
+
+class SupplierPayment(Base):
+    """
+    Supplier Payment - Payment made to a supplier for one or more invoices.
+    Supports partial payments and multiple invoices per payment.
+
+    Workflow: draft → pending_approval → approved → posted → cancelled
+    """
+    __tablename__ = "supplier_payments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+    payment_number = Column(String(50), nullable=False)  # PAY-YYYY-NNNNN
+
+    # Supplier
+    address_book_id = Column(Integer, ForeignKey("address_book.id"), nullable=False)
+
+    # Payment Details
+    payment_date = Column(Date, nullable=False)
+    payment_method = Column(String(30), nullable=False)  # check, bank_transfer, wire, ach, card, cash
+
+    # Bank/Check details
+    bank_account = Column(String(100), nullable=True)  # Paying bank account
+    check_number = Column(String(50), nullable=True)
+    reference_number = Column(String(100), nullable=True)  # Wire ref, ACH trace, etc.
+
+    # Financial
+    currency = Column(String(3), default='USD')
+    exchange_rate = Column(Numeric(18, 6), default=1.0)
+    total_amount = Column(Numeric(18, 2), nullable=False)  # Total payment amount
+    total_amount_base = Column(Numeric(18, 2), nullable=False)
+
+    # Discount taken
+    discount_taken = Column(Numeric(18, 2), default=0)  # Early payment discount
+
+    # Status: draft → pending_approval → approved → posted → voided
+    status = Column(String(20), default='draft')
+
+    # Approval
+    approved_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    approved_at = Column(DateTime, nullable=True)
+
+    # Posting
+    journal_entry_id = Column(Integer, ForeignKey("journal_entries.id"), nullable=True)
+    posted_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    posted_at = Column(DateTime, nullable=True)
+
+    # Void tracking
+    voided_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    voided_at = Column(DateTime, nullable=True)
+    void_reason = Column(Text, nullable=True)
+
+    notes = Column(Text, nullable=True)
+
+    # Audit
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        UniqueConstraint('company_id', 'payment_number', name='uq_supplier_payment_number'),
+    )
+
+    # Relationships
+    company = relationship("Company", backref="supplier_payments")
+    address_book = relationship("AddressBook", backref="supplier_payments")
+    allocations = relationship("SupplierPaymentAllocation", back_populates="payment", cascade="all, delete-orphan")
+    journal_entry = relationship("JournalEntry", foreign_keys=[journal_entry_id])
+    creator = relationship("User", foreign_keys=[created_by])
+    approver = relationship("User", foreign_keys=[approved_by])
+    poster = relationship("User", foreign_keys=[posted_by])
+    voider = relationship("User", foreign_keys=[voided_by])
+
+
+class SupplierPaymentAllocation(Base):
+    """
+    Payment Allocation - Links payments to invoices.
+    Supports partial payments and multiple invoices per payment.
+    """
+    __tablename__ = "supplier_payment_allocations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    payment_id = Column(Integer, ForeignKey("supplier_payments.id", ondelete="CASCADE"), nullable=False)
+    invoice_id = Column(Integer, ForeignKey("supplier_invoices.id"), nullable=False)
+
+    # Allocation amounts
+    allocated_amount = Column(Numeric(18, 2), nullable=False)  # Amount applied to this invoice
+    discount_amount = Column(Numeric(18, 2), default=0)  # Early payment discount
+
+    notes = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint('payment_id', 'invoice_id', name='uq_payment_invoice_allocation'),
+    )
+
+    # Relationships
+    payment = relationship("SupplierPayment", back_populates="allocations")
+    invoice = relationship("SupplierInvoice", back_populates="payments")
+
+
+class DebitNote(Base):
+    """
+    Debit Note / Return to Vendor (RTV) - For returning goods to supplier.
+    Creates a credit against supplier account.
+
+    Workflow: draft → approved → posted → cancelled
+    """
+    __tablename__ = "debit_notes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+    debit_note_number = Column(String(50), nullable=False)  # DN-YYYY-NNNNN
+
+    # Supplier
+    address_book_id = Column(Integer, ForeignKey("address_book.id"), nullable=False)
+
+    # Source references
+    goods_receipt_id = Column(Integer, ForeignKey("goods_receipts.id"), nullable=True)
+    supplier_invoice_id = Column(Integer, ForeignKey("supplier_invoices.id"), nullable=True)
+    purchase_order_id = Column(Integer, ForeignKey("purchase_orders.id"), nullable=True)
+
+    # Details
+    debit_note_date = Column(Date, nullable=False)
+    reason = Column(String(50), nullable=False)  # damaged, wrong_item, quality_reject, over_delivery, price_adjustment
+
+    # Financial
+    currency = Column(String(3), default='USD')
+    exchange_rate = Column(Numeric(18, 6), default=1.0)
+    subtotal = Column(Numeric(18, 2), default=0)
+    tax_amount = Column(Numeric(18, 2), default=0)
+    total_amount = Column(Numeric(18, 2), default=0)
+
+    # Return shipping (if physical return)
+    return_required = Column(Boolean, default=True)
+    return_authorization_number = Column(String(100), nullable=True)  # Supplier's RA number
+    return_tracking_number = Column(String(100), nullable=True)
+    return_shipped_date = Column(Date, nullable=True)
+    return_received_date = Column(Date, nullable=True)  # Confirmed by supplier
+
+    # Status: draft → approved → posted → applied → cancelled
+    status = Column(String(20), default='draft')
+
+    # Approval
+    approved_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    approved_at = Column(DateTime, nullable=True)
+
+    # Journal entry
+    journal_entry_id = Column(Integer, ForeignKey("journal_entries.id"), nullable=True)
+
+    # Application to invoice/payment
+    applied_to_invoice_id = Column(Integer, ForeignKey("supplier_invoices.id"), nullable=True)
+    applied_amount = Column(Numeric(18, 2), default=0)
+
+    notes = Column(Text, nullable=True)
+
+    # Audit
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        UniqueConstraint('company_id', 'debit_note_number', name='uq_debit_note_number'),
+    )
+
+    # Relationships
+    company = relationship("Company", backref="debit_notes")
+    address_book = relationship("AddressBook", backref="debit_notes")
+    goods_receipt = relationship("GoodsReceipt", backref="debit_notes")
+    supplier_invoice = relationship("SupplierInvoice", foreign_keys=[supplier_invoice_id], backref="debit_notes")
+    purchase_order = relationship("PurchaseOrder", backref="debit_notes")
+    lines = relationship("DebitNoteLine", back_populates="debit_note", cascade="all, delete-orphan")
+    journal_entry = relationship("JournalEntry", foreign_keys=[journal_entry_id])
+    applied_to_invoice = relationship("SupplierInvoice", foreign_keys=[applied_to_invoice_id])
+    creator = relationship("User", foreign_keys=[created_by])
+    approver = relationship("User", foreign_keys=[approved_by])
+
+
+class DebitNoteLine(Base):
+    """
+    Debit Note Line - Individual items being returned or credited.
+    """
+    __tablename__ = "debit_note_lines"
+
+    id = Column(Integer, primary_key=True, index=True)
+    debit_note_id = Column(Integer, ForeignKey("debit_notes.id", ondelete="CASCADE"), nullable=False)
+    line_number = Column(Integer, nullable=False)
+
+    # Item
+    item_id = Column(Integer, ForeignKey("item_master.id"), nullable=True)
+    item_code = Column(String(50), nullable=True)
+    description = Column(String(500), nullable=False)
+
+    # Quantities
+    quantity = Column(Numeric(18, 4), nullable=False)
+    unit = Column(String(20), default='EA')
+    unit_price = Column(Numeric(18, 4), nullable=False)
+    total_price = Column(Numeric(18, 2), nullable=False)
+
+    # Source line references
+    grn_line_id = Column(Integer, ForeignKey("goods_receipt_lines.id"), nullable=True)
+    invoice_line_id = Column(Integer, ForeignKey("supplier_invoice_lines.id"), nullable=True)
+
+    # Return details
+    reason = Column(String(200), nullable=True)
+    warehouse_id = Column(Integer, ForeignKey("warehouses.id"), nullable=True)  # Where item was stored
+
+    notes = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=func.now())
+
+    # Relationships
+    debit_note = relationship("DebitNote", back_populates="lines")
+    item = relationship("ItemMaster")
+    grn_line = relationship("GoodsReceiptLine")
+    invoice_line = relationship("SupplierInvoiceLine")
+    warehouse = relationship("Warehouse")
+
+
+class PurchaseOrderAmendment(Base):
+    """
+    Purchase Order Amendment - Track changes to PO after it has been sent.
+    Maintains history of changes for audit purposes.
+    """
+    __tablename__ = "purchase_order_amendments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    purchase_order_id = Column(Integer, ForeignKey("purchase_orders.id", ondelete="CASCADE"), nullable=False)
+    amendment_number = Column(Integer, nullable=False)  # Sequential per PO (1, 2, 3...)
+
+    # Amendment details
+    amendment_date = Column(Date, nullable=False)
+    amendment_type = Column(String(30), nullable=False)  # quantity_change, price_change, date_change, line_add, line_remove, cancellation
+
+    # What changed (JSON snapshot)
+    changes_summary = Column(Text, nullable=False)  # JSON: {"field": "quantity", "old": 10, "new": 15, "line_id": 123}
+
+    # Original vs New values
+    original_total = Column(Numeric(18, 2), nullable=True)
+    new_total = Column(Numeric(18, 2), nullable=True)
+
+    # Reason
+    reason = Column(Text, nullable=False)
+
+    # Approval
+    status = Column(String(20), default='pending')  # pending, approved, rejected
+    approved_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    approved_at = Column(DateTime, nullable=True)
+    rejection_reason = Column(Text, nullable=True)
+
+    # Audit
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    created_at = Column(DateTime, default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint('purchase_order_id', 'amendment_number', name='uq_po_amendment_number'),
+    )
+
+    # Relationships
+    purchase_order = relationship("PurchaseOrder", backref="amendments")
+    creator = relationship("User", foreign_keys=[created_by])
+    approver = relationship("User", foreign_keys=[approved_by])

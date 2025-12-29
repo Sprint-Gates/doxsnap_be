@@ -20,7 +20,7 @@ from app.models import (
     User, WorkOrder, WorkOrderTimeEntry, WorkOrderChecklistItem, WorkOrderSnapshot,
     WorkOrderCompletion, Technician, Equipment, SubEquipment,
     Branch, Floor, Room, Project, work_order_technicians, work_order_technicians_ab,
-    HandHeldDevice, ItemMaster, ItemStock, ItemLedger, Account, AddressBook
+    HandHeldDevice, ItemMaster, ItemStock, ItemLedger, Account, AddressBook, Company
 )
 from app.services.journal_posting import JournalPostingService
 from app.api.auth import verify_token
@@ -402,27 +402,48 @@ def work_order_to_response(wo: WorkOrder, include_details: bool = False, db: Ses
     else:
         response["assigned_hhd"] = None
 
-    # Add assigned technicians count (legacy)
-    response["technicians_count"] = len(wo.assigned_technicians)
-    # Add assigned employees count (AddressBook-based)
-    response["employees_count"] = len(wo.assigned_employees) if hasattr(wo, 'assigned_employees') else 0
+    # Add assigned technicians count (combined legacy + Address Book employees)
+    legacy_count = len(wo.assigned_technicians)
+    ab_count = len(wo.assigned_employees) if hasattr(wo, 'assigned_employees') else 0
+    response["technicians_count"] = legacy_count + ab_count
+    # Add assigned employees count (AddressBook-based only)
+    response["employees_count"] = ab_count
     response["time_entries_count"] = len(wo.time_entries)
     response["checklist_items_count"] = len(wo.checklist_items)
     response["checklist_completed_count"] = sum(1 for item in wo.checklist_items if item.is_completed)
 
     if include_details:
-        # Add full technician list (legacy)
-        response["technicians"] = [
-            {
-                "id": t.id,
-                "name": t.name,
-                "employee_id": t.employee_id,
-                "specialization": t.specialization
-            }
-            for t in wo.assigned_technicians
-        ]
+        # Combine legacy technicians and Address Book employees into unified technicians list
+        # Address Book employees take precedence (they use the new system)
+        technicians_list = []
 
-        # Add full employee list (AddressBook-based)
+        # Add Address Book employees first (new system)
+        for e in (wo.assigned_employees if hasattr(wo, 'assigned_employees') else []):
+            technicians_list.append({
+                "id": e.id,  # Use Address Book ID as the technician ID
+                "name": e.alpha_name,
+                "employee_id": e.employee_id,
+                "specialization": e.specialization,
+                "address_book_id": e.id,
+                "address_number": e.address_number,
+                "phone": e.phone_primary,
+                "email": e.email
+            })
+
+        # Add legacy technicians (for backward compatibility with older data)
+        for t in wo.assigned_technicians:
+            # Avoid duplicates (in case same person exists in both)
+            if not any(tech["id"] == t.id for tech in technicians_list):
+                technicians_list.append({
+                    "id": t.id,
+                    "name": t.name,
+                    "employee_id": t.employee_id,
+                    "specialization": t.specialization
+                })
+
+        response["technicians"] = technicians_list
+
+        # Keep employees for any code that specifically uses it
         response["employees"] = [
             {
                 "address_book_id": e.id,
@@ -436,12 +457,22 @@ def work_order_to_response(wo: WorkOrder, include_details: bool = False, db: Ses
             for e in (wo.assigned_employees if hasattr(wo, 'assigned_employees') else [])
         ]
 
-        # Add time entries
-        response["time_entries"] = [
-            {
+        # Add time entries (combine legacy technician and Address Book employee)
+        time_entries_list = []
+        for te in wo.time_entries:
+            # Determine technician info from either legacy or Address Book
+            tech_id = te.address_book_id or te.technician_id
+            tech_name = None
+            if te.address_book:
+                tech_name = te.address_book.alpha_name
+            elif te.technician:
+                tech_name = te.technician.name
+
+            time_entries_list.append({
                 "id": te.id,
-                "technician_id": te.technician_id,
-                "technician_name": te.technician.name if te.technician else None,
+                "technician_id": tech_id,  # Use address_book_id if available, else legacy
+                "technician_name": tech_name,
+                "address_book_id": te.address_book_id,
                 "start_time": te.start_time.isoformat() if te.start_time else None,
                 "end_time": te.end_time.isoformat() if te.end_time else None,
                 "break_minutes": te.break_minutes,
@@ -451,9 +482,8 @@ def work_order_to_response(wo: WorkOrder, include_details: bool = False, db: Ses
                 "total_cost": decimal_to_float(te.total_cost),
                 "work_description": te.work_description,
                 "notes": te.notes
-            }
-            for te in wo.time_entries
-        ]
+            })
+        response["time_entries"] = time_entries_list
 
         # Add checklist items (sorted by item_number)
         sorted_checklist = sorted(wo.checklist_items, key=lambda x: x.item_number)
@@ -537,6 +567,7 @@ async def get_work_orders(
             joinedload(WorkOrder.assigned_technicians),
             joinedload(WorkOrder.assigned_employees),
             joinedload(WorkOrder.time_entries).joinedload(WorkOrderTimeEntry.technician),
+            joinedload(WorkOrder.time_entries).joinedload(WorkOrderTimeEntry.address_book),
             joinedload(WorkOrder.checklist_items)
         )
 
@@ -592,6 +623,7 @@ async def get_work_order(
         joinedload(WorkOrder.assigned_hhd).joinedload(HandHeldDevice.assigned_technician),
         joinedload(WorkOrder.assigned_technicians),
         joinedload(WorkOrder.time_entries).joinedload(WorkOrderTimeEntry.technician),
+            joinedload(WorkOrder.time_entries).joinedload(WorkOrderTimeEntry.address_book),
         joinedload(WorkOrder.checklist_items)
     ).filter(
         WorkOrder.id == wo_id,
@@ -851,6 +883,10 @@ async def update_work_order(
 
         wo.updated_by = auth_context.id
 
+        # Set actual_start when work order starts (status changes to in_progress)
+        if data.status == "in_progress" and wo.actual_start is None:
+            wo.actual_start = datetime.utcnow()
+
         # Recalculate costs if status changed to completed
         if data.status == "completed":
             labor = calculate_labor_cost(db, wo)
@@ -866,6 +902,8 @@ async def update_work_order(
                     wo.billing_status = "pending"
 
             wo.completed_at = datetime.utcnow()
+            if wo.actual_end is None:
+                wo.actual_end = datetime.utcnow()
 
         db.commit()
         db.refresh(wo)
@@ -956,6 +994,7 @@ async def approve_work_order(
         joinedload(WorkOrder.assigned_hhd).joinedload(HandHeldDevice.assigned_technician),
         joinedload(WorkOrder.assigned_technicians),
         joinedload(WorkOrder.time_entries).joinedload(WorkOrderTimeEntry.technician),
+            joinedload(WorkOrder.time_entries).joinedload(WorkOrderTimeEntry.address_book),
         joinedload(WorkOrder.checklist_items)
     ).filter(
         WorkOrder.id == wo_id,
@@ -1043,6 +1082,43 @@ async def approve_work_order(
         db.commit()
         db.refresh(wo)
         logger.info(f"Work order {wo.wo_number} approved by {user.email}")
+
+        # ============================================
+        # POST JOURNAL ENTRIES FOR BILLING
+        # ============================================
+        # If work order is billable, create proper accounting entries:
+        # - DR: Accounts Receivable (charge client)
+        # - CR: Service Revenue
+        # - CR: VAT Output (if applicable)
+        # - DR: COGS Labor / CR: Labor Payable
+        # - DR: COGS Parts / CR: Inventory
+        try:
+            has_accounts = db.query(Account).filter(
+                Account.company_id == user.company_id
+            ).first()
+
+            if has_accounts:
+                journal_service = JournalPostingService(
+                    db=db,
+                    company_id=user.company_id,
+                    user_id=user.id
+                )
+
+                # Post billing entry for billable work orders
+                if wo.is_billable:
+                    billing_entry = journal_service.post_work_order_billing(wo)
+                    if billing_entry:
+                        logger.info(f"Created billing journal entry {billing_entry.entry_number} for WO {wo.wo_number}")
+                else:
+                    # For non-billable work orders, post cost recognition only
+                    cost_entry = journal_service.post_work_order_completion(wo)
+                    if cost_entry:
+                        logger.info(f"Created cost journal entry {cost_entry.entry_number} for WO {wo.wo_number}")
+
+        except Exception as je:
+            # Log but don't fail the approval if journal posting fails
+            logger.warning(f"Journal entry creation failed for WO {wo.wo_number}: {str(je)}")
+
         return work_order_to_response(wo, include_details=True)
     except Exception as e:
         db.rollback()
@@ -1086,6 +1162,7 @@ async def cancel_work_order(
         joinedload(WorkOrder.assigned_hhd).joinedload(HandHeldDevice.assigned_technician),
         joinedload(WorkOrder.assigned_technicians),
         joinedload(WorkOrder.time_entries).joinedload(WorkOrderTimeEntry.technician),
+            joinedload(WorkOrder.time_entries).joinedload(WorkOrderTimeEntry.address_book),
         joinedload(WorkOrder.checklist_items)
     ).filter(
         WorkOrder.id == wo_id,
@@ -1241,7 +1318,7 @@ async def assign_technician(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Assign a technician to a work order"""
+    """Assign a technician (from Address Book) to a work order"""
     if not user.company_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No company associated")
 
@@ -1252,20 +1329,22 @@ async def assign_technician(
     if not wo:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Work order not found")
 
-    technician = db.query(Technician).filter(
-        Technician.id == technician_id,
-        Technician.company_id == user.company_id,
-        Technician.is_active == True
+    # Look up technician from Address Book (search_type='E' for Employee)
+    technician = db.query(AddressBook).filter(
+        AddressBook.id == technician_id,
+        AddressBook.company_id == user.company_id,
+        AddressBook.search_type == 'E',
+        AddressBook.is_active == True
     ).first()
     if not technician:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Technician not found")
 
-    # Check if already assigned
+    # Check if already assigned (using new junction table)
     existing = db.execute(
-        work_order_technicians.select().where(
+        work_order_technicians_ab.select().where(
             and_(
-                work_order_technicians.c.work_order_id == wo_id,
-                work_order_technicians.c.technician_id == technician_id
+                work_order_technicians_ab.c.work_order_id == wo_id,
+                work_order_technicians_ab.c.address_book_id == technician_id
             )
         )
     ).first()
@@ -1273,7 +1352,7 @@ async def assign_technician(
     if existing:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Technician already assigned")
 
-    # Calculate hourly rate
+    # Calculate hourly rate from Address Book employee fields
     hourly_rate = None
     if technician.hourly_rate:
         hourly_rate = technician.hourly_rate
@@ -1282,16 +1361,17 @@ async def assign_technician(
         if hours_per_month > 0:
             hourly_rate = float(technician.base_salary) / hours_per_month
 
+    # Insert into new junction table
     db.execute(
-        work_order_technicians.insert().values(
+        work_order_technicians_ab.insert().values(
             work_order_id=wo_id,
-            technician_id=technician_id,
+            address_book_id=technician_id,
             hourly_rate=hourly_rate
         )
     )
     db.commit()
 
-    return {"success": True, "message": f"Technician {technician.name} assigned to work order"}
+    return {"success": True, "message": f"Technician {technician.alpha_name} assigned to work order"}
 
 
 @router.delete("/work-orders/{wo_id}/technicians/{technician_id}")
@@ -1301,7 +1381,7 @@ async def unassign_technician(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Remove a technician from a work order"""
+    """Remove a technician (from Address Book) from a work order"""
     if not user.company_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No company associated")
 
@@ -1312,11 +1392,12 @@ async def unassign_technician(
     if not wo:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Work order not found")
 
+    # Delete from new junction table
     db.execute(
-        work_order_technicians.delete().where(
+        work_order_technicians_ab.delete().where(
             and_(
-                work_order_technicians.c.work_order_id == wo_id,
-                work_order_technicians.c.technician_id == technician_id
+                work_order_technicians_ab.c.work_order_id == wo_id,
+                work_order_technicians_ab.c.address_book_id == technician_id
             )
         )
     )
@@ -1844,9 +1925,11 @@ async def add_time_entry(
     if not wo:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Work order not found")
 
-    technician = db.query(Technician).filter(
-        Technician.id == data.technician_id,
-        Technician.company_id == user.company_id
+    # Look up technician from Address Book (search_type='E' for Employee)
+    technician = db.query(AddressBook).filter(
+        AddressBook.id == data.technician_id,
+        AddressBook.company_id == user.company_id,
+        AddressBook.search_type == 'E'
     ).first()
     if not technician:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Technician not found")
@@ -1867,7 +1950,7 @@ async def add_time_entry(
             minutes = duration.total_seconds() / 60 - (data.break_minutes or 0)
             hours_worked = round(minutes / 60, 2)
 
-        # Get hourly rate
+        # Get hourly rate from Address Book employee fields
         hourly_rate = None
         overtime_rate = None
         if technician.hourly_rate:
@@ -1890,7 +1973,7 @@ async def add_time_entry(
 
         te = WorkOrderTimeEntry(
             work_order_id=wo_id,
-            technician_id=data.technician_id,
+            address_book_id=data.technician_id,  # Use address_book_id for new entries
             start_time=data.start_time,
             end_time=data.end_time,
             break_minutes=data.break_minutes or 0,
@@ -2362,6 +2445,7 @@ async def export_work_order_pdf(
         joinedload(WorkOrder.assigned_hhd).joinedload(HandHeldDevice.assigned_technician),
         joinedload(WorkOrder.assigned_technicians),
         joinedload(WorkOrder.time_entries).joinedload(WorkOrderTimeEntry.technician),
+            joinedload(WorkOrder.time_entries).joinedload(WorkOrderTimeEntry.address_book),
         joinedload(WorkOrder.checklist_items)
     ).filter(
         WorkOrder.id == wo_id,
@@ -2390,10 +2474,48 @@ async def export_work_order_pdf(
             "signed_at": completion.signed_at.isoformat() if completion.signed_at else None
         }
 
+    # Add snapshots
+    snapshots = db.query(WorkOrderSnapshot).filter(
+        WorkOrderSnapshot.work_order_id == wo_id,
+        WorkOrderSnapshot.company_id == user.company_id
+    ).order_by(WorkOrderSnapshot.taken_at).all()
+
+    # Get user names for snapshots
+    snapshot_user_ids = [s.taken_by for s in snapshots if s.taken_by]
+    snapshot_users = {}
+    if snapshot_user_ids:
+        users = db.query(User).filter(User.id.in_(snapshot_user_ids)).all()
+        snapshot_users = {u.id: u.name for u in users}
+
+    wo_data["snapshots"] = [
+        {
+            "id": s.id,
+            "file_path": s.file_path,
+            "caption": s.caption,
+            "taken_at": s.taken_at.isoformat() if s.taken_at else None,
+            "taken_by_name": snapshot_users.get(s.taken_by) if s.taken_by else None
+        }
+        for s in snapshots
+    ]
+
+    # Get company data for header
+    company = db.query(Company).filter(Company.id == user.company_id).first()
+    company_data = None
+    if company:
+        company_data = {
+            "name": company.name,
+            "email": company.email,
+            "phone": company.phone,
+            "address": company.address,
+            "city": company.city,
+            "country": company.country,
+            "logo_url": company.logo_url
+        }
+
     # Generate PDF
     from app.services.work_order_report import WorkOrderReportService
     report_service = WorkOrderReportService()
-    pdf_data = report_service.generate_pdf(wo_data)
+    pdf_data = report_service.generate_pdf(wo_data, company=company_data)
 
     # Return PDF as downloadable file
     filename = f"WorkOrder_{wo.wo_number}_{datetime.now().strftime('%Y%m%d')}.pdf"
@@ -2429,6 +2551,7 @@ async def email_work_order(
         joinedload(WorkOrder.assigned_hhd).joinedload(HandHeldDevice.assigned_technician),
         joinedload(WorkOrder.assigned_technicians),
         joinedload(WorkOrder.time_entries).joinedload(WorkOrderTimeEntry.technician),
+            joinedload(WorkOrder.time_entries).joinedload(WorkOrderTimeEntry.address_book),
         joinedload(WorkOrder.checklist_items)
     ).filter(
         WorkOrder.id == wo_id,
@@ -2457,10 +2580,48 @@ async def email_work_order(
             "signed_at": completion.signed_at.isoformat() if completion.signed_at else None
         }
 
+    # Add snapshots
+    snapshots = db.query(WorkOrderSnapshot).filter(
+        WorkOrderSnapshot.work_order_id == wo_id,
+        WorkOrderSnapshot.company_id == user.company_id
+    ).order_by(WorkOrderSnapshot.taken_at).all()
+
+    # Get user names for snapshots
+    snapshot_user_ids = [s.taken_by for s in snapshots if s.taken_by]
+    snapshot_users = {}
+    if snapshot_user_ids:
+        users = db.query(User).filter(User.id.in_(snapshot_user_ids)).all()
+        snapshot_users = {u.id: u.name for u in users}
+
+    wo_data["snapshots"] = [
+        {
+            "id": s.id,
+            "file_path": s.file_path,
+            "caption": s.caption,
+            "taken_at": s.taken_at.isoformat() if s.taken_at else None,
+            "taken_by_name": snapshot_users.get(s.taken_by) if s.taken_by else None
+        }
+        for s in snapshots
+    ]
+
+    # Get company data for header
+    company = db.query(Company).filter(Company.id == user.company_id).first()
+    company_data = None
+    if company:
+        company_data = {
+            "name": company.name,
+            "email": company.email,
+            "phone": company.phone,
+            "address": company.address,
+            "city": company.city,
+            "country": company.country,
+            "logo_url": company.logo_url
+        }
+
     # Generate PDF
     from app.services.work_order_report import WorkOrderReportService
     report_service = WorkOrderReportService()
-    pdf_data = report_service.generate_pdf(wo_data)
+    pdf_data = report_service.generate_pdf(wo_data, company=company_data)
 
     # Send email
     success = report_service.send_work_order_email(
@@ -2508,7 +2669,7 @@ def snapshot_to_response(snapshot: WorkOrderSnapshot) -> dict:
     }
 
 
-@router.get("/{wo_id}/snapshots")
+@router.get("/work-orders/{wo_id}/snapshots")
 async def get_work_order_snapshots(
     wo_id: int,
     user: User = Depends(get_current_user),
@@ -2535,7 +2696,7 @@ async def get_work_order_snapshots(
     return [snapshot_to_response(s) for s in snapshots]
 
 
-@router.post("/{wo_id}/snapshots")
+@router.post("/work-orders/{wo_id}/snapshots")
 async def upload_work_order_snapshot(
     wo_id: int,
     file: UploadFile = File(...),
@@ -2610,7 +2771,7 @@ async def upload_work_order_snapshot(
         )
 
 
-@router.get("/{wo_id}/snapshots/{snapshot_id}/image")
+@router.get("/work-orders/{wo_id}/snapshots/{snapshot_id}/image")
 async def get_snapshot_image(
     wo_id: int,
     snapshot_id: int,
@@ -2623,7 +2784,16 @@ async def get_snapshot_image(
     if not payload:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
 
+    # Handle both HHD tokens (with company_id) and user tokens (with sub=email)
     company_id = payload.get("company_id")
+    if not company_id:
+        # Try to get company_id from user email (regular user token)
+        email = payload.get("sub")
+        if email:
+            user = db.query(User).filter(User.email == email).first()
+            if user:
+                company_id = user.company_id
+
     if not company_id:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
 
@@ -2647,7 +2817,7 @@ async def get_snapshot_image(
     )
 
 
-@router.patch("/{wo_id}/snapshots/{snapshot_id}")
+@router.patch("/work-orders/{wo_id}/snapshots/{snapshot_id}")
 async def update_snapshot_caption(
     wo_id: int,
     snapshot_id: int,
@@ -2675,7 +2845,7 @@ async def update_snapshot_caption(
     return snapshot_to_response(snapshot)
 
 
-@router.delete("/{wo_id}/snapshots/{snapshot_id}")
+@router.delete("/work-orders/{wo_id}/snapshots/{snapshot_id}")
 async def delete_work_order_snapshot(
     wo_id: int,
     snapshot_id: int,

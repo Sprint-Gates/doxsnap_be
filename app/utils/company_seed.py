@@ -51,6 +51,8 @@ DEFAULT_ACCOUNTS = [
     {"code": "1141", "name": "Spare Parts Inventory", "type_code": "ASSET", "parent_code": "1140"},
     {"code": "1142", "name": "Consumables Inventory", "type_code": "ASSET", "parent_code": "1140"},
     {"code": "1150", "name": "Prepaid Expenses", "type_code": "ASSET", "parent_code": "1100"},
+    {"code": "1160", "name": "VAT Receivable", "type_code": "ASSET", "is_header": True, "parent_code": "1100"},
+    {"code": "1161", "name": "VAT Input", "type_code": "ASSET", "parent_code": "1160", "description": "Input VAT on purchases - recoverable"},
     {"code": "1200", "name": "Fixed Assets", "type_code": "ASSET", "is_header": True, "parent_code": "1000"},
     {"code": "1210", "name": "Equipment", "type_code": "ASSET", "parent_code": "1200"},
     {"code": "1220", "name": "Vehicles", "type_code": "ASSET", "parent_code": "1200"},
@@ -110,6 +112,13 @@ DEFAULT_ACCOUNTS = [
     {"code": "5320", "name": "Professional Fees", "type_code": "EXPENSE", "parent_code": "5300"},
     {"code": "5330", "name": "Bank Charges", "type_code": "EXPENSE", "parent_code": "5300"},
     {"code": "5400", "name": "Depreciation Expense", "type_code": "EXPENSE", "parent_code": "5000"},
+    # Procurement Variances (5500)
+    {"code": "5500", "name": "Procurement Variances", "type_code": "EXPENSE", "is_header": True, "parent_code": "5000"},
+    {"code": "5510", "name": "Purchase Price Variance", "type_code": "EXPENSE", "parent_code": "5500", "description": "Variance between PO price and invoice price"},
+    {"code": "5520", "name": "Purchase Discount", "type_code": "EXPENSE", "parent_code": "5500", "description": "Early payment discounts earned"},
+
+    # Other Revenue (for purchase discounts - contra expense)
+    {"code": "4220", "name": "Purchase Discounts Earned", "type_code": "REVENUE", "parent_code": "4200", "description": "Early payment discounts taken"},
 ]
 
 
@@ -134,34 +143,152 @@ DEFAULT_ITEM_CATEGORIES = [
 # =============================================================================
 
 DEFAULT_ACCOUNT_MAPPINGS = [
+    # ==========================================================================
+    # GOODS RECEIPT (GRN) - Stage 1 of Procurement
+    # ==========================================================================
     # Goods Receipt / PO Receiving - DR: Inventory, CR: GRNI
     {
         "transaction_type": "po_receive_inventory",
         "category": None,
-        "debit_account_code": "1140",  # Inventory
+        "debit_account_code": "1141",  # Spare Parts Inventory (detail account)
         "credit_account_code": "2115",  # GRNI
         "description": "Goods Receipt - Inventory items received"
     },
     {
         "transaction_type": "inventory_increase",
         "category": None,
-        "debit_account_code": "1140",  # Inventory
+        "debit_account_code": "1141",  # Spare Parts Inventory
         "credit_account_code": "2115",  # GRNI
         "description": "Inventory increase from receiving"
     },
+    # Invoice Auto-Receive - Direct inventory receipt from invoice (no PO)
+    {
+        "transaction_type": "invoice_receive_inventory",
+        "category": None,
+        "debit_account_code": "1141",  # Spare Parts Inventory
+        "credit_account_code": "2115",  # GRNI
+        "description": "Invoice Auto-Receive - Inventory received directly from invoice"
+    },
+    # GRNI account reference
+    {
+        "transaction_type": "grni",
+        "category": None,
+        "debit_account_code": "2115",  # For clearing
+        "credit_account_code": "2115",  # For GRN posting
+        "description": "Goods Received Not Invoiced - interim liability"
+    },
+
+    # ==========================================================================
+    # SUPPLIER INVOICE - Stage 2 of Procurement (GRNI Clearing)
+    # ==========================================================================
     # Invoice matching - clear GRNI to AP
     {
         "transaction_type": "invoice_match",
         "category": None,
-        "debit_account_code": "2115",  # GRNI
-        "credit_account_code": "2111",  # Trade Payables
+        "debit_account_code": "2115",  # GRNI (clear)
+        "credit_account_code": "2111",  # Trade Payables (create AP)
         "description": "Invoice matched to GRN - clear GRNI to AP"
     },
-    # Inventory adjustments
+    # Accounts Payable reference
+    {
+        "transaction_type": "accounts_payable",
+        "category": None,
+        "debit_account_code": "2111",  # For payment
+        "credit_account_code": "2111",  # For invoice
+        "description": "Accounts Payable - Trade Payables"
+    },
+    # Purchase Price Variance
+    {
+        "transaction_type": "purchase_price_variance",
+        "category": None,
+        "debit_account_code": "5510",  # PPV expense
+        "credit_account_code": "5510",  # PPV (contra if credit)
+        "description": "Purchase Price Variance - invoice vs PO/GRN"
+    },
+    # VAT Payable - Input VAT on purchases
+    {
+        "transaction_type": "vat_payable",
+        "category": None,
+        "debit_account_code": "2141",  # VAT Payable (debit for input VAT)
+        "credit_account_code": "2141",  # VAT Payable (credit for output VAT)
+        "description": "VAT Payable - Input/Output VAT"
+    },
+    # VAT Input - Recoverable VAT on purchases (debit when receiving invoices)
+    {
+        "transaction_type": "vat_input",
+        "category": None,
+        "debit_account_code": "1161",  # VAT Input (asset - recoverable)
+        "credit_account_code": "1161",  # VAT Input
+        "description": "VAT Input - Recoverable VAT on purchases"
+    },
+    # Tax Input - Alternative name for VAT Input
+    {
+        "transaction_type": "tax_input",
+        "category": None,
+        "debit_account_code": "1161",  # VAT Input (asset - recoverable)
+        "credit_account_code": "1161",  # VAT Input
+        "description": "Tax Input - Recoverable tax on purchases"
+    },
+
+    # ==========================================================================
+    # SUPPLIER PAYMENT - Stage 3 of Procurement
+    # ==========================================================================
+    # Cash/Bank for payments
+    {
+        "transaction_type": "cash",
+        "category": None,
+        "debit_account_code": "1121",  # Main Bank Account
+        "credit_account_code": "1121",  # Main Bank Account
+        "description": "Cash/Bank Account for payments"
+    },
+    # Purchase Discount earned
+    {
+        "transaction_type": "purchase_discount",
+        "category": None,
+        "debit_account_code": "5520",  # Purchase Discount expense (contra)
+        "credit_account_code": "4220",  # Purchase Discounts Earned (revenue)
+        "description": "Early payment discount taken"
+    },
+
+    # ==========================================================================
+    # LANDED COST (Import Extra Costs)
+    # ==========================================================================
+    {
+        "transaction_type": "landed_cost_freight",
+        "category": None,
+        "debit_account_code": "1141",  # Added to Spare Parts Inventory
+        "credit_account_code": "2111",  # Trade Payables
+        "description": "Freight cost on imports"
+    },
+    {
+        "transaction_type": "landed_cost_duty",
+        "category": None,
+        "debit_account_code": "1141",  # Added to Spare Parts Inventory
+        "credit_account_code": "2111",  # Trade Payables
+        "description": "Customs duty on imports"
+    },
+    {
+        "transaction_type": "landed_cost_customs",
+        "category": None,
+        "debit_account_code": "1141",  # Added to Spare Parts Inventory
+        "credit_account_code": "2111",  # Trade Payables
+        "description": "Customs charges on imports"
+    },
+    {
+        "transaction_type": "landed_cost_insurance",
+        "category": None,
+        "debit_account_code": "1141",  # Added to Spare Parts Inventory
+        "credit_account_code": "2111",  # Trade Payables
+        "description": "Insurance cost on imports"
+    },
+
+    # ==========================================================================
+    # INVENTORY ADJUSTMENTS
+    # ==========================================================================
     {
         "transaction_type": "inventory_adjustment_increase",
         "category": None,
-        "debit_account_code": "1140",  # Inventory
+        "debit_account_code": "1141",  # Spare Parts Inventory
         "credit_account_code": "5121",  # Spare Parts Used (variance)
         "description": "Inventory adjustment - increase"
     },
@@ -169,18 +296,24 @@ DEFAULT_ACCOUNT_MAPPINGS = [
         "transaction_type": "inventory_adjustment_decrease",
         "category": None,
         "debit_account_code": "5121",  # Spare Parts Used
-        "credit_account_code": "1140",  # Inventory
+        "credit_account_code": "1141",  # Spare Parts Inventory
         "description": "Inventory adjustment - decrease"
     },
-    # Work order parts consumption
+
+    # ==========================================================================
+    # WORK ORDER
+    # ==========================================================================
     {
         "transaction_type": "wo_parts_consumption",
         "category": None,
         "debit_account_code": "5121",  # Spare Parts Used
-        "credit_account_code": "1140",  # Inventory
+        "credit_account_code": "1141",  # Spare Parts Inventory
         "description": "Work order - spare parts consumed"
     },
-    # Petty cash
+
+    # ==========================================================================
+    # PETTY CASH
+    # ==========================================================================
     {
         "transaction_type": "petty_cash_expense",
         "category": None,

@@ -24,7 +24,7 @@ from app.database import get_db
 from app.models import (
     User, PurchaseOrder, PurchaseOrderLine, GoodsReceipt, GoodsReceiptLine,
     GoodsReceiptExtraCost, ItemMaster, ItemStock, ItemLedger, Warehouse, Account,
-    PurchaseOrderInvoice, AddressBook
+    PurchaseOrderInvoice, AddressBook, SupplierInvoice
 )
 from app.api.auth import get_current_user
 from app.services.journal_posting import JournalPostingService
@@ -537,16 +537,9 @@ async def create_goods_receipt(
             detail=f"Cannot receive against PO with status '{po.status}'. Must be sent, acknowledged, or partial."
         )
 
-    # Require at least one linked invoice for three-way matching
-    linked_invoice_count = db.query(func.count(PurchaseOrderInvoice.id)).filter(
-        PurchaseOrderInvoice.purchase_order_id == po.id
-    ).scalar()
-
-    if linked_invoice_count == 0:
-        raise HTTPException(
-            status_code=400,
-            detail="Cannot create GRN - Purchase Order must have at least one linked invoice for three-way matching. Please link an invoice to this PO first."
-        )
+    # Note: Invoice linking is NOT required for GRN creation
+    # The standard procurement flow is: PO → GRN (receive goods) → Invoice → Three-way match
+    # Invoice linking happens separately and three-way matching is performed when processing invoices
 
     # Validate warehouse (REQUIRED)
     if not grn_data.warehouse_id:
@@ -1484,40 +1477,22 @@ async def three_way_match(
     )
     grn_total = grn_subtotal + grn_tax
 
-    # Calculate Invoice totals (net and tax from structured_data JSON)
+    # Calculate Invoice totals from SupplierInvoice table (linked by purchase_order_id)
     invoice_subtotal = 0.0
     invoice_tax = 0.0
     invoice_total = 0.0
-    for link in po.linked_invoices:
-        if link.invoice and link.invoice.structured_data:
-            try:
-                data = json.loads(link.invoice.structured_data)
-                financial = data.get('financial_details', {})
 
-                # Get subtotal (net amount before tax)
-                subtotal = financial.get('subtotal') or financial.get('total_before_tax')
-                if subtotal:
-                    invoice_subtotal += float(subtotal)
+    # Query supplier invoices that reference this PO
+    supplier_invoices = db.query(SupplierInvoice).filter(
+        SupplierInvoice.purchase_order_id == po.id,
+        SupplierInvoice.company_id == current_user.company_id,
+        SupplierInvoice.status != 'cancelled'
+    ).all()
 
-                # Get tax amount
-                tax = financial.get('tax_amount') or financial.get('vat_amount') or financial.get('total_tax')
-                if tax:
-                    invoice_tax += float(tax)
-
-                # Get total (with tax)
-                total = financial.get('total_after_tax') or financial.get('total_amount')
-                if total:
-                    invoice_total += float(total)
-                elif subtotal:
-                    # If no total, calculate from subtotal + tax
-                    invoice_total += float(subtotal) + float(tax or 0)
-
-            except (json.JSONDecodeError, TypeError, ValueError):
-                pass
-
-    # If we couldn't extract subtotal from invoice, estimate it from total - tax
-    if invoice_total > 0 and invoice_subtotal == 0:
-        invoice_subtotal = invoice_total - invoice_tax
+    for inv in supplier_invoices:
+        invoice_subtotal += float(inv.subtotal or 0)
+        invoice_tax += float(inv.tax_amount or 0)
+        invoice_total += float(inv.total_amount or 0)
 
     # Determine match status based on NET amounts (excluding VAT)
     # This is the proper three-way match: PO net ≈ GRN net ≈ Invoice net
@@ -1580,7 +1555,7 @@ async def three_way_match(
         "variance_percent": round(variance_percent, 2),
         # Counts
         "grn_count": len([g for g in po.goods_receipts if g.status == 'accepted']),
-        "invoice_count": len(po.linked_invoices),
+        "invoice_count": len(supplier_invoices),
         "details": details
     }
 

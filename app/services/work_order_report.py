@@ -9,6 +9,7 @@ from reportlab.lib.units import inch
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable, Image
 import os
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
+from PIL import Image as PILImage
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.application import MIMEApplication
@@ -27,7 +28,7 @@ class WorkOrderReportService:
         self.password = settings.smtp_password
         self.support_email = settings.company_support_email
 
-    def generate_pdf(self, work_order: Dict[str, Any], include_checklist: bool = True) -> bytes:
+    def generate_pdf(self, work_order: Dict[str, Any], include_checklist: bool = True, company: Dict[str, Any] = None) -> bytes:
         """Generate a professional PDF report for a work order"""
         buffer = io.BytesIO()
         doc = SimpleDocTemplate(
@@ -67,27 +68,132 @@ class WorkOrderReportService:
         description = work_order.get('description', '')
         notes = work_order.get('notes', '')
 
-        # === HEADER ===
+        # === COMPANY HEADER ===
+        if company:
+            # Build company info elements
+            company_name = company.get('name', '')
+            company_email = company.get('email', '')
+            company_phone = company.get('phone', '')
+            company_address = company.get('address', '')
+            company_city = company.get('city', '')
+            company_country = company.get('country', '')
+            logo_path = company.get('logo_url', '')
+
+            # Build address line
+            address_parts = []
+            if company_address:
+                address_parts.append(company_address)
+            if company_city:
+                address_parts.append(company_city)
+            if company_country:
+                address_parts.append(company_country)
+            full_address = ', '.join(filter(None, address_parts))
+
+            # Company info text (right side)
+            company_info_style = ParagraphStyle('CompanyInfo', fontSize=8, textColor=gray, alignment=TA_RIGHT, leading=11)
+            company_name_style = ParagraphStyle('CompanyName', fontSize=12, fontName='Helvetica-Bold', textColor=dark, alignment=TA_RIGHT)
+
+            company_info_parts = [f"<b>{company_name}</b>"]
+            if full_address:
+                company_info_parts.append(f"<font size='8' color='#64748b'>{full_address}</font>")
+            contact_line = []
+            if company_phone:
+                contact_line.append(company_phone)
+            if company_email:
+                contact_line.append(company_email)
+            if contact_line:
+                company_info_parts.append(f"<font size='8' color='#64748b'>{' | '.join(contact_line)}</font>")
+
+            company_info_html = '<br/>'.join(company_info_parts)
+
+            # Try to load company logo
+            logo_element = None
+            if logo_path:
+                # Convert URL path to file path
+                file_path = logo_path.lstrip('/')
+                if os.path.exists(file_path):
+                    try:
+                        # Get image dimensions for proper scaling
+                        with PILImage.open(file_path) as pil_img:
+                            orig_width, orig_height = pil_img.size
+
+                        # Scale logo to fit (max 1.2 inch height, maintain aspect ratio)
+                        max_logo_height = 0.8 * inch
+                        max_logo_width = 1.8 * inch
+                        aspect_ratio = orig_width / orig_height
+
+                        if aspect_ratio > (max_logo_width / max_logo_height):
+                            logo_width = max_logo_width
+                            logo_height = max_logo_width / aspect_ratio
+                        else:
+                            logo_height = max_logo_height
+                            logo_width = max_logo_height * aspect_ratio
+
+                        logo_element = Image(file_path, width=logo_width, height=logo_height)
+                        logo_element.hAlign = 'LEFT'
+                    except Exception as e:
+                        logo_element = None
+
+            # Create header table with logo and company info
+            if logo_element:
+                header_data = [[
+                    logo_element,
+                    Paragraph(company_info_html, ParagraphStyle('CompanyInfoBlock', fontSize=9, textColor=dark, alignment=TA_RIGHT, leading=14))
+                ]]
+                company_header_table = Table(header_data, colWidths=[2.5*inch, 5*inch])
+            else:
+                header_data = [[
+                    '',
+                    Paragraph(company_info_html, ParagraphStyle('CompanyInfoBlock', fontSize=9, textColor=dark, alignment=TA_RIGHT, leading=14))
+                ]]
+                company_header_table = Table(header_data, colWidths=[2.5*inch, 5*inch])
+
+            company_header_table.setStyle(TableStyle([
+                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                ('ALIGN', (0, 0), (0, 0), 'LEFT'),
+                ('ALIGN', (1, 0), (1, 0), 'RIGHT'),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
+            ]))
+            elements.append(company_header_table)
+            elements.append(Spacer(1, 8))
+            elements.append(HRFlowable(width="100%", thickness=2, color=primary))
+            elements.append(Spacer(1, 12))
+
+        # === WORK ORDER HEADER ===
+        # Status badge color
+        status_color = dark
+        if status.lower() == 'completed':
+            status_color = success
+        elif status.lower() == 'in progress':
+            status_color = colors.HexColor('#f59e0b')
+        elif status.lower() == 'draft':
+            status_color = gray
+
         header_data = [[
-            Paragraph(f"<b>{wo_number}</b>", ParagraphStyle('WO', fontSize=12, fontName='Helvetica-Bold', textColor=primary)),
-            Paragraph(f"<b>{status}</b>", ParagraphStyle('Status', fontSize=10, fontName='Helvetica-Bold', textColor=dark, alignment=TA_RIGHT))
+            Paragraph(f"<b>{wo_number}</b>", ParagraphStyle('WO', fontSize=14, fontName='Helvetica-Bold', textColor=primary)),
+            Paragraph(f"<b>{status}</b>", ParagraphStyle('Status', fontSize=11, fontName='Helvetica-Bold', textColor=status_color, alignment=TA_RIGHT))
         ]]
         header_table = Table(header_data, colWidths=[5*inch, 2.5*inch])
         header_table.setStyle(TableStyle([
             ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 2),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
         ]))
         elements.append(header_table)
 
         # Title
         elements.append(Paragraph(title, title_style))
-        elements.append(Spacer(1, 2))
+        elements.append(Spacer(1, 4))
 
         # Type & Priority line
-        elements.append(Paragraph(f"{wo_type}  •  {priority} Priority", subtitle_style))
-        elements.append(Spacer(1, 6))
+        priority_color = '#64748b'
+        if priority.lower() == 'high':
+            priority_color = '#ef4444'
+        elif priority.lower() == 'medium':
+            priority_color = '#f59e0b'
+        elements.append(Paragraph(f"{wo_type}  •  <font color='{priority_color}'>{priority} Priority</font>", subtitle_style))
+        elements.append(Spacer(1, 10))
         elements.append(HRFlowable(width="100%", thickness=1, color=border))
-        elements.append(Spacer(1, 6))
+        elements.append(Spacer(1, 10))
 
         # === INFO GRID ===
         # Build location
@@ -129,8 +235,8 @@ class WorkOrderReportService:
 
         info_table = Table(info_data, colWidths=[3.75*inch, 3.75*inch])
         info_table.setStyle(TableStyle([
-            ('TOPPADDING', (0, 0), (-1, -1), 2),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 2),
+            ('TOPPADDING', (0, 0), (-1, -1), 4),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
             ('VALIGN', (0, 0), (-1, -1), 'TOP'),
         ]))
         elements.append(info_table)
@@ -141,15 +247,17 @@ class WorkOrderReportService:
             is_pm_checklist = 'PREVENTIVE MAINTENANCE CHECKLIST' in description or 'TASKS TO COMPLETE' in description
 
             if not is_pm_checklist:
-                elements.append(Spacer(1, 4))
+                elements.append(Spacer(1, 10))
                 elements.append(Paragraph("<b>Description</b>", label_style))
+                elements.append(Spacer(1, 2))
                 # Clean up any special characters
                 clean_desc = description.replace('■', '').replace('  ', ' ').strip()
                 elements.append(Paragraph(clean_desc, value_style))
 
         if notes:
-            elements.append(Spacer(1, 4))
+            elements.append(Spacer(1, 10))
             elements.append(Paragraph("<b>Notes</b>", label_style))
+            elements.append(Spacer(1, 2))
             elements.append(Paragraph(notes, value_style))
 
         # === CHECKLIST ===
@@ -158,9 +266,9 @@ class WorkOrderReportService:
         total_hours = sum(float(e.get('hours_worked', 0) or 0) for e in time_entries)
 
         if include_checklist and checklist_items:
-            elements.append(Spacer(1, 8))
+            elements.append(Spacer(1, 16))
             elements.append(HRFlowable(width="100%", thickness=1, color=border))
-            elements.append(Spacer(1, 6))
+            elements.append(Spacer(1, 12))
 
             completed = sum(1 for i in checklist_items if i.get('is_completed'))
             total = len(checklist_items)
@@ -224,7 +332,9 @@ class WorkOrderReportService:
         # === ISSUED ITEMS (SPARE PARTS) ===
         issued_items = work_order.get('issued_items', [])
         if issued_items:
-            elements.append(Spacer(1, 8))
+            elements.append(Spacer(1, 16))
+            elements.append(HRFlowable(width="100%", thickness=0.5, color=border))
+            elements.append(Spacer(1, 12))
             total_parts_cost = sum(item.get('total_cost', 0) for item in issued_items)
             elements.append(Paragraph(f"ISSUED ITEMS  <font color='#64748b'>(Total: ${total_parts_cost:.2f})</font>", section_style))
 
@@ -258,7 +368,9 @@ class WorkOrderReportService:
 
         # === TIME ENTRIES ===
         if time_entries:
-            elements.append(Spacer(1, 8))
+            elements.append(Spacer(1, 16))
+            elements.append(HRFlowable(width="100%", thickness=0.5, color=border))
+            elements.append(Spacer(1, 12))
             elements.append(Paragraph(f"TIME LOG  <font color='#64748b'>({total_hours:.1f} hrs total)</font>", section_style))
 
             te_data = [['Technician', 'Date', 'Hours', 'Work Performed']]
@@ -285,19 +397,99 @@ class WorkOrderReportService:
             ]))
             elements.append(te_table)
 
+        # === SNAPSHOTS ===
+        snapshots = work_order.get('snapshots', [])
+        if snapshots:
+            elements.append(Spacer(1, 16))
+            elements.append(HRFlowable(width="100%", thickness=0.5, color=border))
+            elements.append(Spacer(1, 12))
+            elements.append(Paragraph(f"SNAPSHOTS  <font color='#64748b'>({len(snapshots)} photos)</font>", section_style))
+            elements.append(Spacer(1, 8))
+
+            # Max dimensions for images (small thumbnails, maintains aspect ratio)
+            max_width = 1.25 * inch
+            max_height = 1.0 * inch
+
+            # Create rows of images (2 per row)
+            img_row = []
+            for i, snapshot in enumerate(snapshots):
+                file_path = snapshot.get('file_path')
+                caption = snapshot.get('caption', '')
+                taken_at = snapshot.get('taken_at', '')
+
+                if file_path and os.path.exists(file_path):
+                    try:
+                        # Get actual image dimensions to maintain aspect ratio
+                        with PILImage.open(file_path) as pil_img:
+                            orig_width, orig_height = pil_img.size
+
+                        # Calculate scaled dimensions maintaining aspect ratio
+                        aspect_ratio = orig_width / orig_height
+                        if aspect_ratio > (max_width / max_height):
+                            # Image is wider - constrain by width
+                            img_width = max_width
+                            img_height = max_width / aspect_ratio
+                        else:
+                            # Image is taller - constrain by height
+                            img_height = max_height
+                            img_width = max_height * aspect_ratio
+
+                        # Create image with proper dimensions
+                        img = Image(file_path, width=img_width, height=img_height)
+                        img.hAlign = 'CENTER'
+
+                        # Caption text
+                        caption_text = caption if caption else f"Photo {i+1}"
+                        if taken_at:
+                            caption_text += f" - {self._format_datetime(taken_at)}"
+
+                        caption_para = Paragraph(caption_text, ParagraphStyle('Caption', fontSize=7, textColor=gray, alignment=TA_CENTER))
+
+                        img_row.append([img, caption_para])
+
+                        # Add row to elements when we have 2 images or it's the last image
+                        if len(img_row) == 2 or i == len(snapshots) - 1:
+                            if len(img_row) == 1:
+                                # Single image - center it
+                                img_data = [[img_row[0][0]], [img_row[0][1]]]
+                                img_table = Table(img_data, colWidths=[7.5*inch])
+                            else:
+                                # Two images side by side
+                                img_data = [
+                                    [img_row[0][0], img_row[1][0]],
+                                    [img_row[0][1], img_row[1][1]]
+                                ]
+                                img_table = Table(img_data, colWidths=[3.75*inch, 3.75*inch])
+
+                            img_table.setStyle(TableStyle([
+                                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                                ('TOPPADDING', (0, 0), (-1, -1), 4),
+                                ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+                            ]))
+                            elements.append(img_table)
+                            elements.append(Spacer(1, 4))
+                            img_row = []
+
+                    except Exception as e:
+                        # If image can't be loaded, show placeholder text
+                        elements.append(Paragraph(f"<i>Photo: {caption or 'Image unavailable'}</i>", small_style))
+
         # === COSTS ===
         if work_order.get('is_billable'):
             est = work_order.get('estimated_total_cost', 0) or 0
             act = work_order.get('actual_total_cost', 0) or 0
-            elements.append(Spacer(1, 8))
+            elements.append(Spacer(1, 16))
+            elements.append(HRFlowable(width="100%", thickness=0.5, color=border))
+            elements.append(Spacer(1, 12))
             elements.append(Paragraph(f"COSTS  <font color='#64748b'>Est: ${est:.2f}  |  Actual: ${act:.2f}</font>", section_style))
 
         # === CLIENT COMPLETION (RATING, COMMENTS, SIGNATURE) ===
         completion = work_order.get('completion')
         if completion:
-            elements.append(Spacer(1, 8))
+            elements.append(Spacer(1, 16))
             elements.append(HRFlowable(width="100%", thickness=1, color=border))
-            elements.append(Spacer(1, 6))
+            elements.append(Spacer(1, 12))
             elements.append(Paragraph("CLIENT SIGN-OFF", section_style))
 
             # Rating with stars
@@ -341,16 +533,6 @@ class WorkOrderReportService:
 
                 if sig_info_parts:
                     elements.append(Paragraph("  |  ".join(sig_info_parts), small_style))
-
-        # === FOOTER ===
-        elements.append(Spacer(1, 12))
-        elements.append(HRFlowable(width="100%", thickness=0.5, color=border))
-        elements.append(Spacer(1, 4))
-        footer = Paragraph(
-            f"Generated {datetime.now().strftime('%b %d, %Y at %I:%M %p')}  •  DoxSnap CAFM",
-            ParagraphStyle('Footer', fontSize=7, textColor=gray, alignment=TA_CENTER)
-        )
-        elements.append(footer)
 
         # Build PDF
         doc.build(elements)

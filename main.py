@@ -8,9 +8,9 @@ import os
 import logging
 import google.generativeai as genai
 
-from app.api import auth, images, otp, admin, document_types, technician_site_shifts, plans, companies, branches, projects, operators, handheld_devices, assets, attendance, work_orders, warehouses, pm_checklists, pm_work_orders, dashboard, item_master, cycle_count, hhd_auth, users, sites, contracts, tickets, calendar, condition_reports, technician_evaluations, nps, petty_cash, docs, allocations, accounting, exchange_rates, purchase_requests, purchase_orders, goods_receipts, crm_leads, crm_opportunities, crm_activities, crm_campaigns, tools, disposals, business_units, address_book, clients
+from app.api import auth, images, otp, admin, document_types, technician_site_shifts, plans, companies, branches, projects, operators, handheld_devices, assets, attendance, work_orders, warehouses, pm_checklists, pm_work_orders, dashboard, item_master, cycle_count, hhd_auth, users, sites, contracts, tickets, calendar, condition_reports, technician_evaluations, nps, petty_cash, docs, allocations, accounting, exchange_rates, purchase_requests, purchase_orders, goods_receipts, crm_leads, crm_opportunities, crm_activities, crm_campaigns, tools, disposals, business_units, address_book, clients, supplier_invoices, supplier_payments, technicians, import_export
 from app.database import engine, get_db
-from app.models import Base, User, ProcessedImage, DocumentType, Warehouse, Plan, Company, Client, Branch, Project, Technician, HandHeldDevice, Floor, Room, Equipment, SubEquipment, TechnicianAttendance, SparePart, WorkOrder, WorkOrderSparePart, WorkOrderTimeEntry, PMSchedule, ItemCategory, ItemMaster, ItemStock, ItemLedger, ItemTransfer, ItemTransferLine, InvoiceItem, CycleCount, CycleCountItem, RefreshToken, Site, Building, Space, Scope, Contract, ContractScope, Ticket, CalendarSlot, WorkOrderSlotAssignment, CalendarTemplate, InvoiceAllocation, AllocationPeriod, RecognitionLog, AccountType, Account, FiscalPeriod, JournalEntry, JournalEntryLine, AccountBalance, DefaultAccountMapping, ExchangeRate, ExchangeRateLog, PurchaseRequest, PurchaseRequestLine, PurchaseOrder, PurchaseOrderLine, PurchaseOrderInvoice, GoodsReceipt, GoodsReceiptLine, LeadSource, PipelineStage, Lead, Opportunity, CRMActivity, Campaign, CampaignLead, ToolCategory, Tool, ToolPurchase, ToolPurchaseLine, ToolAllocationHistory, Disposal, DisposalToolLine, DisposalItemLine, BusinessUnit, AddressBook, AddressBookContact
+from app.models import Base, User, ProcessedImage, DocumentType, Warehouse, Plan, Company, Client, Branch, Project, Technician, HandHeldDevice, Floor, Room, Equipment, SubEquipment, TechnicianAttendance, SparePart, WorkOrder, WorkOrderSparePart, WorkOrderTimeEntry, PMSchedule, ItemCategory, ItemMaster, ItemStock, ItemLedger, ItemTransfer, ItemTransferLine, InvoiceItem, CycleCount, CycleCountItem, RefreshToken, Site, Building, Space, Scope, Contract, ContractScope, Ticket, CalendarSlot, WorkOrderSlotAssignment, CalendarTemplate, InvoiceAllocation, AllocationPeriod, RecognitionLog, AccountType, Account, FiscalPeriod, JournalEntry, JournalEntryLine, AccountBalance, DefaultAccountMapping, ExchangeRate, ExchangeRateLog, PurchaseRequest, PurchaseRequestLine, PurchaseOrder, PurchaseOrderLine, PurchaseOrderInvoice, GoodsReceipt, GoodsReceiptLine, LeadSource, PipelineStage, Lead, Opportunity, CRMActivity, Campaign, CampaignLead, ToolCategory, Tool, ToolPurchase, ToolPurchaseLine, ToolAllocationHistory, Disposal, DisposalToolLine, DisposalItemLine, BusinessUnit, AddressBook, AddressBookContact, SupplierInvoice, SupplierInvoiceLine, SupplierPayment, SupplierPaymentAllocation, DebitNote, DebitNoteLine, PurchaseOrderAmendment
 from app.config import settings
 from app.utils.security import verify_token
 from sqlalchemy import text
@@ -227,6 +227,7 @@ app.include_router(contracts.router, prefix="/api/contracts", tags=["Contracts"]
 app.include_router(tickets.router, prefix="/api", tags=["Tickets"])
 app.include_router(calendar.router, prefix="/api/calendar", tags=["Calendar"])
 app.include_router(technician_site_shifts.router, prefix="/api", tags=["Technicians Site Shifts"])
+app.include_router(technicians.router, prefix="/api", tags=["Technicians"])
 app.include_router(condition_reports.router, prefix="/api/condition-reports", tags=["Condition Reports"])
 app.include_router(technician_evaluations.router, prefix="/api/technician-evaluations", tags=["Technician Evaluations"])
 app.include_router(nps.router, prefix="/api/nps", tags=["Net Promoter Score"])
@@ -257,6 +258,13 @@ app.include_router(address_book.router, prefix="/api", tags=["Address Book"])
 
 # Clients Router
 app.include_router(clients.router, prefix="/api/clients", tags=["Clients"])
+
+# Supplier Invoice & Payment Routers (Procure-to-Pay)
+app.include_router(supplier_invoices.router, prefix="/api/supplier-invoices", tags=["Supplier Invoices"])
+app.include_router(supplier_payments.router, prefix="/api/supplier-payments", tags=["Supplier Payments"])
+
+# Import/Export Router
+app.include_router(import_export.router, prefix="/api", tags=["Import Export"])
 
 @app.get("/")
 async def root():

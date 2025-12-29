@@ -10,7 +10,7 @@ from PIL import Image
 
 from app.database import get_db
 from app.schemas import ProcessedImage, ProcessedImageList
-from app.models import ProcessedImage as ProcessedImageModel, User, InvoiceItem, ItemLedger, PurchaseOrderInvoice, PurchaseOrder
+from app.models import ProcessedImage as ProcessedImageModel, User, InvoiceItem, ItemLedger, PurchaseOrderInvoice, PurchaseOrder, InvoiceAllocation, AllocationPeriod
 from app.api.auth import get_current_user
 from app.services.s3 import upload_to_s3, process_image, generate_presigned_url, delete_from_s3
 from app.services.email import EmailService
@@ -810,11 +810,27 @@ async def delete_image(
             {"invoice_id": None}, synchronize_session=False
         )
 
-        # Delete associated invoice items first (cascade)
-        db.query(InvoiceItem).filter(InvoiceItem.invoice_id == image_id).delete()
+        # Get allocation ID before expunging anything
+        allocation_id = None
+        allocation = db.query(InvoiceAllocation).filter(InvoiceAllocation.invoice_id == image_id).first()
+        if allocation:
+            allocation_id = allocation.id
+            # Expunge allocation from session to prevent relationship handling
+            db.expunge(allocation)
 
-        # Delete from database
-        db.delete(image)
+        # Expunge the image from session BEFORE any deletions to prevent relationship cascade
+        db.expunge(image)
+
+        # Now delete using raw queries - session won't try to handle relationships
+        if allocation_id:
+            db.query(AllocationPeriod).filter(AllocationPeriod.allocation_id == allocation_id).delete(synchronize_session=False)
+            db.query(InvoiceAllocation).filter(InvoiceAllocation.id == allocation_id).delete(synchronize_session=False)
+
+        # Delete associated invoice items
+        db.query(InvoiceItem).filter(InvoiceItem.invoice_id == image_id).delete(synchronize_session=False)
+
+        # Delete the image using direct query
+        db.query(ProcessedImageModel).filter(ProcessedImageModel.id == image_id).delete(synchronize_session=False)
         db.commit()
         
         return {
@@ -899,7 +915,7 @@ async def flush_user_data(
                         s3_deleted += 1
                     else:
                         errors.append(f"Failed to delete S3 object: {image.s3_key}")
-                
+
                 # Delete local files if stored locally
                 elif image.s3_key and image.s3_key.startswith("local/"):
                     filename = image.s3_key.replace("local/", "")
@@ -907,13 +923,29 @@ async def flush_user_data(
                     if os.path.exists(local_file_path):
                         os.remove(local_file_path)
                         local_deleted += 1
-                
-                # Delete from database
-                db.delete(image)
-                
+
+                # Get allocation ID and expunge objects before deletion
+                image_id = image.id
+                allocation_id = None
+                allocation = db.query(InvoiceAllocation).filter(InvoiceAllocation.invoice_id == image_id).first()
+                if allocation:
+                    allocation_id = allocation.id
+                    db.expunge(allocation)
+
+                # Expunge image from session
+                db.expunge(image)
+
+                # Delete allocation and its periods
+                if allocation_id:
+                    db.query(AllocationPeriod).filter(AllocationPeriod.allocation_id == allocation_id).delete(synchronize_session=False)
+                    db.query(InvoiceAllocation).filter(InvoiceAllocation.id == allocation_id).delete(synchronize_session=False)
+
+                # Delete from database using direct query
+                db.query(ProcessedImageModel).filter(ProcessedImageModel.id == image_id).delete(synchronize_session=False)
+
             except Exception as e:
-                errors.append(f"Error deleting image {image.id}: {str(e)}")
-        
+                errors.append(f"Error deleting image {image.id if hasattr(image, 'id') else 'unknown'}: {str(e)}")
+
         # Reset user's document quota to 5 after flushing all data
         current_user.remaining_documents = 5
         
@@ -964,7 +996,7 @@ async def flush_processed_invoices(
                         s3_deleted += 1
                     else:
                         errors.append(f"Failed to delete S3 object: {image.s3_key}")
-                
+
                 # Delete local files if stored locally
                 elif image.s3_key and image.s3_key.startswith("local/"):
                     filename = image.s3_key.replace("local/", "")
@@ -972,15 +1004,31 @@ async def flush_processed_invoices(
                     if os.path.exists(local_file_path):
                         os.remove(local_file_path)
                         local_deleted += 1
-                
-                # Delete from database
-                db.delete(image)
-                
+
+                # Get allocation ID and expunge objects before deletion
+                image_id = image.id
+                allocation_id = None
+                allocation = db.query(InvoiceAllocation).filter(InvoiceAllocation.invoice_id == image_id).first()
+                if allocation:
+                    allocation_id = allocation.id
+                    db.expunge(allocation)
+
+                # Expunge image from session
+                db.expunge(image)
+
+                # Delete allocation and its periods
+                if allocation_id:
+                    db.query(AllocationPeriod).filter(AllocationPeriod.allocation_id == allocation_id).delete(synchronize_session=False)
+                    db.query(InvoiceAllocation).filter(InvoiceAllocation.id == allocation_id).delete(synchronize_session=False)
+
+                # Delete from database using direct query
+                db.query(ProcessedImageModel).filter(ProcessedImageModel.id == image_id).delete(synchronize_session=False)
+
             except Exception as e:
-                errors.append(f"Error deleting processed image {image.id}: {str(e)}")
-        
+                errors.append(f"Error deleting processed image {image.id if hasattr(image, 'id') else 'unknown'}: {str(e)}")
+
         db.commit()
-        
+
         # Notification message
         notification_message = f"Successfully processed and removed {deleted_count} invoices from your account."
         

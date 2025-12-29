@@ -25,6 +25,65 @@ router = APIRouter()
 security = HTTPBearer()
 
 
+def find_matching_item(db: Session, company_id: int, item_id: Optional[int], item_number: Optional[str], description: Optional[str]) -> tuple[Optional[int], Optional[str]]:
+    """
+    Try to match a PR line item to Item Master.
+    Returns (item_id, match_reason) tuple.
+
+    Matching priority:
+    1. If item_id already set, use it
+    2. Try exact item_number match (case-insensitive)
+    3. Try fuzzy description matching (word overlap similarity)
+    """
+    # 1. Already has item_id
+    if item_id:
+        return item_id, "existing"
+
+    # 2. Try exact item_number match
+    if item_number and item_number.strip():
+        item = db.query(ItemMaster).filter(
+            ItemMaster.company_id == company_id,
+            func.upper(ItemMaster.item_number) == item_number.upper().strip(),
+            ItemMaster.is_active == True
+        ).first()
+        if item:
+            logger.info(f"PR→PO: Matched item_number '{item_number}' to ItemMaster ID {item.id}")
+            return item.id, "item_number"
+
+    # 3. Try fuzzy description matching
+    if description and description.strip():
+        items = db.query(ItemMaster).filter(
+            ItemMaster.company_id == company_id,
+            ItemMaster.is_active == True
+        ).all()
+
+        best_match = None
+        best_similarity = 0.0
+        min_confidence = 0.4  # Minimum 40% word overlap to consider a match
+
+        desc_words = set(description.lower().split())
+
+        for item in items:
+            if not item.description:
+                continue
+
+            item_words = set(item.description.lower().split())
+            if desc_words and item_words:
+                intersection = desc_words & item_words
+                union = desc_words | item_words
+                similarity = len(intersection) / len(union) if union else 0
+
+                if similarity > best_similarity and similarity >= min_confidence:
+                    best_similarity = similarity
+                    best_match = item
+
+        if best_match:
+            logger.info(f"PR→PO: Fuzzy matched description '{description[:50]}' to ItemMaster ID {best_match.id} ({best_match.item_number}) with {best_similarity:.0%} confidence")
+            return best_match.id, f"description ({best_similarity:.0%})"
+
+    return None, None
+
+
 def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security), db: Session = Depends(get_db)):
     """Get the current authenticated user"""
     token = credentials.credentials
@@ -637,6 +696,8 @@ async def convert_pr_to_po(
 
     # Create PO lines from PR lines
     subtotal = Decimal(0)
+    matched_items = []  # Track which items were auto-matched
+
     for pr_line in pr.lines:
         # Get unit price from request or use estimated cost
         unit_price = Decimal(0)
@@ -649,11 +710,33 @@ async def convert_pr_to_po(
         total_price = unit_price * Decimal(str(qty))
         subtotal += total_price
 
+        # Try to match line item to Item Master
+        resolved_item_id, match_reason = find_matching_item(
+            db=db,
+            company_id=current_user.company_id,
+            item_id=pr_line.item_id,
+            item_number=pr_line.item_number,
+            description=pr_line.description
+        )
+
+        # Get item_number from matched item if we found one
+        resolved_item_number = pr_line.item_number
+        if resolved_item_id and not pr_line.item_id:
+            # We found a match - get the item_number from Item Master
+            matched_item = db.query(ItemMaster).filter(ItemMaster.id == resolved_item_id).first()
+            if matched_item:
+                resolved_item_number = matched_item.item_number
+                matched_items.append({
+                    "pr_line_description": pr_line.description,
+                    "matched_item_number": matched_item.item_number,
+                    "match_reason": match_reason
+                })
+
         po_line = PurchaseOrderLine(
             purchase_order_id=po.id,
             pr_line_id=pr_line.id,
-            item_id=pr_line.item_id,
-            item_number=pr_line.item_number,
+            item_id=resolved_item_id,
+            item_number=resolved_item_number,
             description=pr_line.description,
             quantity_ordered=qty,
             unit=pr_line.unit,
@@ -672,12 +755,15 @@ async def convert_pr_to_po(
     db.refresh(po)
 
     logger.info(f"Purchase request {pr.pr_number} converted to PO {po.po_number}")
+    if matched_items:
+        logger.info(f"Auto-matched {len(matched_items)} items to Item Master: {matched_items}")
 
     return {
         "success": True,
         "message": f"Purchase order {po.po_number} created from {pr.pr_number}",
         "po_id": po.id,
-        "po_number": po.po_number
+        "po_number": po.po_number,
+        "matched_items": matched_items  # Items that were auto-linked to Item Master
     }
 
 

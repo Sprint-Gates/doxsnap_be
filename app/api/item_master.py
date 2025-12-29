@@ -128,9 +128,7 @@ class ItemMasterCreate(BaseModel):
     stocking_type: Optional[str] = "S"
     line_type: Optional[str] = "S"
     unit: Optional[str] = "pcs"
-    unit_cost: Optional[float] = None
-    unit_price: Optional[float] = None
-    currency: Optional[str] = "USD"
+    # unit_cost and unit_price removed - cost is per warehouse in ItemStock.average_cost
     minimum_stock_level: Optional[int] = 0
     reorder_quantity: Optional[int] = 0
     primary_vendor_id: Optional[int] = None
@@ -148,9 +146,7 @@ class ItemMasterUpdate(BaseModel):
     stocking_type: Optional[str] = None
     line_type: Optional[str] = None
     unit: Optional[str] = None
-    unit_cost: Optional[float] = None
-    unit_price: Optional[float] = None
-    currency: Optional[str] = None
+    # unit_cost and unit_price removed - cost is per warehouse in ItemStock.average_cost
     minimum_stock_level: Optional[int] = None
     reorder_quantity: Optional[int] = None
     primary_vendor_id: Optional[int] = None
@@ -467,9 +463,7 @@ def item_to_response(item: ItemMaster, include_stock: bool = False) -> dict:
         "stocking_type": item.stocking_type,
         "line_type": item.line_type,
         "unit": item.unit,
-        "unit_cost": decimal_to_float(item.unit_cost),
-        "unit_price": decimal_to_float(item.unit_price),
-        "currency": item.currency,
+        # unit_cost and unit_price removed - cost is per warehouse in ItemStock.average_cost
         "minimum_stock_level": item.minimum_stock_level,
         "reorder_quantity": item.reorder_quantity,
         "primary_vendor_id": item.primary_address_book_id,
@@ -1529,6 +1523,10 @@ async def complete_transfer(
     if transfer.status == "completed":
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Transfer already completed")
 
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(f"Completing transfer {transfer.transfer_number}: from_warehouse={transfer.from_warehouse_id}, to_warehouse={transfer.to_warehouse_id}, to_hhd={transfer.to_hhd_id}")
+
     try:
         for line in transfer.lines:
             # Check source stock
@@ -1565,6 +1563,7 @@ async def complete_transfer(
 
             # Create TRANSFER_IN ledger entry (to destination)
             # Use the same weighted average cost from source
+            logger.info(f"Creating TRANSFER_IN for item {line.item_id}: to_warehouse={transfer.to_warehouse_id}, to_hhd={transfer.to_hhd_id}, qty={line.quantity_requested}")
             update_stock_and_create_ledger(
                 db=db,
                 company_id=auth_context.company_id,
@@ -1582,6 +1581,7 @@ async def complete_transfer(
             # Update line with actual quantity transferred and cost used
             line.quantity_transferred = line.quantity_requested
             line.unit_cost = transfer_unit_cost
+            logger.info(f"Transfer line completed: item={line.item_id}, qty={line.quantity_transferred}")
 
         # Update transfer status
         transfer.status = "completed"
@@ -2251,6 +2251,9 @@ async def link_invoice_item_to_master(
 
     # Link the invoice item to the master item
     invoice_item.item_id = master_item.id
+    # Set receive_status to pending if not already set (will be changed to 'received' when posting)
+    if not invoice_item.receive_status or invoice_item.receive_status not in ['received', 'partial']:
+        invoice_item.receive_status = "pending"
     db.flush()
 
     # Save the vendor/supplier item code as an alias for future automatic matching

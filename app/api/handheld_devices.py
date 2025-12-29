@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from typing import Optional, List
 from datetime import datetime
 from app.database import get_db
-from app.models import User, Company, HandHeldDevice, Technician, handheld_device_technicians, Warehouse
+from app.models import User, Company, HandHeldDevice, Technician, handheld_device_technicians, handheld_device_technicians_ab, Warehouse, AddressBook
 from app.utils.security import verify_token
 import logging
 
@@ -85,17 +85,22 @@ class TechniciansAssignment(BaseModel):
 
 def device_to_response(device: HandHeldDevice, db: Session) -> dict:
     """Convert HandHeldDevice model to response dict"""
-    # Primary technician (legacy single assignment)
+    # Primary technician - look up from AddressBook using assigned_technician_id
     technician_data = None
-    if device.assigned_technician:
-        technician_data = {
-            "id": device.assigned_technician.id,
-            "name": device.assigned_technician.name,
-            "email": device.assigned_technician.email,
-            "phone": device.assigned_technician.phone,
-            "employee_id": device.assigned_technician.employee_id,
-            "specialization": device.assigned_technician.specialization
-        }
+    if device.assigned_technician_id:
+        tech = db.query(AddressBook).filter(
+            AddressBook.id == device.assigned_technician_id,
+            AddressBook.search_type == "E"
+        ).first()
+        if tech:
+            technician_data = {
+                "id": tech.id,
+                "name": tech.alpha_name or tech.mailing_name or "Unknown",
+                "email": tech.email,
+                "phone": tech.phone_primary,
+                "employee_id": tech.employee_id,
+                "specialization": tech.specialization
+            }
 
     # Warehouse data
     warehouse_data = None
@@ -106,27 +111,30 @@ def device_to_response(device: HandHeldDevice, db: Session) -> dict:
             "code": device.warehouse.code
         }
 
-    # All assigned technicians (many-to-many)
+    # All assigned technicians (many-to-many) - look up from new junction table and AddressBook
     assigned_technicians_data = []
-    for tech in device.assigned_technicians:
-        # Get assignment details from junction table
-        assignment = db.execute(
-            handheld_device_technicians.select().where(
-                handheld_device_technicians.c.handheld_device_id == device.id,
-                handheld_device_technicians.c.technician_id == tech.id
-            )
-        ).first()
+    assignments = db.execute(
+        handheld_device_technicians_ab.select().where(
+            handheld_device_technicians_ab.c.handheld_device_id == device.id
+        )
+    ).fetchall()
 
-        assigned_technicians_data.append({
-            "id": tech.id,
-            "name": tech.name,
-            "email": tech.email,
-            "phone": tech.phone,
-            "employee_id": tech.employee_id,
-            "specialization": tech.specialization,
-            "is_primary": assignment.is_primary if assignment else False,
-            "assigned_at": assignment.assigned_at.isoformat() if assignment and assignment.assigned_at else None
-        })
+    for assignment in assignments:
+        tech = db.query(AddressBook).filter(
+            AddressBook.id == assignment.address_book_id,
+            AddressBook.search_type == "E"
+        ).first()
+        if tech:
+            assigned_technicians_data.append({
+                "id": tech.id,
+                "name": tech.alpha_name or tech.mailing_name or "Unknown",
+                "email": tech.email,
+                "phone": tech.phone_primary,
+                "employee_id": tech.employee_id,
+                "specialization": tech.specialization,
+                "is_primary": assignment.is_primary if assignment else False,
+                "assigned_at": assignment.assigned_at.isoformat() if assignment and assignment.assigned_at else None
+            })
 
     return {
         "id": device.id,
@@ -200,10 +208,11 @@ async def get_available_technicians(
             detail="No company associated with this user"
         )
 
-    # Get all active technicians
-    all_technicians = db.query(Technician).filter(
-        Technician.company_id == user.company_id,
-        Technician.is_active == True
+    # Get all active employees from AddressBook (search_type='E')
+    all_technicians = db.query(AddressBook).filter(
+        AddressBook.company_id == user.company_id,
+        AddressBook.search_type == "E",
+        AddressBook.is_active == True
     ).all()
 
     # Get technicians already assigned to a device
@@ -219,9 +228,9 @@ async def get_available_technicians(
 
     return [{
         "id": t.id,
-        "name": t.name,
+        "name": t.alpha_name or t.mailing_name or "Unknown",
         "email": t.email,
-        "phone": t.phone,
+        "phone": t.phone_primary,
         "employee_id": t.employee_id,
         "specialization": t.specialization
     } for t in available]
@@ -423,8 +432,12 @@ async def delete_handheld_device(
     try:
         device.is_active = False
         device.status = "retired"
-        # Unassign technician when retiring device
-        device.assigned_technician_id = None
+        # Unassign technicians when retiring device - clear junction table
+        db.execute(
+            handheld_device_technicians_ab.delete().where(
+                handheld_device_technicians_ab.c.handheld_device_id == device_id
+            )
+        )
         device.assigned_at = None
         db.commit()
 
@@ -471,24 +484,27 @@ async def assign_technician_to_device(
 
     try:
         if data.technician_id is None:
-            # Unassign technician
-            old_technician_name = device.assigned_technician.name if device.assigned_technician else None
-            device.assigned_technician_id = None
+            # Unassign all technicians - clear the junction table
+            db.execute(
+                handheld_device_technicians_ab.delete().where(
+                    handheld_device_technicians_ab.c.handheld_device_id == device_id
+                )
+            )
             device.assigned_at = None
             device.status = "available"
             db.commit()
             db.refresh(device)
 
-            if old_technician_name:
-                logger.info(f"Technician '{old_technician_name}' unassigned from device '{device.device_code}' by '{user.email}'")
+            logger.info(f"All technicians unassigned from device '{device.device_code}' by '{user.email}'")
 
             return device_to_response(device, db)
         else:
-            # Verify technician exists and belongs to same company
-            technician = db.query(Technician).filter(
-                Technician.id == data.technician_id,
-                Technician.company_id == user.company_id,
-                Technician.is_active == True
+            # Verify technician exists and belongs to same company (using AddressBook with search_type='E')
+            technician = db.query(AddressBook).filter(
+                AddressBook.id == data.technician_id,
+                AddressBook.company_id == user.company_id,
+                AddressBook.search_type == "E",
+                AddressBook.is_active == True
             ).first()
 
             if not technician:
@@ -497,28 +513,46 @@ async def assign_technician_to_device(
                     detail="Technician not found"
                 )
 
-            # Check if technician is already assigned to another device
-            existing_assignment = db.query(HandHeldDevice).filter(
-                HandHeldDevice.company_id == user.company_id,
-                HandHeldDevice.assigned_technician_id == data.technician_id,
-                HandHeldDevice.id != device_id,
-                HandHeldDevice.is_active == True
+            # Check if technician is already assigned to another device via new junction table
+            from sqlalchemy import select, exists
+            existing_check = db.execute(
+                handheld_device_technicians_ab.select().where(
+                    handheld_device_technicians_ab.c.address_book_id == data.technician_id,
+                    handheld_device_technicians_ab.c.handheld_device_id != device_id
+                )
             ).first()
 
-            if existing_assignment:
+            if existing_check:
+                # Find the device name
+                other_device = db.query(HandHeldDevice).filter(
+                    HandHeldDevice.id == existing_check.handheld_device_id
+                ).first()
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Technician is already assigned to device '{existing_assignment.device_code}'"
+                    detail=f"Technician is already assigned to device '{other_device.device_code if other_device else 'unknown'}'"
                 )
 
-            # Assign technician
-            device.assigned_technician_id = data.technician_id
+            # Clear existing assignments and assign single technician
+            db.execute(
+                handheld_device_technicians_ab.delete().where(
+                    handheld_device_technicians_ab.c.handheld_device_id == device_id
+                )
+            )
+            db.execute(
+                handheld_device_technicians_ab.insert().values(
+                    handheld_device_id=device_id,
+                    address_book_id=data.technician_id,
+                    assigned_at=datetime.utcnow(),
+                    is_primary=True
+                )
+            )
             device.assigned_at = datetime.utcnow()
             device.status = "assigned"
             db.commit()
             db.refresh(device)
 
-            logger.info(f"Technician '{technician.name}' assigned to device '{device.device_code}' by '{user.email}'")
+            tech_name = technician.alpha_name or technician.mailing_name or "Unknown"
+            logger.info(f"Technician '{tech_name}' assigned to device '{device.device_code}' by '{user.email}'")
 
             return device_to_response(device, db)
 
@@ -559,13 +593,14 @@ async def assign_technicians_to_device(
         )
 
     try:
-        # Verify all technicians exist and belong to the same company
+        # Verify all technicians exist and belong to the same company (using AddressBook with search_type='E')
         technicians = []
         if data.technician_ids:
-            technicians = db.query(Technician).filter(
-                Technician.id.in_(data.technician_ids),
-                Technician.company_id == user.company_id,
-                Technician.is_active == True
+            technicians = db.query(AddressBook).filter(
+                AddressBook.id.in_(data.technician_ids),
+                AddressBook.company_id == user.company_id,
+                AddressBook.search_type == "E",
+                AddressBook.is_active == True
             ).all()
 
             if len(technicians) != len(data.technician_ids):
@@ -574,41 +609,37 @@ async def assign_technicians_to_device(
                     detail="One or more technicians not found"
                 )
 
-        # Clear existing assignments
+        # Clear existing assignments from new junction table
         db.execute(
-            handheld_device_technicians.delete().where(
-                handheld_device_technicians.c.handheld_device_id == device_id
+            handheld_device_technicians_ab.delete().where(
+                handheld_device_technicians_ab.c.handheld_device_id == device_id
             )
         )
 
-        # Add new assignments
+        # Add new assignments to new junction table
         for tech in technicians:
             is_primary = (data.primary_technician_id == tech.id) if data.primary_technician_id else (tech == technicians[0] if technicians else False)
             db.execute(
-                handheld_device_technicians.insert().values(
+                handheld_device_technicians_ab.insert().values(
                     handheld_device_id=device_id,
-                    technician_id=tech.id,
+                    address_book_id=tech.id,
                     assigned_at=datetime.utcnow(),
                     is_primary=is_primary
                 )
             )
 
-        # Update device status
+        # Update device status (don't set assigned_technician_id - it has FK to legacy technicians table)
         if technicians:
             device.status = "assigned"
-            # Set the primary technician as the legacy assigned_technician_id
-            primary_id = data.primary_technician_id if data.primary_technician_id in data.technician_ids else technicians[0].id
-            device.assigned_technician_id = primary_id
             device.assigned_at = datetime.utcnow()
         else:
             device.status = "available"
-            device.assigned_technician_id = None
             device.assigned_at = None
 
         db.commit()
         db.refresh(device)
 
-        tech_names = [t.name for t in technicians]
+        tech_names = [t.alpha_name or t.mailing_name for t in technicians]
         logger.info(f"Technicians {tech_names} assigned to device '{device.device_code}' by '{user.email}'")
 
         return device_to_response(device, db)
@@ -655,11 +686,12 @@ async def add_technician_to_device(
             detail="Device not found"
         )
 
-    # Verify technician exists
-    technician = db.query(Technician).filter(
-        Technician.id == data.technician_id,
-        Technician.company_id == user.company_id,
-        Technician.is_active == True
+    # Verify technician exists (using AddressBook with search_type='E')
+    technician = db.query(AddressBook).filter(
+        AddressBook.id == data.technician_id,
+        AddressBook.company_id == user.company_id,
+        AddressBook.search_type == "E",
+        AddressBook.is_active == True
     ).first()
 
     if not technician:
@@ -669,11 +701,11 @@ async def add_technician_to_device(
         )
 
     try:
-        # Check if already assigned
+        # Check if already assigned in new junction table
         existing = db.execute(
-            handheld_device_technicians.select().where(
-                handheld_device_technicians.c.handheld_device_id == device_id,
-                handheld_device_technicians.c.technician_id == data.technician_id
+            handheld_device_technicians_ab.select().where(
+                handheld_device_technicians_ab.c.handheld_device_id == device_id,
+                handheld_device_technicians_ab.c.address_book_id == data.technician_id
             )
         ).first()
 
@@ -683,29 +715,34 @@ async def add_technician_to_device(
                 detail="Technician is already assigned to this device"
             )
 
-        # Check if this is the first technician (make them primary)
-        is_first = len(device.assigned_technicians) == 0
+        # Check if this is the first technician (make them primary) - check new junction table
+        existing_count = db.execute(
+            handheld_device_technicians_ab.select().where(
+                handheld_device_technicians_ab.c.handheld_device_id == device_id
+            )
+        ).fetchall()
+        is_first = len(existing_count) == 0
 
-        # Add technician
+        # Add technician to new junction table
         db.execute(
-            handheld_device_technicians.insert().values(
+            handheld_device_technicians_ab.insert().values(
                 handheld_device_id=device_id,
-                technician_id=data.technician_id,
+                address_book_id=data.technician_id,
                 assigned_at=datetime.utcnow(),
                 is_primary=is_first
             )
         )
 
-        # Update device status
+        # Update device status (don't set assigned_technician_id - it has FK to legacy technicians table)
         device.status = "assigned"
         if is_first:
-            device.assigned_technician_id = data.technician_id
             device.assigned_at = datetime.utcnow()
 
         db.commit()
         db.refresh(device)
 
-        logger.info(f"Technician '{technician.name}' added to device '{device.device_code}' by '{user.email}'")
+        tech_name = technician.alpha_name or technician.mailing_name or "Unknown"
+        logger.info(f"Technician '{tech_name}' added to device '{device.device_code}' by '{user.email}'")
 
         return device_to_response(device, db)
 
@@ -746,11 +783,11 @@ async def remove_technician_from_device(
         )
 
     try:
-        # Check if assigned
+        # Check if assigned in new junction table
         existing = db.execute(
-            handheld_device_technicians.select().where(
-                handheld_device_technicians.c.handheld_device_id == device_id,
-                handheld_device_technicians.c.technician_id == technician_id
+            handheld_device_technicians_ab.select().where(
+                handheld_device_technicians_ab.c.handheld_device_id == device_id,
+                handheld_device_technicians_ab.c.address_book_id == technician_id
             )
         ).first()
 
@@ -762,42 +799,44 @@ async def remove_technician_from_device(
 
         was_primary = existing.is_primary
 
-        # Remove the assignment
+        # Remove the assignment from new junction table
         db.execute(
-            handheld_device_technicians.delete().where(
-                handheld_device_technicians.c.handheld_device_id == device_id,
-                handheld_device_technicians.c.technician_id == technician_id
+            handheld_device_technicians_ab.delete().where(
+                handheld_device_technicians_ab.c.handheld_device_id == device_id,
+                handheld_device_technicians_ab.c.address_book_id == technician_id
             )
         )
 
-        # Check remaining technicians
+        # Check remaining technicians in new junction table
         remaining = db.execute(
-            handheld_device_technicians.select().where(
-                handheld_device_technicians.c.handheld_device_id == device_id
+            handheld_device_technicians_ab.select().where(
+                handheld_device_technicians_ab.c.handheld_device_id == device_id
             )
         ).fetchall()
 
         if not remaining:
             # No more technicians - set device to available
             device.status = "available"
-            device.assigned_technician_id = None
             device.assigned_at = None
         elif was_primary and remaining:
-            # Assign a new primary
+            # Assign a new primary in the junction table
             new_primary = remaining[0]
             db.execute(
-                handheld_device_technicians.update().where(
-                    handheld_device_technicians.c.handheld_device_id == device_id,
-                    handheld_device_technicians.c.technician_id == new_primary.technician_id
+                handheld_device_technicians_ab.update().where(
+                    handheld_device_technicians_ab.c.handheld_device_id == device_id,
+                    handheld_device_technicians_ab.c.address_book_id == new_primary.address_book_id
                 ).values(is_primary=True)
             )
-            device.assigned_technician_id = new_primary.technician_id
 
         db.commit()
         db.refresh(device)
 
-        technician = db.query(Technician).filter(Technician.id == technician_id).first()
-        tech_name = technician.name if technician else f"ID {technician_id}"
+        # Get technician name for logging (using AddressBook with search_type='E')
+        technician = db.query(AddressBook).filter(
+            AddressBook.id == technician_id,
+            AddressBook.search_type == "E"
+        ).first()
+        tech_name = (technician.alpha_name or technician.mailing_name) if technician else f"ID {technician_id}"
         logger.info(f"Technician '{tech_name}' removed from device '{device.device_code}' by '{user.email}'")
 
         return device_to_response(device, db)
@@ -841,8 +880,12 @@ async def toggle_device_status(
         device.is_active = not device.is_active
         if not device.is_active:
             device.status = "retired"
-            # Unassign technician when deactivating
-            device.assigned_technician_id = None
+            # Unassign technicians when deactivating - clear junction table
+            db.execute(
+                handheld_device_technicians_ab.delete().where(
+                    handheld_device_technicians_ab.c.handheld_device_id == device_id
+                )
+            )
             device.assigned_at = None
         else:
             device.status = "available"

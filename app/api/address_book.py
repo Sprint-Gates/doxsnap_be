@@ -20,7 +20,7 @@ from typing import Optional, List
 from datetime import datetime
 
 from app.database import get_db
-from app.models import AddressBook, AddressBookContact, BusinessUnit, User
+from app.models import AddressBook, AddressBookContact, BusinessUnit, User, Client
 from app.api.auth import get_current_user
 from app.schemas import (
     AddressBookCreate, AddressBookUpdate, AddressBookResponse,
@@ -200,6 +200,61 @@ def build_hierarchy_tree(entries: List[AddressBook], parent_id: Optional[int] = 
 
 
 # =============================================================================
+# Hourly Rate Computation
+# =============================================================================
+
+def compute_hourly_rate(
+    salary_type: str,
+    base_salary: float,
+    hourly_rate: float = None,
+    working_hours_per_day: float = None,
+    working_days_per_month: int = None,
+    transport_allowance: float = None,
+    housing_allowance: float = None,
+    food_allowance: float = None,
+    other_allowances: float = None
+) -> float:
+    """
+    Automatically compute hourly rate if not provided.
+
+    For hourly salary type: use the provided hourly_rate
+    For monthly/daily salary type: calculate from base_salary + allowances
+
+    Formula: (base_salary + all_allowances) / (working_hours_per_day * working_days_per_month)
+    """
+    # If hourly rate is explicitly provided, use it
+    if hourly_rate and hourly_rate > 0:
+        return hourly_rate
+
+    # For hourly type without explicit rate, no computation needed
+    if salary_type == "hourly":
+        return hourly_rate or 0
+
+    # For monthly/daily, compute from salary
+    if not base_salary or base_salary <= 0:
+        return None
+
+    # Default working hours if not provided
+    hours_per_day = working_hours_per_day or 8.0
+    days_per_month = working_days_per_month or 22
+
+    # Calculate total monthly compensation
+    total_monthly = float(base_salary)
+    total_monthly += float(transport_allowance or 0)
+    total_monthly += float(housing_allowance or 0)
+    total_monthly += float(food_allowance or 0)
+    total_monthly += float(other_allowances or 0)
+
+    # Calculate monthly hours
+    monthly_hours = float(hours_per_day) * float(days_per_month)
+
+    if monthly_hours > 0:
+        return round(total_monthly / monthly_hours, 2)
+
+    return None
+
+
+# =============================================================================
 # CRUD Endpoints
 # =============================================================================
 
@@ -304,7 +359,18 @@ async def create_address_book_entry(
         salary_type=data.salary_type,
         base_salary=data.base_salary,
         salary_currency=data.salary_currency,
-        hourly_rate=data.hourly_rate,
+        # Auto-compute hourly rate if not provided
+        hourly_rate=compute_hourly_rate(
+            salary_type=data.salary_type,
+            base_salary=data.base_salary,
+            hourly_rate=data.hourly_rate,
+            working_hours_per_day=data.working_hours_per_day,
+            working_days_per_month=data.working_days_per_month,
+            transport_allowance=data.transport_allowance,
+            housing_allowance=data.housing_allowance,
+            food_allowance=data.food_allowance,
+            other_allowances=data.other_allowances
+        ) if data.search_type == 'E' else data.hourly_rate,
         overtime_rate_multiplier=data.overtime_rate_multiplier,
         working_hours_per_day=data.working_hours_per_day,
         working_days_per_month=data.working_days_per_month,
@@ -349,6 +415,25 @@ async def create_address_book_entry(
             notes=contact_data.notes
         )
         db.add(contact)
+
+    # Auto-create Client record if this is a Customer (type "C")
+    if data.search_type == "C":
+        client = Client(
+            company_id=current_user.company_id,
+            name=data.alpha_name,
+            code=address_number,
+            email=data.email,
+            phone=data.phone_primary,
+            address=data.address_line_1,
+            city=data.city,
+            country=data.country,
+            tax_number=data.tax_id,
+            contact_person=data.mailing_name,
+            is_active=data.is_active,
+            address_book_id=ab_entry.id  # Link back to Address Book
+        )
+        db.add(client)
+        logger.info(f"Auto-created Client '{data.alpha_name}' from Address Book entry {address_number}")
 
     db.commit()
     db.refresh(ab_entry)
@@ -717,6 +802,27 @@ async def update_address_book_entry(
     update_data = data.model_dump(exclude_unset=True)
     for field, value in update_data.items():
         setattr(ab, field, value)
+
+    # Auto-recompute hourly rate for employees if salary fields changed
+    if ab.search_type == 'E':
+        # Check if any salary-related field was updated
+        salary_fields = {'base_salary', 'working_hours_per_day', 'working_days_per_month',
+                        'transport_allowance', 'housing_allowance', 'food_allowance',
+                        'other_allowances', 'salary_type'}
+        if salary_fields.intersection(update_data.keys()) or 'hourly_rate' not in update_data:
+            computed_rate = compute_hourly_rate(
+                salary_type=ab.salary_type,
+                base_salary=ab.base_salary,
+                hourly_rate=ab.hourly_rate if 'hourly_rate' in update_data else None,
+                working_hours_per_day=ab.working_hours_per_day,
+                working_days_per_month=ab.working_days_per_month,
+                transport_allowance=ab.transport_allowance,
+                housing_allowance=ab.housing_allowance,
+                food_allowance=ab.food_allowance,
+                other_allowances=ab.other_allowances
+            )
+            if computed_rate is not None:
+                ab.hourly_rate = computed_rate
 
     ab.updated_by = current_user.id
     ab.updated_at = datetime.utcnow()
