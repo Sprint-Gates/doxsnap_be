@@ -1553,6 +1553,20 @@ class JournalPostingService:
             # Fall back to default balance sheet BU for inventory
             business_unit_id = self._get_default_business_unit("balance_sheet")
 
+        # Get site_id and contract_id from linked PO/work order
+        site_id = None
+        contract_id = po.contract_id if po else None
+        work_order_id = po.work_order_id if po else None
+
+        # If PO is linked to a work order, get site_id from the work order
+        if work_order_id:
+            from app.models import WorkOrder
+            work_order = self.db.query(WorkOrder).filter(WorkOrder.id == work_order_id).first()
+            if work_order:
+                site_id = work_order.site_id
+                if not contract_id:
+                    contract_id = work_order.contract_id
+
         entry_date = grn.receipt_date or date.today()
         fiscal_period = self._get_fiscal_period(entry_date)
 
@@ -1610,7 +1624,10 @@ class JournalPostingService:
                     description=desc,
                     line_number=line_number,
                     address_book_id=po.address_book_id if po else None,
-                    business_unit_id=business_unit_id
+                    business_unit_id=business_unit_id,
+                    site_id=site_id,
+                    contract_id=contract_id,
+                    work_order_id=work_order_id
                 )
                 self.db.add(inv_line)
                 lines.append(inv_line)
@@ -1626,7 +1643,10 @@ class JournalPostingService:
                 description=f"VAT on GRN {grn.grn_number}",
                 line_number=line_number,
                 address_book_id=po.address_book_id if po else None,
-                business_unit_id=business_unit_id
+                business_unit_id=business_unit_id,
+                site_id=site_id,
+                contract_id=contract_id,
+                work_order_id=work_order_id
             )
             self.db.add(vat_line)
             lines.append(vat_line)
@@ -1645,7 +1665,10 @@ class JournalPostingService:
                 description=f"GRNI for {grn.grn_number} - PO {po.po_number if po else 'N/A'}",
                 line_number=line_number,
                 address_book_id=po.address_book_id if po else None,
-                business_unit_id=business_unit_id
+                business_unit_id=business_unit_id,
+                site_id=site_id,
+                contract_id=contract_id,
+                work_order_id=work_order_id
             )
             self.db.add(ap_line)
             lines.append(ap_line)
@@ -1692,7 +1715,10 @@ class JournalPostingService:
                         description=f"{cost_type_label}: {extra_cost.reference_number or grn.grn_number}",
                         line_number=line_number,
                         address_book_id=getattr(extra_cost, 'address_book_id', None) or (po.address_book_id if po else None),
-                        business_unit_id=business_unit_id
+                        business_unit_id=business_unit_id,
+                        site_id=site_id,
+                        contract_id=contract_id,
+                        work_order_id=work_order_id
                     )
                     self.db.add(extra_cost_line)
                     lines.append(extra_cost_line)

@@ -336,6 +336,22 @@ class GRNIClearingService:
 
         vendor_name = invoice.address_book.alpha_name if invoice.address_book else "Unknown"
 
+        # Get site_id/contract_id from linked GRN → PO → work order
+        site_id = None
+        contract_id = None
+        work_order_id = None
+        po = grn.purchase_order
+        if po:
+            contract_id = po.contract_id
+            work_order_id = po.work_order_id
+            if work_order_id:
+                from app.models import WorkOrder
+                work_order = self.db.query(WorkOrder).filter(WorkOrder.id == work_order_id).first()
+                if work_order:
+                    site_id = work_order.site_id
+                    if not contract_id:
+                        contract_id = work_order.contract_id
+
         # Create journal entry
         entry = JournalEntry(
             company_id=self.company_id,
@@ -365,7 +381,10 @@ class GRNIClearingService:
             credit=Decimal('0'),
             description=f"Clear GRNI for GRN {grn.grn_number}",
             line_number=line_number,
-            address_book_id=invoice.address_book_id
+            address_book_id=invoice.address_book_id,
+            site_id=site_id,
+            contract_id=contract_id,
+            work_order_id=work_order_id
         )
         self.db.add(grni_line)
         lines.append(grni_line)
@@ -380,7 +399,10 @@ class GRNIClearingService:
                 credit=Decimal('0'),
                 description=f"Input VAT for Invoice {invoice.supplier_invoice_number or invoice.invoice_number}",
                 line_number=line_number,
-                address_book_id=invoice.address_book_id
+                address_book_id=invoice.address_book_id,
+                site_id=site_id,
+                contract_id=contract_id,
+                work_order_id=work_order_id
             )
             self.db.add(vat_line)
             lines.append(vat_line)
@@ -401,7 +423,10 @@ class GRNIClearingService:
                         credit=Decimal('0') if price_variance > 0 else Decimal(str(abs(round(price_variance, 2)))),
                         description=f"Price variance - Invoice vs GRN ({price_variance:+.2f})",
                         line_number=line_number,
-                        address_book_id=invoice.address_book_id
+                        address_book_id=invoice.address_book_id,
+                        site_id=site_id,
+                        contract_id=contract_id,
+                        work_order_id=work_order_id
                     )
                     self.db.add(variance_line)
                     lines.append(variance_line)
@@ -415,7 +440,10 @@ class GRNIClearingService:
             credit=Decimal(str(round(invoice_total, 2))),
             description=f"AP for Invoice {invoice.supplier_invoice_number or invoice.invoice_number}",
             line_number=line_number,
-            address_book_id=invoice.address_book_id
+            address_book_id=invoice.address_book_id,
+            site_id=site_id,
+            contract_id=contract_id,
+            work_order_id=work_order_id
         )
         self.db.add(ap_line)
         lines.append(ap_line)

@@ -15,7 +15,8 @@ from app.models import (
     User, Company, Site, BusinessUnit,
     AccountType, Account, FiscalPeriod, JournalEntry, JournalEntryLine,
     AccountBalance, DefaultAccountMapping,
-    GoodsReceipt, GoodsReceiptLine, PurchaseOrder, PurchaseOrderLine, ItemStock, ItemLedger
+    GoodsReceipt, GoodsReceiptLine, PurchaseOrder, PurchaseOrderLine, ItemStock, ItemLedger,
+    Contract, contract_sites
 )
 from app.schemas import (
     AccountType as AccountTypeSchema, AccountTypeCreate, AccountTypeUpdate,
@@ -1087,13 +1088,26 @@ def get_site_ledger(
     if not site:
         raise HTTPException(status_code=404, detail="Site not found")
 
+    # Get all contracts that include this site
+    contract_ids = db.query(Contract.id).join(
+        contract_sites, Contract.id == contract_sites.c.contract_id
+    ).filter(
+        contract_sites.c.site_id == site_id
+    ).all()
+    contract_ids = [c[0] for c in contract_ids]
+
+    # Build OR conditions: site_id matches directly OR contract_id matches a contract that includes this site
+    line_conditions = [JournalEntryLine.site_id == site_id]
+    if contract_ids:
+        line_conditions.append(JournalEntryLine.contract_id.in_(contract_ids))
+
     # Get all posted entries for this site in date range
     query = db.query(JournalEntryLine).join(JournalEntry).join(Account).filter(
         JournalEntry.company_id == company_id,
         JournalEntry.status == "posted",
         JournalEntry.entry_date >= start_date,
         JournalEntry.entry_date <= end_date,
-        JournalEntryLine.site_id == site_id
+        or_(*line_conditions)
     )
 
     if account_id:
@@ -1109,7 +1123,7 @@ def get_site_ledger(
         JournalEntry.company_id == company_id,
         JournalEntry.status == "posted",
         JournalEntry.entry_date < start_date,
-        JournalEntryLine.site_id == site_id
+        or_(*line_conditions)
     )
 
     if account_id:

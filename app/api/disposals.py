@@ -856,6 +856,13 @@ async def post_disposal(
 
     business_unit_id = get_business_unit_for_disposal(db, current_user.company_id, first_warehouse_id)
 
+    # Get site_id from disposed tools if available
+    site_id = None
+    for tl in disposal.tool_lines:
+        if tl.tool and tl.tool.assigned_site_id:
+            site_id = tl.tool.assigned_site_id
+            break
+
     # Process tool lines
     total_tool_accum_depr = Decimal("0")
     total_tool_original_cost = Decimal("0")
@@ -896,7 +903,8 @@ async def post_disposal(
                 debit=float(total_tool_accum_depr),
                 credit=0,
                 description=f"Accumulated depreciation removed - {len(disposal.tool_lines)} tools",
-                business_unit_id=business_unit_id
+                business_unit_id=business_unit_id,
+                site_id=site_id
             ))
             total_debit += total_tool_accum_depr
 
@@ -910,7 +918,8 @@ async def post_disposal(
                 debit=float(total_tool_loss),
                 credit=0,
                 description=f"Loss on tool disposal - {disposal.reason}",
-                business_unit_id=business_unit_id
+                business_unit_id=business_unit_id,
+                site_id=site_id
             ))
             total_debit += total_tool_loss
 
@@ -924,7 +933,8 @@ async def post_disposal(
                 debit=0,
                 credit=float(total_tool_gain),
                 description=f"Gain on tool disposal",
-                business_unit_id=business_unit_id
+                business_unit_id=business_unit_id,
+                site_id=site_id
             ))
             total_credit += total_tool_gain
 
@@ -938,7 +948,8 @@ async def post_disposal(
                 debit=float(total_tool_salvage),
                 credit=0,
                 description=f"Salvage received for tools",
-                business_unit_id=business_unit_id
+                business_unit_id=business_unit_id,
+                site_id=site_id
             ))
             total_debit += total_tool_salvage
 
@@ -951,7 +962,8 @@ async def post_disposal(
             debit=0,
             credit=float(total_tool_original_cost),
             description=f"Tools removed - {len(disposal.tool_lines)} tools",
-            business_unit_id=business_unit_id
+            business_unit_id=business_unit_id,
+            site_id=site_id
         ))
         total_credit += total_tool_original_cost
 
@@ -1011,7 +1023,8 @@ async def post_disposal(
                 debit=float(total_item_loss),
                 credit=0,
                 description=f"Inventory write-off - {len(disposal.item_lines)} items",
-                business_unit_id=business_unit_id
+                business_unit_id=business_unit_id,
+                site_id=site_id
             ))
             total_debit += total_item_loss
 
@@ -1025,7 +1038,8 @@ async def post_disposal(
                 debit=float(total_item_salvage),
                 credit=0,
                 description=f"Salvage received for inventory items",
-                business_unit_id=business_unit_id
+                business_unit_id=business_unit_id,
+                site_id=site_id
             ))
             total_debit += total_item_salvage
 
@@ -1038,7 +1052,8 @@ async def post_disposal(
             debit=0,
             credit=float(total_item_cost),
             description=f"Inventory disposed - {len(disposal.item_lines)} items",
-            business_unit_id=business_unit_id
+            business_unit_id=business_unit_id,
+            site_id=site_id
         ))
         total_credit += total_item_cost
 

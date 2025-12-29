@@ -813,47 +813,29 @@ async def get_contract_cost_center(
     # Get site IDs covered by this contract
     site_ids = [site.id for site in contract.sites]
 
-    if not site_ids:
-        # No sites, return empty cost center
-        return {
-            "contract": {
-                "id": contract.id,
-                "contract_number": contract.contract_number,
-                "name": contract.name,
-                "client_name": contract.client.name if contract.client else None,
-                "budget": decimal_to_float(contract.budget),
-                "contract_value": decimal_to_float(contract.contract_value),
-                "currency": contract.currency,
-                "status": contract.status
-            },
-            "summary": {
-                "total_work_orders": 0,
-                "work_orders_by_status": {},
-                "work_orders_by_type": {},
-                "total_labor_hours": 0,
-                "labor_cost": 0,
-                "parts_cost": 0,
-                "total_cost": 0,
-                "billable_amount": 0,
-                "budget_used": 0,
-                "budget_remaining": decimal_to_float(contract.budget) if contract.budget else None,
-                "budget_used_percent": 0
-            },
-            "sites_breakdown": [],
-            "labor_by_technician": [],
-            "work_orders": []
-        }
+    # Get all equipment IDs for these sites (empty list if no sites)
+    equipment_ids = get_equipment_ids_for_sites(db, site_ids) if site_ids else []
 
-    # Get all equipment IDs for these sites
-    equipment_ids = get_equipment_ids_for_sites(db, site_ids)
-
-    # Get all work orders for equipment in these sites
+    # Get all work orders for this contract
+    # Include work orders linked via:
+    # 1. Direct contract_id
+    # 2. Direct site_id (for sites covered by this contract)
+    # 3. Equipment in these sites
     work_orders = []
+
+    # Build the OR conditions for work order query
+    wo_conditions = [WorkOrder.contract_id == contract_id]
+
+    if site_ids:
+        wo_conditions.append(WorkOrder.site_id.in_(site_ids))
+
     if equipment_ids:
-        work_orders = db.query(WorkOrder).filter(
-            WorkOrder.company_id == current_user.company_id,
-            WorkOrder.equipment_id.in_(equipment_ids)
-        ).all()
+        wo_conditions.append(WorkOrder.equipment_id.in_(equipment_ids))
+
+    work_orders = db.query(WorkOrder).filter(
+        WorkOrder.company_id == current_user.company_id,
+        or_(*wo_conditions)
+    ).all()
 
     wo_ids = [wo.id for wo in work_orders]
 
@@ -1116,104 +1098,110 @@ async def get_contract_cost_center(
         "recent_entries": []
     }
 
+    # Get account types for categorization
+    account_types_map = {}
+    account_types = db.query(AccountType).filter(
+        AccountType.company_id == current_user.company_id
+    ).all()
+    for at in account_types:
+        account_types_map[at.id] = at.code
+
+    # Build filter for journal entry lines
+    # Include lines linked via: site_id (for contract sites) OR contract_id (direct)
+    je_line_conditions = [JournalEntryLine.contract_id == contract_id]
     if site_ids:
-        # Get account types for categorization
-        account_types_map = {}
-        account_types = db.query(AccountType).filter(
-            AccountType.company_id == current_user.company_id
+        je_line_conditions.append(JournalEntryLine.site_id.in_(site_ids))
+
+    # Get totals by account for this contract
+    account_totals = db.query(
+        Account.id,
+        Account.code,
+        Account.name,
+        Account.account_type_id,
+        func.coalesce(func.sum(JournalEntryLine.debit), 0).label('total_debit'),
+        func.coalesce(func.sum(JournalEntryLine.credit), 0).label('total_credit')
+    ).join(
+        JournalEntryLine, Account.id == JournalEntryLine.account_id
+    ).join(
+        JournalEntry, and_(
+            JournalEntryLine.journal_entry_id == JournalEntry.id,
+            JournalEntry.status == "posted"
+        )
+    ).filter(
+        Account.company_id == current_user.company_id,
+        or_(*je_line_conditions)
+    ).group_by(
+        Account.id, Account.code, Account.name, Account.account_type_id
+    ).order_by(Account.code).all()
+
+    entries_by_account = []
+    total_ledger_debits = 0.0
+    total_ledger_credits = 0.0
+    total_revenue = 0.0
+    total_expenses = 0.0
+
+    for row in account_totals:
+        debit = decimal_to_float(row.total_debit) or 0.0
+        credit = decimal_to_float(row.total_credit) or 0.0
+        balance = debit - credit
+
+        account_type_code = account_types_map.get(row.account_type_id, "")
+
+        # Categorize by account type
+        if account_type_code == "REVENUE":
+            # Revenue has credit normal balance
+            total_revenue += credit - debit
+        elif account_type_code == "EXPENSE":
+            # Expense has debit normal balance
+            total_expenses += debit - credit
+
+        total_ledger_debits += debit
+        total_ledger_credits += credit
+
+        entries_by_account.append({
+            "account_id": row.id,
+            "account_code": row.code,
+            "account_name": row.name,
+            "account_type": account_type_code,
+            "total_debit": debit,
+            "total_credit": credit,
+            "balance": balance
+        })
+
+    # Get recent journal entries for this contract
+    recent_entries_query = db.query(JournalEntry).join(
+        JournalEntryLine
+    ).filter(
+        JournalEntry.company_id == current_user.company_id,
+        JournalEntry.status == "posted",
+        or_(*je_line_conditions)
+    ).distinct().order_by(
+        JournalEntry.entry_date.desc()
+    ).limit(10).all()
+
+    recent_entries = []
+    for entry in recent_entries_query:
+        # Get lines for this entry that belong to the contract
+        entry_lines = db.query(JournalEntryLine).filter(
+            JournalEntryLine.journal_entry_id == entry.id,
+            or_(*je_line_conditions)
         ).all()
-        for at in account_types:
-            account_types_map[at.id] = at.code
 
-        # Get totals by account for these sites
-        account_totals = db.query(
-            Account.id,
-            Account.code,
-            Account.name,
-            Account.account_type_id,
-            func.coalesce(func.sum(JournalEntryLine.debit), 0).label('total_debit'),
-            func.coalesce(func.sum(JournalEntryLine.credit), 0).label('total_credit')
-        ).join(
-            JournalEntryLine, Account.id == JournalEntryLine.account_id
-        ).join(
-            JournalEntry, and_(
-                JournalEntryLine.journal_entry_id == JournalEntry.id,
-                JournalEntry.status == "posted"
-            )
-        ).filter(
-            Account.company_id == current_user.company_id,
-            JournalEntryLine.site_id.in_(site_ids)
-        ).group_by(
-            Account.id, Account.code, Account.name, Account.account_type_id
-        ).order_by(Account.code).all()
+        entry_debit = sum(decimal_to_float(line.debit) or 0 for line in entry_lines)
+        entry_credit = sum(decimal_to_float(line.credit) or 0 for line in entry_lines)
 
-        entries_by_account = []
-        total_ledger_debits = 0.0
-        total_ledger_credits = 0.0
-        total_revenue = 0.0
-        total_expenses = 0.0
+        recent_entries.append({
+            "id": entry.id,
+            "entry_number": entry.entry_number,
+            "entry_date": entry.entry_date.isoformat() if entry.entry_date else None,
+            "description": entry.description,
+            "source_type": entry.source_type,
+            "source_number": entry.source_number,
+            "total_debit": entry_debit,
+            "total_credit": entry_credit
+        })
 
-        for row in account_totals:
-            debit = decimal_to_float(row.total_debit) or 0.0
-            credit = decimal_to_float(row.total_credit) or 0.0
-            balance = debit - credit
-
-            account_type_code = account_types_map.get(row.account_type_id, "")
-
-            # Categorize by account type
-            if account_type_code == "REVENUE":
-                # Revenue has credit normal balance
-                total_revenue += credit - debit
-            elif account_type_code == "EXPENSE":
-                # Expense has debit normal balance
-                total_expenses += debit - credit
-
-            total_ledger_debits += debit
-            total_ledger_credits += credit
-
-            entries_by_account.append({
-                "account_id": row.id,
-                "account_code": row.code,
-                "account_name": row.name,
-                "account_type": account_type_code,
-                "total_debit": debit,
-                "total_credit": credit,
-                "balance": balance
-            })
-
-        # Get recent journal entries for these sites
-        recent_entries_query = db.query(JournalEntry).join(
-            JournalEntryLine
-        ).filter(
-            JournalEntry.company_id == current_user.company_id,
-            JournalEntry.status == "posted",
-            JournalEntryLine.site_id.in_(site_ids)
-        ).distinct().order_by(
-            JournalEntry.entry_date.desc()
-        ).limit(10).all()
-
-        recent_entries = []
-        for entry in recent_entries_query:
-            # Get lines for this entry that belong to the contract sites
-            entry_lines = db.query(JournalEntryLine).filter(
-                JournalEntryLine.journal_entry_id == entry.id,
-                JournalEntryLine.site_id.in_(site_ids)
-            ).all()
-
-            entry_debit = sum(decimal_to_float(line.debit) or 0 for line in entry_lines)
-            entry_credit = sum(decimal_to_float(line.credit) or 0 for line in entry_lines)
-
-            recent_entries.append({
-                "id": entry.id,
-                "entry_number": entry.entry_number,
-                "entry_date": entry.entry_date.isoformat() if entry.entry_date else None,
-                "description": entry.description,
-                "source_type": entry.source_type,
-                "source_number": entry.source_number,
-                "total_debit": entry_debit,
-                "total_credit": entry_credit
-            })
-
+    if entries_by_account or recent_entries:
         ledger_summary = {
             "total_debits": total_ledger_debits,
             "total_credits": total_ledger_credits,

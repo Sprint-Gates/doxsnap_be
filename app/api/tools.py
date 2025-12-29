@@ -1614,7 +1614,8 @@ def create_tool_purchase_journal_entry(
                 credit=0,
                 description=f"Tools & Equipment - {purchase.purchase_number}",
                 address_book_id=purchase.address_book_id,
-                line_number=line_number
+                line_number=line_number,
+                site_id=None  # Tool purchases are not site-specific
             )
             db.add(asset_line)
             lines.append(asset_line)
@@ -1629,7 +1630,8 @@ def create_tool_purchase_journal_entry(
                 credit=0,
                 description=f"Tools Expense - {purchase.purchase_number}",
                 address_book_id=purchase.address_book_id,
-                line_number=line_number
+                line_number=line_number,
+                site_id=None  # Tool purchases are not site-specific
             )
             db.add(expense_line)
             lines.append(expense_line)
@@ -1650,7 +1652,8 @@ def create_tool_purchase_journal_entry(
                 credit=float(total_with_tax),
                 description=f"Payable for {purchase.purchase_number} - {vendor_name}",
                 address_book_id=purchase.address_book_id,
-                line_number=line_number
+                line_number=line_number,
+                site_id=None  # Tool purchases are not site-specific
             )
             db.add(ap_line)
             lines.append(ap_line)
@@ -1912,7 +1915,8 @@ def create_depreciation_journal_entry(
                 debit=float(total_depreciation),
                 credit=0,
                 description=f"Depreciation expense - {tools_count} tools",
-                line_number=1
+                line_number=1,
+                site_id=None  # Depreciation is company-wide, not site-specific
             )
             db.add(expense_line)
             lines.append(expense_line)
@@ -1925,7 +1929,8 @@ def create_depreciation_journal_entry(
                 debit=0,
                 credit=float(total_depreciation),
                 description=f"Accumulated depreciation - {tools_count} tools",
-                line_number=2
+                line_number=2,
+                site_id=None  # Depreciation is company-wide, not site-specific
             )
             db.add(accum_line)
             lines.append(accum_line)

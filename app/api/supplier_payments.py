@@ -193,6 +193,14 @@ class PaymentPostingService:
 
         vendor_name = payment.address_book.alpha_name if payment.address_book else "Unknown"
 
+        # Try to get site_id/contract_id from linked invoices via allocations
+        site_id = None
+        contract_id = None
+        work_order_id = None
+        # Supplier payments are typically not site-specific, but we try to trace back if possible
+        # This would require traversing: allocation → invoice → GRN → PO → work_order
+        # For simplicity, we leave these as None for general vendor payments
+
         # Create journal entry
         entry = JournalEntry(
             company_id=self.company_id,
@@ -226,7 +234,10 @@ class PaymentPostingService:
             credit=Decimal('0'),
             description=f"AP reduction for payment {payment.payment_number}",
             line_number=line_number,
-            address_book_id=payment.address_book_id
+            address_book_id=payment.address_book_id,
+            site_id=site_id,
+            contract_id=contract_id,
+            work_order_id=work_order_id
         )
         self.db.add(ap_line)
         lines.append(ap_line)
@@ -240,7 +251,10 @@ class PaymentPostingService:
             credit=Decimal(str(round(float(payment.total_amount), 2))),
             description=f"Payment via {payment.payment_method}",
             line_number=line_number,
-            address_book_id=payment.address_book_id
+            address_book_id=payment.address_book_id,
+            site_id=site_id,
+            contract_id=contract_id,
+            work_order_id=work_order_id
         )
         self.db.add(cash_line)
         lines.append(cash_line)
@@ -255,7 +269,10 @@ class PaymentPostingService:
                 credit=Decimal(str(round(total_discount, 2))),
                 description=f"Early payment discount",
                 line_number=line_number,
-                address_book_id=payment.address_book_id
+                address_book_id=payment.address_book_id,
+                site_id=site_id,
+                contract_id=contract_id,
+                work_order_id=work_order_id
             )
             self.db.add(discount_line)
             lines.append(discount_line)
