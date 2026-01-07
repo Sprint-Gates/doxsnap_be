@@ -40,12 +40,12 @@ class Settings(BaseSettings):
     aws_region: str = "eu-central-1"  # Updated to match your .env
     s3_bucket: str = "doxsnap"  # Updated to match your .env
     
-    # Email Configuration
+    # Email Configuration (from environment variables)
     smtp_server: str = "smtp.office365.com"
     smtp_port: int = 587
     smtp_username: Optional[str] = None
     smtp_password: Optional[str] = None
-    company_support_email: str = "noreply@arabiaesim.com"
+    company_support_email: str = "noreply@coresrp.com"
     
     @property
     def database_connection_url(self) -> str:
