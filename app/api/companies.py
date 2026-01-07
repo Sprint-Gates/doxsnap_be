@@ -199,10 +199,27 @@ async def register_company(data: CompanyRegister, db: Session = Depends(get_db))
             remaining_documents=plan.documents_max  # Set based on plan
         )
         db.add(admin_user)
+        db.flush()  # Get admin_user ID
+
+        # Create Address Book employee entry for admin user
+        from app.models import AddressBook
+        admin_employee = AddressBook(
+            company_id=company.id,
+            search_type='E',  # Employee
+            address_number='00000001',  # First employee
+            alpha_name=data.admin_name,
+            is_active=True
+        )
+        db.add(admin_employee)
+        db.flush()
+
+        # Link admin user to their employee record
+        admin_user.address_book_id = admin_employee.id
         db.commit()
 
         db.refresh(company)
         db.refresh(admin_user)
+        db.refresh(admin_employee)
 
         # Seed default company data (Chart of Accounts, Warehouse, Item Categories)
         try:
@@ -230,6 +247,26 @@ async def register_company(data: CompanyRegister, db: Session = Depends(get_db))
         except Exception as crm_error:
             logger.warning(f"Failed to seed CRM defaults for company {company.id}: {crm_error}")
             # Don't fail company registration if CRM seed fails
+
+        # Create default petty cash fund for admin user
+        try:
+            from app.models import PettyCashFund
+            from decimal import Decimal
+            admin_petty_cash = PettyCashFund(
+                company_id=company.id,
+                address_book_id=admin_employee.id,
+                fund_limit=Decimal('500.00'),
+                current_balance=Decimal('500.00'),
+                auto_approve_threshold=Decimal('50.00'),
+                currency='USD',
+                status='active'
+            )
+            db.add(admin_petty_cash)
+            db.commit()
+            logger.info(f"Petty cash fund created for admin user in company {company.id}")
+        except Exception as pc_error:
+            logger.warning(f"Failed to create petty cash fund for company {company.id}: {pc_error}")
+            # Don't fail company registration if petty cash fund fails
 
         # Create access token
         access_token = create_access_token(data={"sub": admin_user.email})

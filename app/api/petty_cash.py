@@ -9,7 +9,7 @@ from datetime import datetime, date
 from app.database import get_db
 from app.models import (
     PettyCashFund, PettyCashTransaction, PettyCashReceipt, PettyCashReplenishment,
-    User, Technician, WorkOrder, Contract, Account
+    User, Technician, WorkOrder, Contract, Account, AddressBook, ProcessedImage
 )
 from app.services.journal_posting import JournalPostingService
 from app.api.auth import get_current_user
@@ -44,7 +44,7 @@ os.makedirs(PETTY_CASH_RECEIPTS_DIR, exist_ok=True)
 
 # Valid categories
 VALID_CATEGORIES = ["supplies", "tools", "transport", "meals", "materials", "services", "other"]
-VALID_STATUSES = ["pending", "approved", "rejected", "reimbursed"]
+VALID_STATUSES = ["pending", "approved", "rejected", "reversed"]
 VALID_FUND_STATUSES = ["active", "suspended", "closed"]
 VALID_REPLENISHMENT_METHODS = ["cash", "transfer", "check"]
 
@@ -54,7 +54,7 @@ VALID_REPLENISHMENT_METHODS = ["cash", "transfer", "check"]
 # ============================================================================
 
 class PettyCashFundCreate(BaseModel):
-    technician_id: int
+    technician_id: int  # Now accepts address_book employee ID
     fund_limit: float = 500.00
     currency: str = "USD"
     auto_approve_threshold: float = 50.00
@@ -73,8 +73,10 @@ class PettyCashTransactionCreate(BaseModel):
     description: str
     category: Optional[str] = None
     merchant_name: Optional[str] = None
+    vendor_address_book_id: Optional[int] = None  # Link to Address Book vendor
     work_order_id: Optional[int] = None
     contract_id: Optional[int] = None
+    invoice_id: Optional[int] = None  # Link to processed invoice
     notes: Optional[str] = None
 
 
@@ -84,8 +86,10 @@ class PettyCashTransactionUpdate(BaseModel):
     description: Optional[str] = None
     category: Optional[str] = None
     merchant_name: Optional[str] = None
+    vendor_address_book_id: Optional[int] = None  # Link to Address Book vendor
     work_order_id: Optional[int] = None
     contract_id: Optional[int] = None
+    invoice_id: Optional[int] = None  # Link to processed invoice
     notes: Optional[str] = None
 
 
@@ -97,6 +101,10 @@ class ReplenishmentCreate(BaseModel):
 
 
 class RejectTransactionRequest(BaseModel):
+    reason: str
+
+
+class ReverseTransactionRequest(BaseModel):
     reason: str
 
 
@@ -128,16 +136,26 @@ class PettyCashTransactionResponse(BaseModel):
     description: str
     category: Optional[str]
     merchant_name: Optional[str]
+    vendor_address_book_id: Optional[int]
+    vendor_name: Optional[str]
+    vendor_address_number: Optional[str]
     work_order_id: Optional[int]
     work_order_number: Optional[str]
     contract_id: Optional[int]
     contract_name: Optional[str]
+    invoice_id: Optional[int]
+    invoice_number: Optional[str]
+    invoice_vendor_name: Optional[str]
     status: str
     auto_approved: bool
     approved_by: Optional[int]
     approved_by_name: Optional[str]
     approved_at: Optional[str]
     rejection_reason: Optional[str]
+    reversed_by: Optional[int]
+    reversed_by_name: Optional[str]
+    reversed_at: Optional[str]
+    reversal_reason: Optional[str]
     balance_before: Optional[float]
     balance_after: Optional[float]
     notes: Optional[str]
@@ -246,10 +264,21 @@ def fund_to_response(fund: PettyCashFund, db: Session) -> dict:
     pending_count = len([t for t in fund.transactions if t.status == "pending"]) if fund.transactions else 0
     total_spent = sum([float(t.amount) for t in fund.transactions if t.status in ["approved", "reimbursed"]]) if fund.transactions else 0
 
+    # Get name from address_book (employee) or fallback to technician (legacy)
+    if fund.address_book:
+        technician_name = fund.address_book.alpha_name
+        technician_id = fund.address_book_id
+    elif fund.technician:
+        technician_name = fund.technician.name
+        technician_id = fund.technician_id
+    else:
+        technician_name = "Unknown"
+        technician_id = fund.address_book_id or fund.technician_id
+
     return {
         "id": fund.id,
-        "technician_id": fund.technician_id,
-        "technician_name": fund.technician.name if fund.technician else "Unknown",
+        "technician_id": technician_id,
+        "technician_name": technician_name,
         "fund_limit": float(fund.fund_limit),
         "current_balance": float(fund.current_balance),
         "currency": fund.currency,
@@ -283,11 +312,22 @@ def transaction_to_response(txn: PettyCashTransaction) -> dict:
                 "uploaded_at": r.uploaded_at.isoformat() if r.uploaded_at else None
             })
 
+    # Get technician info from fund (address_book or legacy technician)
+    if txn.fund and txn.fund.address_book:
+        technician_id = txn.fund.address_book_id
+        technician_name = txn.fund.address_book.alpha_name
+    elif txn.fund and txn.fund.technician:
+        technician_id = txn.fund.technician_id
+        technician_name = txn.fund.technician.name
+    else:
+        technician_id = None
+        technician_name = "Unknown"
+
     return {
         "id": txn.id,
         "fund_id": txn.fund_id,
-        "technician_id": txn.fund.technician_id if txn.fund else None,
-        "technician_name": txn.fund.technician.name if txn.fund and txn.fund.technician else "Unknown",
+        "technician_id": technician_id,
+        "technician_name": technician_name,
         "transaction_number": txn.transaction_number,
         "transaction_date": txn.transaction_date.isoformat() if txn.transaction_date else None,
         "amount": float(txn.amount),
@@ -295,16 +335,26 @@ def transaction_to_response(txn: PettyCashTransaction) -> dict:
         "description": txn.description,
         "category": txn.category,
         "merchant_name": txn.merchant_name,
+        "vendor_address_book_id": txn.vendor_address_book_id,
+        "vendor_name": txn.vendor.alpha_name if txn.vendor else None,
+        "vendor_address_number": txn.vendor.address_number if txn.vendor else None,
         "work_order_id": txn.work_order_id,
         "work_order_number": txn.work_order.work_order_number if txn.work_order else None,
         "contract_id": txn.contract_id,
         "contract_name": txn.contract.contract_name if txn.contract else None,
+        "invoice_id": txn.invoice_id,
+        "invoice_number": txn.invoice.document_number if txn.invoice else None,
+        "invoice_vendor_name": txn.invoice.address_book.alpha_name if txn.invoice and txn.invoice.address_book else None,
         "status": txn.status,
         "auto_approved": txn.auto_approved,
         "approved_by": txn.approved_by,
         "approved_by_name": txn.approver.email if txn.approver else None,
         "approved_at": txn.approved_at.isoformat() if txn.approved_at else None,
         "rejection_reason": txn.rejection_reason,
+        "reversed_by": txn.reversed_by,
+        "reversed_by_name": txn.reverser.email if txn.reverser else None,
+        "reversed_at": txn.reversed_at.isoformat() if txn.reversed_at else None,
+        "reversal_reason": txn.reversal_reason,
         "balance_before": float(txn.balance_before) if txn.balance_before else None,
         "balance_after": float(txn.balance_after) if txn.balance_after else None,
         "notes": txn.notes,
@@ -319,10 +369,18 @@ def transaction_to_response(txn: PettyCashTransaction) -> dict:
 
 def replenishment_to_response(repl: PettyCashReplenishment) -> dict:
     """Convert replenishment model to response dict"""
+    # Get technician name from fund (address_book or legacy technician)
+    if repl.fund and repl.fund.address_book:
+        technician_name = repl.fund.address_book.alpha_name
+    elif repl.fund and repl.fund.technician:
+        technician_name = repl.fund.technician.name
+    else:
+        technician_name = "Unknown"
+
     return {
         "id": repl.id,
         "fund_id": repl.fund_id,
-        "technician_name": repl.fund.technician.name if repl.fund and repl.fund.technician else "Unknown",
+        "technician_name": technician_name,
         "replenishment_number": repl.replenishment_number,
         "replenishment_date": repl.replenishment_date.isoformat() if repl.replenishment_date else None,
         "amount": float(repl.amount),
@@ -368,6 +426,7 @@ async def get_petty_cash_funds(
     """Get all petty cash funds for the company"""
     query = db.query(PettyCashFund).options(
         joinedload(PettyCashFund.technician),
+        joinedload(PettyCashFund.address_book),
         joinedload(PettyCashFund.creator),
         joinedload(PettyCashFund.transactions)
     ).filter(PettyCashFund.company_id == current_user.company_id)
@@ -375,7 +434,13 @@ async def get_petty_cash_funds(
     if status:
         query = query.filter(PettyCashFund.status == status)
     if technician_id:
-        query = query.filter(PettyCashFund.technician_id == technician_id)
+        # Support both legacy technician_id and new address_book_id
+        query = query.filter(
+            or_(
+                PettyCashFund.technician_id == technician_id,
+                PettyCashFund.address_book_id == technician_id
+            )
+        )
 
     funds = query.order_by(PettyCashFund.created_at.desc()).all()
 
@@ -391,6 +456,7 @@ async def get_petty_cash_fund(
     """Get a specific petty cash fund"""
     fund = db.query(PettyCashFund).options(
         joinedload(PettyCashFund.technician),
+        joinedload(PettyCashFund.address_book),
         joinedload(PettyCashFund.creator),
         joinedload(PettyCashFund.transactions)
     ).filter(
@@ -413,34 +479,35 @@ async def create_petty_cash_fund(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Create a petty cash fund for a technician"""
-    # Verify technician exists and belongs to company
-    technician = db.query(Technician).filter(
-        Technician.id == fund_data.technician_id,
-        Technician.company_id == current_user.company_id
+    """Create a petty cash fund for an employee (from address book)"""
+    # Verify employee exists in address book and belongs to company
+    employee = db.query(AddressBook).filter(
+        AddressBook.id == fund_data.technician_id,
+        AddressBook.company_id == current_user.company_id,
+        AddressBook.search_type == 'E'  # Employee type
     ).first()
 
-    if not technician:
+    if not employee:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Technician not found"
+            detail="Employee not found in address book"
         )
 
-    # Check if technician already has a fund
+    # Check if employee already has a fund
     existing = db.query(PettyCashFund).filter(
-        PettyCashFund.technician_id == fund_data.technician_id
+        PettyCashFund.address_book_id == fund_data.technician_id
     ).first()
 
     if existing:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Technician already has a petty cash fund"
+            detail="Employee already has a petty cash fund"
         )
 
-    # Create fund
+    # Create fund with address_book_id
     fund = PettyCashFund(
         company_id=current_user.company_id,
-        technician_id=fund_data.technician_id,
+        address_book_id=fund_data.technician_id,
         fund_limit=Decimal(str(fund_data.fund_limit)),
         current_balance=Decimal(str(fund_data.fund_limit)),  # Start with full balance
         currency=fund_data.currency,
@@ -455,7 +522,7 @@ async def create_petty_cash_fund(
 
     # Reload with relationships
     fund = db.query(PettyCashFund).options(
-        joinedload(PettyCashFund.technician),
+        joinedload(PettyCashFund.address_book),
         joinedload(PettyCashFund.creator),
         joinedload(PettyCashFund.transactions)
     ).filter(PettyCashFund.id == fund.id).first()
@@ -571,6 +638,8 @@ async def get_petty_cash_transactions(
         joinedload(PettyCashTransaction.fund).joinedload(PettyCashFund.technician),
         joinedload(PettyCashTransaction.work_order),
         joinedload(PettyCashTransaction.contract),
+        joinedload(PettyCashTransaction.vendor),
+        joinedload(PettyCashTransaction.invoice).joinedload(ProcessedImage.address_book),
         joinedload(PettyCashTransaction.approver),
         joinedload(PettyCashTransaction.creator),
         joinedload(PettyCashTransaction.receipts).joinedload(PettyCashReceipt.uploader)
@@ -617,6 +686,8 @@ async def get_petty_cash_transaction(
         joinedload(PettyCashTransaction.fund).joinedload(PettyCashFund.technician),
         joinedload(PettyCashTransaction.work_order),
         joinedload(PettyCashTransaction.contract),
+        joinedload(PettyCashTransaction.vendor),
+        joinedload(PettyCashTransaction.invoice).joinedload(ProcessedImage.address_book),
         joinedload(PettyCashTransaction.approver),
         joinedload(PettyCashTransaction.creator),
         joinedload(PettyCashTransaction.receipts).joinedload(PettyCashReceipt.uploader)
@@ -694,6 +765,32 @@ async def create_petty_cash_transaction(
                 detail="Contract not found"
             )
 
+    # Validate vendor (Address Book) if provided
+    if txn_data.vendor_address_book_id:
+        from app.models import AddressBook
+        vendor = db.query(AddressBook).filter(
+            AddressBook.id == txn_data.vendor_address_book_id,
+            AddressBook.company_id == current_user.company_id,
+            AddressBook.search_type == 'V'  # Must be a vendor
+        ).first()
+        if not vendor:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Vendor not found in Address Book"
+            )
+
+    # Validate invoice if provided
+    if txn_data.invoice_id:
+        invoice = db.query(ProcessedImage).filter(
+            ProcessedImage.id == txn_data.invoice_id,
+            ProcessedImage.company_id == current_user.company_id
+        ).first()
+        if not invoice:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Invoice not found"
+            )
+
     amount = Decimal(str(txn_data.amount))
 
     # Check if amount exceeds available balance
@@ -725,8 +822,10 @@ async def create_petty_cash_transaction(
         description=txn_data.description,
         category=txn_data.category,
         merchant_name=txn_data.merchant_name,
+        vendor_address_book_id=txn_data.vendor_address_book_id,
         work_order_id=txn_data.work_order_id,
         contract_id=txn_data.contract_id,
+        invoice_id=txn_data.invoice_id,
         status=transaction_status,
         auto_approved=auto_approved,
         approved_by=current_user.id if auto_approved else None,
@@ -751,6 +850,8 @@ async def create_petty_cash_transaction(
         joinedload(PettyCashTransaction.fund).joinedload(PettyCashFund.technician),
         joinedload(PettyCashTransaction.work_order),
         joinedload(PettyCashTransaction.contract),
+        joinedload(PettyCashTransaction.vendor),
+        joinedload(PettyCashTransaction.invoice).joinedload(ProcessedImage.address_book),
         joinedload(PettyCashTransaction.approver),
         joinedload(PettyCashTransaction.creator),
         joinedload(PettyCashTransaction.receipts)
@@ -808,6 +909,8 @@ async def update_petty_cash_transaction(
         joinedload(PettyCashTransaction.fund).joinedload(PettyCashFund.technician),
         joinedload(PettyCashTransaction.work_order),
         joinedload(PettyCashTransaction.contract),
+        joinedload(PettyCashTransaction.vendor),
+        joinedload(PettyCashTransaction.invoice).joinedload(ProcessedImage.address_book),
         joinedload(PettyCashTransaction.approver),
         joinedload(PettyCashTransaction.creator),
         joinedload(PettyCashTransaction.receipts)
@@ -922,6 +1025,7 @@ async def approve_petty_cash_transaction(
         joinedload(PettyCashTransaction.fund).joinedload(PettyCashFund.technician),
         joinedload(PettyCashTransaction.work_order),
         joinedload(PettyCashTransaction.contract),
+        joinedload(PettyCashTransaction.vendor),
         joinedload(PettyCashTransaction.approver),
         joinedload(PettyCashTransaction.creator),
         joinedload(PettyCashTransaction.receipts)
@@ -968,8 +1072,148 @@ async def reject_petty_cash_transaction(
         joinedload(PettyCashTransaction.fund).joinedload(PettyCashFund.technician),
         joinedload(PettyCashTransaction.work_order),
         joinedload(PettyCashTransaction.contract),
+        joinedload(PettyCashTransaction.vendor),
         joinedload(PettyCashTransaction.approver),
         joinedload(PettyCashTransaction.creator),
+        joinedload(PettyCashTransaction.receipts)
+    ).filter(PettyCashTransaction.id == txn.id).first()
+
+    return transaction_to_response(txn)
+
+
+@router.post("/transactions/{transaction_id}/reverse")
+async def reverse_petty_cash_transaction(
+    transaction_id: int,
+    reverse_data: ReverseTransactionRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Reverse an approved petty cash transaction.
+
+    This will:
+    1. Change the transaction status to 'reversed'
+    2. Restore the fund balance
+    3. Create a reversing journal entry (if original had one)
+    """
+    from app.models import JournalEntry, JournalEntryLine
+
+    txn = db.query(PettyCashTransaction).options(
+        joinedload(PettyCashTransaction.fund)
+    ).filter(
+        PettyCashTransaction.id == transaction_id,
+        PettyCashTransaction.company_id == current_user.company_id
+    ).first()
+
+    if not txn:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Transaction not found"
+        )
+
+    if txn.status != "approved":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Only approved transactions can be reversed. Current status: {txn.status}"
+        )
+
+    fund = txn.fund
+
+    # 1. Restore the fund balance
+    fund.current_balance = fund.current_balance + txn.amount
+
+    # 2. Update transaction status
+    txn.status = "reversed"
+    txn.reversed_by = current_user.id
+    txn.reversed_at = datetime.now()
+    txn.reversal_reason = reverse_data.reason
+
+    # 3. Create reversing journal entry if original had one
+    original_je = db.query(JournalEntry).filter(
+        JournalEntry.source_type == 'petty_cash_expense',
+        JournalEntry.source_id == txn.id
+    ).first()
+
+    if original_je:
+        try:
+            # Generate new JE number
+            year = date.today().year
+            last_je = db.query(JournalEntry).filter(
+                JournalEntry.company_id == current_user.company_id,
+                JournalEntry.entry_number.like(f'JE-{year}-%')
+            ).order_by(JournalEntry.entry_number.desc()).first()
+
+            if last_je:
+                last_num = int(last_je.entry_number.split('-')[-1])
+                new_num = last_num + 1
+            else:
+                new_num = 1
+
+            entry_number = f"JE-{year}-{new_num:06d}"
+
+            # Create reversing journal entry
+            reversal_je = JournalEntry(
+                company_id=current_user.company_id,
+                entry_number=entry_number,
+                entry_date=date.today(),
+                description=f"Reversal of {original_je.entry_number}: {txn.description}",
+                source_type='petty_cash_reversal',
+                source_id=txn.id,
+                source_number=txn.transaction_number,
+                status='posted',
+                is_auto_generated=True,
+                is_reversal=True,
+                reversal_of_id=original_je.id,
+                total_debit=original_je.total_credit,  # Swap debit/credit
+                total_credit=original_je.total_debit,
+                created_by=current_user.id,
+                posted_by=current_user.id,
+                posted_at=datetime.now()
+            )
+            db.add(reversal_je)
+            db.flush()
+
+            # Create reversed journal entry lines (swap debit/credit)
+            original_lines = db.query(JournalEntryLine).filter(
+                JournalEntryLine.journal_entry_id == original_je.id
+            ).all()
+
+            for line_num, orig_line in enumerate(original_lines, 1):
+                reversal_line = JournalEntryLine(
+                    journal_entry_id=reversal_je.id,
+                    account_id=orig_line.account_id,
+                    debit=orig_line.credit,  # Swap debit/credit
+                    credit=orig_line.debit,
+                    description=f"Reversal: {orig_line.description}",
+                    line_number=line_num
+                )
+                db.add(reversal_line)
+
+            # Update original JE to mark as reversed
+            original_je.reversed_by_id = reversal_je.id
+
+            # Store the reversal JE ID on the transaction
+            txn.reversal_journal_entry_id = reversal_je.id
+
+            logger.info(f"Created reversing journal entry {entry_number} for petty cash transaction {txn.id}")
+
+        except Exception as e:
+            logger.warning(f"Failed to create reversing journal entry for petty cash transaction {txn.id}: {e}")
+            # Continue with the reversal even if JE creation fails
+
+    db.commit()
+    db.refresh(txn)
+
+    # Reload with relationships
+    txn = db.query(PettyCashTransaction).options(
+        joinedload(PettyCashTransaction.fund).joinedload(PettyCashFund.technician),
+        joinedload(PettyCashTransaction.fund).joinedload(PettyCashFund.address_book),
+        joinedload(PettyCashTransaction.work_order),
+        joinedload(PettyCashTransaction.contract),
+        joinedload(PettyCashTransaction.vendor),
+        joinedload(PettyCashTransaction.approver),
+        joinedload(PettyCashTransaction.creator),
+        joinedload(PettyCashTransaction.reverser),
         joinedload(PettyCashTransaction.receipts)
     ).filter(PettyCashTransaction.id == txn.id).first()
 
@@ -1377,23 +1621,210 @@ async def get_my_petty_cash_fund(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Get the current user's petty cash fund (for technicians)"""
-    # Try to find fund by user's technician association
-    # This assumes there's a way to link users to technicians
-    # For now, return all active funds for the company
-    funds = db.query(PettyCashFund).options(
-        joinedload(PettyCashFund.technician),
-        joinedload(PettyCashFund.creator),
-        joinedload(PettyCashFund.transactions)
-    ).filter(
-        PettyCashFund.company_id == current_user.company_id,
-        PettyCashFund.status == "active"
-    ).all()
-
-    if not funds:
+    """Get the current user's petty cash fund (for technicians/employees)"""
+    # Check if user has an associated address book ID
+    if not current_user.address_book_id:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="No petty cash fund found"
+            detail="No employee profile linked to your account. Please contact your administrator."
         )
 
-    return [fund_to_response(f, db) for f in funds]
+    # Find the fund associated with this user's address book entry
+    fund = db.query(PettyCashFund).options(
+        joinedload(PettyCashFund.address_book),
+        joinedload(PettyCashFund.creator),
+        joinedload(PettyCashFund.transactions).joinedload(PettyCashTransaction.receipts)
+    ).filter(
+        PettyCashFund.company_id == current_user.company_id,
+        PettyCashFund.address_book_id == current_user.address_book_id,
+        PettyCashFund.status == "active"
+    ).first()
+
+    if not fund:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No petty cash fund assigned to you. Please contact your administrator."
+        )
+
+    return fund_to_response(fund, db)
+
+
+@router.get("/my-transactions/")
+async def get_my_petty_cash_transactions(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    status_filter: Optional[str] = Query(None, alias="status"),
+    category: Optional[str] = Query(None),
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0)
+):
+    """Get the current user's petty cash transactions"""
+    if not current_user.address_book_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No employee profile linked to your account."
+        )
+
+    # Get user's fund
+    fund = db.query(PettyCashFund).filter(
+        PettyCashFund.company_id == current_user.company_id,
+        PettyCashFund.address_book_id == current_user.address_book_id
+    ).first()
+
+    if not fund:
+        return []
+
+    # Build query for transactions
+    query = db.query(PettyCashTransaction).options(
+        joinedload(PettyCashTransaction.fund),
+        joinedload(PettyCashTransaction.receipts),
+        joinedload(PettyCashTransaction.work_order),
+        joinedload(PettyCashTransaction.vendor),
+        joinedload(PettyCashTransaction.approver)
+    ).filter(
+        PettyCashTransaction.fund_id == fund.id
+    )
+
+    if status_filter:
+        query = query.filter(PettyCashTransaction.status == status_filter)
+    if category:
+        query = query.filter(PettyCashTransaction.category == category)
+
+    # Order by most recent first
+    query = query.order_by(PettyCashTransaction.created_at.desc())
+
+    # Apply pagination
+    total = query.count()
+    transactions = query.offset(offset).limit(limit).all()
+
+    return {
+        "transactions": [transaction_to_response(t) for t in transactions],
+        "total": total,
+        "limit": limit,
+        "offset": offset
+    }
+
+
+@router.post("/my-transactions/")
+async def create_my_petty_cash_transaction(
+    txn_data: PettyCashTransactionCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Create a petty cash transaction for the current user's fund"""
+    if not current_user.address_book_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No employee profile linked to your account."
+        )
+
+    # Get user's fund
+    fund = db.query(PettyCashFund).filter(
+        PettyCashFund.company_id == current_user.company_id,
+        PettyCashFund.address_book_id == current_user.address_book_id,
+        PettyCashFund.status == "active"
+    ).first()
+
+    if not fund:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No active petty cash fund assigned to you."
+        )
+
+    # Validate category
+    if txn_data.category and txn_data.category not in VALID_CATEGORIES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid category. Must be one of: {', '.join(VALID_CATEGORIES)}"
+        )
+
+    # Validate vendor (Address Book) if provided
+    if txn_data.vendor_address_book_id:
+        from app.models import AddressBook
+        vendor = db.query(AddressBook).filter(
+            AddressBook.id == txn_data.vendor_address_book_id,
+            AddressBook.company_id == current_user.company_id,
+            AddressBook.search_type == 'V'  # Must be a vendor
+        ).first()
+        if not vendor:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Vendor not found in Address Book"
+            )
+
+    # Check if amount exceeds available balance
+    if txn_data.amount > float(fund.current_balance):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Amount exceeds available balance. Available: {fund.current_balance}"
+        )
+
+    # Generate transaction number
+    today = date.today()
+    count = db.query(PettyCashTransaction).filter(
+        PettyCashTransaction.company_id == current_user.company_id,
+        func.date(PettyCashTransaction.created_at) == today
+    ).count()
+    txn_number = f"PC-{today.strftime('%Y%m%d')}-{count + 1:04d}"
+
+    # Determine if auto-approve
+    auto_approve = txn_data.amount <= float(fund.auto_approve_threshold)
+
+    # Create transaction
+    txn = PettyCashTransaction(
+        company_id=current_user.company_id,
+        fund_id=fund.id,
+        transaction_number=txn_number,
+        transaction_date=txn_data.transaction_date or datetime.now(),
+        amount=Decimal(str(txn_data.amount)),
+        currency=fund.currency,
+        description=txn_data.description,
+        category=txn_data.category,
+        merchant_name=txn_data.merchant_name,
+        vendor_address_book_id=txn_data.vendor_address_book_id,
+        work_order_id=txn_data.work_order_id,
+        contract_id=txn_data.contract_id,
+        notes=txn_data.notes,
+        status="approved" if auto_approve else "pending",
+        auto_approved=auto_approve,
+        created_by=current_user.id
+    )
+
+    if auto_approve:
+        txn.approved_by = current_user.id
+        txn.approved_at = datetime.now()
+        txn.balance_before = fund.current_balance
+        txn.balance_after = fund.current_balance - Decimal(str(txn_data.amount))
+        fund.current_balance = txn.balance_after
+
+    db.add(txn)
+    db.commit()
+    db.refresh(txn)
+
+    # Auto-post journal entry if auto-approved and accounting is set up
+    if auto_approve:
+        try:
+            has_accounts = db.query(Account).filter(
+                Account.company_id == current_user.company_id
+            ).first()
+
+            if has_accounts:
+                journal_service = JournalPostingService(db, current_user.company_id, current_user.id)
+                journal_entry = journal_service.post_petty_cash_transaction(txn, post_immediately=True)
+                if journal_entry:
+                    logger.info(f"Auto-posted journal entry {journal_entry.entry_number} for petty cash transaction {txn.id}")
+        except Exception as e:
+            logger.warning(f"Failed to auto-post journal entry for petty cash transaction {txn.id}: {e}")
+
+    # Reload with relationships
+    txn = db.query(PettyCashTransaction).options(
+        joinedload(PettyCashTransaction.fund).joinedload(PettyCashFund.address_book),
+        joinedload(PettyCashTransaction.work_order),
+        joinedload(PettyCashTransaction.contract),
+        joinedload(PettyCashTransaction.vendor),
+        joinedload(PettyCashTransaction.approver),
+        joinedload(PettyCashTransaction.creator),
+        joinedload(PettyCashTransaction.receipts)
+    ).filter(PettyCashTransaction.id == txn.id).first()
+
+    return transaction_to_response(txn)

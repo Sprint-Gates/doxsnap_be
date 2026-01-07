@@ -314,13 +314,65 @@ DEFAULT_ACCOUNT_MAPPINGS = [
     # ==========================================================================
     # PETTY CASH
     # ==========================================================================
+    # Generic petty cash expense (fallback)
     {
         "transaction_type": "petty_cash_expense",
         "category": None,
         "debit_account_code": "5250",  # Office Supplies (default expense)
         "credit_account_code": "1111",  # Petty Cash
-        "description": "Petty cash expense"
+        "description": "Petty cash expense (general)"
     },
+    # Category-specific petty cash expenses
+    {
+        "transaction_type": "petty_cash_expense",
+        "category": "supplies",
+        "debit_account_code": "5250",  # Office Supplies
+        "credit_account_code": "1111",  # Petty Cash
+        "description": "Petty cash - supplies"
+    },
+    {
+        "transaction_type": "petty_cash_expense",
+        "category": "transport",
+        "debit_account_code": "5241",  # Fuel (under Vehicle Expenses)
+        "credit_account_code": "1111",  # Petty Cash
+        "description": "Petty cash - transport"
+    },
+    {
+        "transaction_type": "petty_cash_expense",
+        "category": "meals",
+        "debit_account_code": "5250",  # Office Supplies (meals/entertainment)
+        "credit_account_code": "1111",  # Petty Cash
+        "description": "Petty cash - meals"
+    },
+    {
+        "transaction_type": "petty_cash_expense",
+        "category": "tools",
+        "debit_account_code": "5121",  # Spare Parts Used (tools)
+        "credit_account_code": "1111",  # Petty Cash
+        "description": "Petty cash - tools"
+    },
+    {
+        "transaction_type": "petty_cash_expense",
+        "category": "materials",
+        "debit_account_code": "5121",  # Spare Parts Used
+        "credit_account_code": "1111",  # Petty Cash
+        "description": "Petty cash - materials"
+    },
+    {
+        "transaction_type": "petty_cash_expense",
+        "category": "services",
+        "debit_account_code": "5130",  # Subcontractor Costs
+        "credit_account_code": "1111",  # Petty Cash
+        "description": "Petty cash - services"
+    },
+    {
+        "transaction_type": "petty_cash_expense",
+        "category": "other",
+        "debit_account_code": "5250",  # Office Supplies (miscellaneous)
+        "credit_account_code": "1111",  # Petty Cash
+        "description": "Petty cash - other expenses"
+    },
+    # Petty cash replenishment
     {
         "transaction_type": "petty_cash_replenishment",
         "category": None,

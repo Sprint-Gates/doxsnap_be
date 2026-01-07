@@ -2367,12 +2367,16 @@ def initialize_chart_of_accounts(
         {"transaction_type": "invoice_vat", "category": None, "debit": "1130", "credit": "2110", "desc": "VAT on invoice"},
         {"transaction_type": "work_order_labor", "category": None, "debit": "5110", "credit": "2130", "desc": "Work order labor cost"},
         {"transaction_type": "work_order_parts", "category": None, "debit": "5120", "credit": "1140", "desc": "Work order parts usage"},
-        {"transaction_type": "petty_cash_expense", "category": "supplies", "debit": "5220", "credit": "1120", "desc": "Petty cash - supplies"},
-        {"transaction_type": "petty_cash_expense", "category": "transport", "debit": "5210", "credit": "1120", "desc": "Petty cash - transport"},
-        {"transaction_type": "petty_cash_expense", "category": "meals", "debit": "5240", "credit": "1120", "desc": "Petty cash - meals"},
-        {"transaction_type": "petty_cash_expense", "category": "tools", "debit": "5250", "credit": "1120", "desc": "Petty cash - tools"},
-        {"transaction_type": "petty_cash_expense", "category": "materials", "debit": "5120", "credit": "1120", "desc": "Petty cash - materials"},
-        {"transaction_type": "petty_cash_replenishment", "category": None, "debit": "1120", "credit": "1110", "desc": "Petty cash replenishment"},
+        # Petty Cash - credit to 1111 (Petty Cash asset account)
+        {"transaction_type": "petty_cash_expense", "category": None, "debit": "5250", "credit": "1111", "desc": "Petty cash expense (general)"},
+        {"transaction_type": "petty_cash_expense", "category": "supplies", "debit": "5250", "credit": "1111", "desc": "Petty cash - supplies"},
+        {"transaction_type": "petty_cash_expense", "category": "transport", "debit": "5241", "credit": "1111", "desc": "Petty cash - transport"},
+        {"transaction_type": "petty_cash_expense", "category": "meals", "debit": "5250", "credit": "1111", "desc": "Petty cash - meals"},
+        {"transaction_type": "petty_cash_expense", "category": "tools", "debit": "5121", "credit": "1111", "desc": "Petty cash - tools"},
+        {"transaction_type": "petty_cash_expense", "category": "materials", "debit": "5121", "credit": "1111", "desc": "Petty cash - materials"},
+        {"transaction_type": "petty_cash_expense", "category": "services", "debit": "5130", "credit": "1111", "desc": "Petty cash - services"},
+        {"transaction_type": "petty_cash_expense", "category": "other", "debit": "5250", "credit": "1111", "desc": "Petty cash - other"},
+        {"transaction_type": "petty_cash_replenishment", "category": None, "debit": "1111", "credit": "1121", "desc": "Petty cash replenishment"},
         # Goods Receipt (GRN) accounting
         {"transaction_type": "po_receive_inventory", "category": None, "debit": "1140", "credit": "2115", "desc": "Goods receipt - inventory increase"},
         {"transaction_type": "po_receive_vat", "category": None, "debit": "1130", "credit": "2115", "desc": "Goods receipt - VAT on receiving"},
@@ -2409,3 +2413,48 @@ def initialize_chart_of_accounts(
         "accounts_created": len(accounts_data),
         "mappings_created": len(mappings_data)
     }
+
+
+@router.post("/reseed-account-mappings")
+def reseed_account_mappings(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Reseed default account mappings for an existing company.
+
+    This is useful for:
+    - Adding new mappings after system updates (e.g., new petty cash categories)
+    - Fixing missing mappings without reinitializing the full chart of accounts
+
+    Only creates missing mappings - does not modify existing ones.
+    """
+    from app.utils.company_seed import seed_account_mappings
+
+    company_id = current_user.company_id
+
+    # Check if chart of accounts exists
+    has_accounts = db.query(Account).filter(Account.company_id == company_id).first()
+    if not has_accounts:
+        raise HTTPException(
+            status_code=400,
+            detail="Chart of accounts not initialized. Please initialize chart of accounts first."
+        )
+
+    try:
+        stats = seed_account_mappings(company_id, db)
+        db.commit()
+
+        return {
+            "message": "Account mappings reseeded successfully",
+            "created": stats.get("created", []),
+            "skipped": stats.get("skipped", []),
+            "errors": stats.get("errors", [])
+        }
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error reseeding account mappings for company {company_id}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error reseeding account mappings: {str(e)}"
+        )

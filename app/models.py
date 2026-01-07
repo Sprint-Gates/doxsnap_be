@@ -218,6 +218,10 @@ class User(Base):
     role = Column(String, default="admin")  # admin, operator, accounting
     phone = Column(String, nullable=True)
 
+    # Link to Address Book employee record (search_type='E')
+    # This allows users to have associated petty cash funds, attendance, etc.
+    address_book_id = Column(Integer, ForeignKey("address_book.id"), nullable=True)
+
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
 
@@ -225,6 +229,7 @@ class User(Base):
     company = relationship("Company", back_populates="users")
     processed_images = relationship("ProcessedImage", back_populates="user")
     assigned_branches = relationship("Branch", secondary=operator_branches, back_populates="operators")
+    address_book = relationship("AddressBook", foreign_keys=[address_book_id], backref="user_account")
 
 
 class ProcessedImage(Base):
@@ -2422,14 +2427,26 @@ class PettyCashTransaction(Base):
     work_order_id = Column(Integer, ForeignKey("work_orders.id"), nullable=True)
     contract_id = Column(Integer, ForeignKey("contracts.id"), nullable=True)
 
+    # Vendor linking (Address Book) - for tracking which vendor the expense was made to
+    vendor_address_book_id = Column(Integer, ForeignKey("address_book.id"), nullable=True)
+
+    # Invoice linking - for associating petty cash expense with a processed invoice
+    invoice_id = Column(Integer, ForeignKey("processed_images.id"), nullable=True)
+
     # Approval workflow
-    status = Column(String(20), default="pending")  # pending, approved, rejected, reimbursed
+    status = Column(String(20), default="pending")  # pending, approved, rejected, reversed
     auto_approved = Column(Boolean, default=False)  # True if below threshold
 
     # Approval details
     approved_by = Column(Integer, ForeignKey("users.id"), nullable=True)
     approved_at = Column(DateTime, nullable=True)
     rejection_reason = Column(Text, nullable=True)
+
+    # Reversal details
+    reversed_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    reversed_at = Column(DateTime, nullable=True)
+    reversal_reason = Column(Text, nullable=True)
+    reversal_journal_entry_id = Column(Integer, nullable=True)  # ID of the reversing journal entry
 
     # Notes
     notes = Column(Text, nullable=True)
@@ -2448,8 +2465,11 @@ class PettyCashTransaction(Base):
     fund = relationship("PettyCashFund", back_populates="transactions")
     work_order = relationship("WorkOrder", backref="petty_cash_transactions")
     contract = relationship("Contract", backref="petty_cash_transactions")
+    vendor = relationship("AddressBook", foreign_keys=[vendor_address_book_id], backref="petty_cash_transactions")
+    invoice = relationship("ProcessedImage", backref="petty_cash_transactions")
     approver = relationship("User", foreign_keys=[approved_by], backref="approved_petty_cash_transactions")
     creator = relationship("User", foreign_keys=[created_by], backref="created_petty_cash_transactions")
+    reverser = relationship("User", foreign_keys=[reversed_by], backref="reversed_petty_cash_transactions")
     receipts = relationship("PettyCashReceipt", back_populates="transaction", cascade="all, delete-orphan")
 
 
@@ -4792,3 +4812,189 @@ class PurchaseOrderAmendment(Base):
     purchase_order = relationship("PurchaseOrder", backref="amendments")
     creator = relationship("User", foreign_keys=[created_by])
     approver = relationship("User", foreign_keys=[approved_by])
+
+
+# ============================================================================
+# Fleet Management Models
+# ============================================================================
+
+class Vehicle(Base):
+    """
+    Vehicle - Fleet vehicle for company operations
+    Tracks vehicles used by technicians for work orders and site visits.
+    """
+    __tablename__ = "vehicles"
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+
+    # Vehicle Identification
+    vehicle_number = Column(String(50), nullable=False, index=True)  # Fleet number, e.g., VEH-001
+    license_plate = Column(String(20), nullable=False, index=True)
+    vin = Column(String(50), nullable=True)  # Vehicle Identification Number
+
+    # Vehicle Details
+    make = Column(String(100), nullable=True)  # Toyota, Ford, etc.
+    model = Column(String(100), nullable=True)  # Camry, F-150, etc.
+    year = Column(Integer, nullable=True)
+    color = Column(String(50), nullable=True)
+    vehicle_type = Column(String(50), nullable=True)  # Sedan, SUV, Van, Truck, Pickup
+    fuel_type = Column(String(30), nullable=True)  # Gasoline, Diesel, Electric, Hybrid
+
+    # Capacity
+    seating_capacity = Column(Integer, nullable=True)
+    cargo_capacity_kg = Column(Float, nullable=True)
+
+    # Purchase/Lease Info
+    ownership_type = Column(String(20), default='owned')  # owned, leased, rented
+    purchase_date = Column(Date, nullable=True)
+    purchase_price = Column(Numeric(12, 2), nullable=True)
+    lease_end_date = Column(Date, nullable=True)
+    lease_monthly_cost = Column(Numeric(10, 2), nullable=True)
+
+    # Current Status
+    status = Column(String(30), default='available')  # available, in_use, maintenance, out_of_service, disposed
+    current_odometer = Column(Float, default=0)  # Current mileage in km
+    odometer_unit = Column(String(5), default='km')  # km or mi
+
+    # Assignment
+    assigned_driver_id = Column(Integer, ForeignKey("address_book.id"), nullable=True)  # Primary driver (employee)
+    assigned_site_id = Column(Integer, ForeignKey("sites.id"), nullable=True)  # Assigned site/location
+
+    # Insurance
+    insurance_policy_number = Column(String(100), nullable=True)
+    insurance_provider = Column(String(100), nullable=True)
+    insurance_expiry = Column(Date, nullable=True)
+
+    # Registration
+    registration_number = Column(String(50), nullable=True)
+    registration_expiry = Column(Date, nullable=True)
+
+    # Maintenance Schedule
+    last_service_date = Column(Date, nullable=True)
+    last_service_odometer = Column(Float, nullable=True)
+    next_service_due_date = Column(Date, nullable=True)
+    next_service_due_odometer = Column(Float, nullable=True)
+    service_interval_km = Column(Float, default=5000)  # Service every X km
+    service_interval_months = Column(Integer, default=6)  # Or every X months
+
+    notes = Column(Text, nullable=True)
+    is_active = Column(Boolean, default=True)
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        UniqueConstraint('company_id', 'vehicle_number', name='uq_company_vehicle_number'),
+        UniqueConstraint('company_id', 'license_plate', name='uq_company_license_plate'),
+    )
+
+    # Relationships
+    company = relationship("Company", backref="vehicles")
+    assigned_driver = relationship("AddressBook", foreign_keys=[assigned_driver_id])
+    assigned_site = relationship("Site", backref="vehicles")
+    creator = relationship("User", foreign_keys=[created_by])
+    maintenance_records = relationship("VehicleMaintenance", back_populates="vehicle", cascade="all, delete-orphan")
+    fuel_records = relationship("VehicleFuelLog", back_populates="vehicle", cascade="all, delete-orphan")
+
+
+class VehicleMaintenance(Base):
+    """
+    Vehicle Maintenance Record - Tracks all maintenance activities for vehicles
+    """
+    __tablename__ = "vehicle_maintenance"
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+    vehicle_id = Column(Integer, ForeignKey("vehicles.id", ondelete="CASCADE"), nullable=False)
+
+    # Maintenance Details
+    maintenance_number = Column(String(50), nullable=False, index=True)  # MNT-2025-00001
+    maintenance_date = Column(Date, nullable=False)
+    maintenance_type = Column(String(50), nullable=False)  # scheduled, unscheduled, repair, inspection, tire_change, oil_change
+
+    # Odometer at service
+    odometer_reading = Column(Float, nullable=True)
+
+    # Description
+    description = Column(Text, nullable=False)
+    work_performed = Column(Text, nullable=True)
+
+    # Costs
+    labor_cost = Column(Numeric(10, 2), default=0)
+    parts_cost = Column(Numeric(10, 2), default=0)
+    total_cost = Column(Numeric(10, 2), default=0)
+
+    # Service Provider
+    service_provider = Column(String(200), nullable=True)  # Garage/workshop name
+    service_provider_address_book_id = Column(Integer, ForeignKey("address_book.id"), nullable=True)  # Linked vendor
+    invoice_number = Column(String(50), nullable=True)
+    invoice_date = Column(Date, nullable=True)
+
+    # Status
+    status = Column(String(20), default='completed')  # scheduled, in_progress, completed, cancelled
+
+    # Next Service
+    next_service_date = Column(Date, nullable=True)
+    next_service_odometer = Column(Float, nullable=True)
+
+    notes = Column(Text, nullable=True)
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    # Relationships
+    company = relationship("Company")
+    vehicle = relationship("Vehicle", back_populates="maintenance_records")
+    service_provider_vendor = relationship("AddressBook", foreign_keys=[service_provider_address_book_id])
+    creator = relationship("User", foreign_keys=[created_by])
+
+
+class VehicleFuelLog(Base):
+    """
+    Vehicle Fuel Log - Tracks fuel consumption for vehicles
+    """
+    __tablename__ = "vehicle_fuel_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+    vehicle_id = Column(Integer, ForeignKey("vehicles.id", ondelete="CASCADE"), nullable=False)
+
+    # Fuel Record Details
+    fuel_log_number = Column(String(50), nullable=False, index=True)  # FUEL-2025-00001
+    fuel_date = Column(Date, nullable=False)
+    fuel_time = Column(Time, nullable=True)
+
+    # Odometer
+    odometer_reading = Column(Float, nullable=False)
+
+    # Fuel Details
+    fuel_type = Column(String(30), nullable=True)  # Gasoline, Diesel, Electric
+    quantity_liters = Column(Numeric(8, 2), nullable=False)
+    unit_price = Column(Numeric(8, 4), nullable=True)
+    total_cost = Column(Numeric(10, 2), nullable=False)
+    currency = Column(String(3), default='USD')
+
+    # Full tank?
+    is_full_tank = Column(Boolean, default=True)
+
+    # Location
+    fuel_station = Column(String(200), nullable=True)
+    location = Column(String(200), nullable=True)
+
+    # Driver
+    driver_id = Column(Integer, ForeignKey("address_book.id"), nullable=True)
+
+    # Efficiency (calculated)
+    km_since_last_fill = Column(Float, nullable=True)
+    liters_per_100km = Column(Float, nullable=True)  # Fuel consumption rate
+
+    notes = Column(Text, nullable=True)
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=func.now())
+
+    # Relationships
+    company = relationship("Company")
+    vehicle = relationship("Vehicle", back_populates="fuel_records")
+    driver = relationship("AddressBook", foreign_keys=[driver_id])
+    creator = relationship("User", foreign_keys=[created_by])
