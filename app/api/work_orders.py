@@ -908,21 +908,13 @@ async def update_work_order(
         db.commit()
         db.refresh(wo)
 
-        # Auto-post journal entry if work order completed and accounting is set up
-        if data.status == "completed" and auth_context.company_id:
-            try:
-                has_accounts = db.query(Account).filter(
-                    Account.company_id == auth_context.company_id
-                ).first()
-
-                if has_accounts:
-                    journal_service = JournalPostingService(db, auth_context.company_id, auth_context.id)
-                    journal_entry = journal_service.post_work_order_completion(wo, post_immediately=True)
-                    if journal_entry:
-                        logger.info(f"Auto-posted journal entry {journal_entry.entry_number} for work order {wo.wo_number}")
-            except Exception as e:
-                logger.warning(f"Failed to auto-post journal entry for work order {wo.id}: {e}")
-                # Don't fail the work order update if journal posting fails
+        # NOTE: Journal entries are now created ONLY during approval, not on completion.
+        # This prevents duplicate entries. The approval endpoint handles:
+        # - Billable WOs: post_work_order_billing() (creates AR, Revenue, COGS entries)
+        # - Non-billable WOs: post_work_order_completion() (creates cost entries only)
+        #
+        # Previously, we created entries on completion which caused duplicates when
+        # the same WO was later approved.
 
         logger.info(f"Work order {wo.wo_number} updated by {auth_context.email}")
         return work_order_to_response(wo, include_details=True)
@@ -1092,6 +1084,9 @@ async def approve_work_order(
         # - CR: VAT Output (if applicable)
         # - DR: COGS Labor / CR: Labor Payable
         # - DR: COGS Parts / CR: Inventory
+        # Track journal entry info for response
+        journal_entry_info = None
+
         try:
             has_accounts = db.query(Account).filter(
                 Account.company_id == user.company_id
@@ -1109,17 +1104,34 @@ async def approve_work_order(
                     billing_entry = journal_service.post_work_order_billing(wo)
                     if billing_entry:
                         logger.info(f"Created billing journal entry {billing_entry.entry_number} for WO {wo.wo_number}")
+                        journal_entry_info = {
+                            "id": billing_entry.id,
+                            "entry_number": billing_entry.entry_number,
+                            "entry_type": "billing",
+                            "status": billing_entry.status
+                        }
                 else:
                     # For non-billable work orders, post cost recognition only
                     cost_entry = journal_service.post_work_order_completion(wo)
                     if cost_entry:
                         logger.info(f"Created cost journal entry {cost_entry.entry_number} for WO {wo.wo_number}")
+                        journal_entry_info = {
+                            "id": cost_entry.id,
+                            "entry_number": cost_entry.entry_number,
+                            "entry_type": "cost",
+                            "status": cost_entry.status
+                        }
 
         except Exception as je:
             # Log but don't fail the approval if journal posting fails
             logger.warning(f"Journal entry creation failed for WO {wo.wo_number}: {str(je)}")
 
-        return work_order_to_response(wo, include_details=True)
+        # Build response with work order and optional journal entry info
+        wo_response = work_order_to_response(wo, include_details=True)
+        return {
+            **wo_response,
+            "journal_entry": journal_entry_info
+        }
     except Exception as e:
         db.rollback()
         raise HTTPException(

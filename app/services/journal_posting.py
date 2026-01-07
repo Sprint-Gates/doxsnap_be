@@ -347,14 +347,25 @@ class JournalPostingService:
         for te in time_entries:
             labor_cost += float(te.total_cost or 0)
 
-        # Calculate parts cost
+        # Calculate parts cost from ItemLedger (actual inventory movements)
+        # This is consistent with post_work_order_billing() calculation
         parts_cost = 0
-        spare_parts = self.db.query(WorkOrderSparePart).filter(
-            WorkOrderSparePart.work_order_id == work_order.id
+        issued_items = self.db.query(ItemLedger).filter(
+            ItemLedger.work_order_id == work_order.id,
+            ItemLedger.transaction_type == "ISSUE_WORK_ORDER"
         ).all()
+        for item in issued_items:
+            parts_cost += float(abs(item.total_cost or 0))
 
-        for sp in spare_parts:
-            parts_cost += float(sp.total_cost or 0)
+        # Subtract returned items
+        returned_items = self.db.query(ItemLedger).filter(
+            ItemLedger.work_order_id == work_order.id,
+            ItemLedger.transaction_type == "RETURN_WORK_ORDER"
+        ).all()
+        for item in returned_items:
+            parts_cost -= float(abs(item.total_cost or 0))
+
+        parts_cost = max(0, parts_cost)
 
         # Skip if no costs
         if labor_cost == 0 and parts_cost == 0:
@@ -369,17 +380,19 @@ class JournalPostingService:
             logger.warning("No account mappings for work order costs")
             return None
 
-        # Create journal entry
-        entry_date = work_order.completed_at.date() if work_order.completed_at else date.today()
+        # Create journal entry - use approved_at date since JE is created at approval
+        entry_date = work_order.approved_at.date() if work_order.approved_at else (
+            work_order.completed_at.date() if work_order.completed_at else date.today()
+        )
         fiscal_period = self._get_fiscal_period(entry_date)
 
         entry = JournalEntry(
             company_id=self.company_id,
             entry_number=self._generate_entry_number(),
             entry_date=entry_date,
-            description=f"Work Order {work_order.wo_number} - {work_order.title or 'Completion'}",
+            description=f"Work Order Cost Recognition - {work_order.wo_number} - {work_order.title or 'Non-Billable'}",
             reference=work_order.wo_number,
-            source_type="work_order",
+            source_type="work_order_cost",
             source_id=work_order.id,
             source_number=work_order.wo_number,
             fiscal_period_id=fiscal_period.id if fiscal_period else None,
