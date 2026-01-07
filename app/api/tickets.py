@@ -19,6 +19,7 @@ from app.schemas import (
 )
 from app.schemas import CancelTicketRequest
 from app.api.auth import get_current_user
+from app.services.dependency import require_permission
 
 router = APIRouter(prefix="/tickets", tags=["Tickets"])
 
@@ -195,7 +196,7 @@ async def get_ticket(
 async def create_ticket(
     ticket_data: TicketCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_permission("Service_request", "create"))
 ):
     """Create a new ticket/service request"""
     # Validate category
@@ -282,7 +283,7 @@ async def update_ticket(
     ticket_id: int,
     ticket_data: TicketUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_permission("Service_request", "update"))
 ):
     """Update a ticket"""
     ticket = db.query(Ticket).filter(
@@ -499,7 +500,7 @@ async def convert_ticket_to_work_order(
 async def delete_ticket(
     ticket_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_permission("Service_request", "delete"))
 ):
     """Delete a ticket (admin only, only if not converted)"""
     # Check admin role

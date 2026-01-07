@@ -137,7 +137,11 @@ class Company(Base):
     users = relationship("User", back_populates="company")
     clients = relationship("Client", back_populates="company")
     external_user_clients = relationship("ExternalUserClient", back_populates="company")
-
+    roles = relationship(
+        "Role",
+        back_populates="company",
+        cascade="all, delete-orphan"
+    )
 
 class Client(Base):
     """Client/Customer of a company - linked to Address Book for master data"""
@@ -254,6 +258,7 @@ class User(Base):
     # Link to Address Book employee record (search_type='E')
     # This allows users to have associated petty cash funds, attendance, etc.
     address_book_id = Column(Integer, ForeignKey("address_book.id"), nullable=True)
+    role_id = Column(Integer, ForeignKey("roles.id"), nullable=False) 
 
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
@@ -275,6 +280,59 @@ class User(Base):
     back_populates="managers"
     )
     role_obj = relationship("Role", back_populates="users")
+
+class Role(Base):
+    __tablename__ = "roles"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+
+    name = Column(String, nullable=False)  # e.g. "Procurement Manager"
+    description = Column(Text, nullable=True)
+
+    # Relationships
+    company = relationship("Company", back_populates="roles")
+    users = relationship("User", back_populates="role_obj")
+    permissions = relationship(
+        "RolePermission",
+        back_populates="role",
+        cascade="all, delete-orphan"
+    )
+    __table_args__ = (
+        UniqueConstraint("company_id", "name", name="uq_company_role_name"),
+    )
+
+class Permission(Base):
+    __tablename__ = "permissions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    module = Column(String, nullable=False)  # e.g., "Purchase Request"
+    action = Column(String, nullable=False)  # e.g., "approve", "create"
+
+    # Unique constraint to prevent duplicates
+    __table_args__ = (
+        UniqueConstraint("module", "action", name="uq_module_action"),
+    )
+
+    # Relationships
+    roles = relationship("RolePermission", back_populates="permission")
+
+class RolePermission(Base):
+    __tablename__ = "role_permissions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    role_id = Column(Integer, ForeignKey("roles.id", ondelete="CASCADE"), nullable=False)
+    permission_id = Column(Integer, ForeignKey("permissions.id", ondelete="CASCADE"), nullable=False)
+
+    # Relationships
+    role = relationship("Role", back_populates="permissions")
+    permission = relationship("Permission", back_populates="roles")
+
+    __table_args__ = (
+        UniqueConstraint("role_id", "permission_id", name="uq_role_permission"),
+    )
+
 
 class ExternalUserClient(Base):
     __tablename__ = "external_user_clients"
@@ -2508,7 +2566,6 @@ class NPSSurvey(Base):
     site = relationship("Site", backref="nps_surveys")
     collector = relationship("User", foreign_keys=[collected_by], backref="collected_nps_surveys")
     follow_up_user = relationship("User", foreign_keys=[followed_up_by], backref="followed_up_nps_surveys")
-
 
 # ============================================================================
 # Petty Cash Models
