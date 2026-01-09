@@ -15,7 +15,7 @@ from sqlalchemy import desc, func, or_
 from app.database import get_db
 from app.models import (
     ClientUser, ClientRefreshToken, Ticket, WorkOrder, Site,
-    AddressBook, TicketActivity
+    AddressBook, TicketActivity, Equipment
 )
 from app.schemas import (
     ClientUserLogin, ClientToken, ClientUserAcceptInvitation,
@@ -546,7 +546,10 @@ async def list_client_work_orders(
     if not accessible_site_ids:
         return ClientWorkOrderList(work_orders=[], total=0, page=page, size=size)
 
-    query = db.query(WorkOrder).filter(
+    query = db.query(WorkOrder).options(
+        joinedload(WorkOrder.site),
+        joinedload(WorkOrder.equipment)
+    ).filter(
         WorkOrder.site_id.in_(accessible_site_ids),
         WorkOrder.company_id == current_client.company_id
     )
@@ -583,11 +586,21 @@ async def list_client_work_orders(
         wo_list.append(ClientWorkOrderBrief(
             id=wo.id,
             wo_number=wo.wo_number,
+            title=wo.title,
+            description=wo.description,
+            work_order_type=wo.work_order_type,
+            priority=wo.priority,
             status=wo.status,
+            site_id=wo.site_id,
+            site_name=wo.site.name if wo.site else None,
+            equipment_name=wo.equipment.name if wo.equipment else None,
             scheduled_date=wo.scheduled_start,
+            scheduled_end=wo.scheduled_end,
+            actual_start=wo.actual_start,
+            actual_end=wo.actual_end,
             completed_date=wo.actual_end,
             technician_name=technician_name,
-            completion_notes=wo.notes if wo.status == "completed" else None,
+            completion_notes=wo.completion_notes if wo.status == "completed" else None,
             created_at=wo.created_at
         ))
 
@@ -608,7 +621,10 @@ async def get_client_work_order(
     """Get a specific work order (limited info)"""
     accessible_site_ids = get_client_accessible_site_ids(db, current_client)
 
-    wo = db.query(WorkOrder).filter(
+    wo = db.query(WorkOrder).options(
+        joinedload(WorkOrder.site),
+        joinedload(WorkOrder.equipment)
+    ).filter(
         WorkOrder.id == wo_id,
         WorkOrder.site_id.in_(accessible_site_ids),
         WorkOrder.company_id == current_client.company_id
@@ -628,10 +644,20 @@ async def get_client_work_order(
     return ClientWorkOrderBrief(
         id=wo.id,
         wo_number=wo.wo_number,
+        title=wo.title,
+        description=wo.description,
+        work_order_type=wo.work_order_type,
+        priority=wo.priority,
         status=wo.status,
+        site_id=wo.site_id,
+        site_name=wo.site.name if wo.site else None,
+        equipment_name=wo.equipment.name if wo.equipment else None,
         scheduled_date=wo.scheduled_start,
+        scheduled_end=wo.scheduled_end,
+        actual_start=wo.actual_start,
+        actual_end=wo.actual_end,
         completed_date=wo.actual_end,
         technician_name=technician_name,
-        completion_notes=wo.notes if wo.status == "completed" else None,
+        completion_notes=wo.completion_notes if wo.status == "completed" else None,
         created_at=wo.created_at
     )

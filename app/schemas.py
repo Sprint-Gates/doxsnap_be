@@ -2889,8 +2889,18 @@ class ClientWorkOrderBrief(BaseModel):
     """Limited work order info for client view"""
     id: int
     wo_number: str
+    title: Optional[str] = None
+    description: Optional[str] = None
+    work_order_type: Optional[str] = None  # corrective, preventive, operations
+    priority: Optional[str] = None  # low, medium, high, critical
     status: str
+    site_id: Optional[int] = None
+    site_name: Optional[str] = None
+    equipment_name: Optional[str] = None  # Equipment being serviced
     scheduled_date: Optional[datetime] = None
+    scheduled_end: Optional[datetime] = None
+    actual_start: Optional[datetime] = None
+    actual_end: Optional[datetime] = None
     completed_date: Optional[datetime] = None
     technician_name: Optional[str] = None
     completion_notes: Optional[str] = None

@@ -91,17 +91,17 @@ async def get_sites(
     # Get valid client IDs from legacy clients table
     legacy_client_ids = db.query(Client.id).filter(Client.company_id == current_user.company_id).subquery()
 
-    # Get valid address book customer IDs (search_type='C')
-    ab_customer_ids = db.query(AddressBook.id).filter(
+    # Get valid address book IDs (Customer 'C' or Client Branch 'CB')
+    ab_valid_ids = db.query(AddressBook.id).filter(
         AddressBook.company_id == current_user.company_id,
-        AddressBook.search_type == 'C'
+        AddressBook.search_type.in_(['C', 'CB'])
     ).subquery()
 
     # Sites can be linked via client_id (legacy) OR address_book_id (new)
     query = db.query(Site).filter(
         or_(
             Site.client_id.in_(legacy_client_ids),
-            Site.address_book_id.in_(ab_customer_ids)
+            Site.address_book_id.in_(ab_valid_ids)
         )
     )
 
