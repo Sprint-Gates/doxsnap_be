@@ -9,7 +9,7 @@ from decimal import Decimal
 from app.database import get_db
 from app.models import (
     Project, Site, Client, User, Company, ProcessedImage,
-    WorkOrder, WorkOrderTimeEntry, WorkOrderSparePart
+    WorkOrder, WorkOrderTimeEntry, WorkOrderSparePart, Technician, AddressBook
 )
 from app.utils.security import verify_token
 import logging
@@ -623,36 +623,66 @@ async def get_project_cost_center(
         if wo.is_billable and wo.billable_amount:
             total_billable_amount += float(wo.billable_amount)
 
-    # Get labor breakdown by technician
-    technician_labor = db.query(
+    # Get labor breakdown by technician (using address_book_id, falling back to technician_id)
+    # Query by address_book_id first (new approach)
+    ab_labor = db.query(
+        WorkOrderTimeEntry.address_book_id,
+        func.coalesce(func.sum(WorkOrderTimeEntry.hours_worked), 0).label('hours'),
+        func.coalesce(func.sum(WorkOrderTimeEntry.total_cost), 0).label('cost')
+    ).filter(
+        WorkOrderTimeEntry.work_order_id.in_(wo_ids) if wo_ids else False,
+        WorkOrderTimeEntry.address_book_id.isnot(None)
+    ).group_by(WorkOrderTimeEntry.address_book_id).all()
+
+    # Query by legacy technician_id (for old entries without address_book_id)
+    legacy_labor = db.query(
         WorkOrderTimeEntry.technician_id,
         func.coalesce(func.sum(WorkOrderTimeEntry.hours_worked), 0).label('hours'),
         func.coalesce(func.sum(WorkOrderTimeEntry.total_cost), 0).label('cost')
     ).filter(
-        WorkOrderTimeEntry.work_order_id.in_(wo_ids) if wo_ids else False
+        WorkOrderTimeEntry.work_order_id.in_(wo_ids) if wo_ids else False,
+        WorkOrderTimeEntry.address_book_id.is_(None),
+        WorkOrderTimeEntry.technician_id.isnot(None)
     ).group_by(WorkOrderTimeEntry.technician_id).all()
 
-    # Get technician names
-    from app.models import Technician
+    # Get names for address book entries
+    ab_names = {}
+    if ab_labor:
+        ab_ids = [t.address_book_id for t in ab_labor]
+        ab_entries = db.query(AddressBook).filter(AddressBook.id.in_(ab_ids)).all()
+        ab_names = {ab.id: ab.alpha_name for ab in ab_entries}
+
+    # Get names for legacy technicians
     tech_names = {}
-    if technician_labor:
-        tech_ids = [t.technician_id for t in technician_labor]
+    if legacy_labor:
+        tech_ids = [t.technician_id for t in legacy_labor]
         technicians = db.query(Technician).filter(Technician.id.in_(tech_ids)).all()
         tech_names = {t.id: t.name for t in technicians}
 
     # Get project markup for calculating technician billable
     project_labor_markup = decimal_to_float(project.labor_markup_percent) or 0
 
-    labor_by_technician = [
-        {
+    labor_by_technician = []
+
+    # Add address book entries
+    for t in ab_labor:
+        labor_by_technician.append({
+            "technician_id": t.address_book_id,
+            "technician_name": ab_names.get(t.address_book_id, "Unknown"),
+            "hours": decimal_to_float(t.hours),
+            "cost": decimal_to_float(t.cost),
+            "billable": decimal_to_float(t.cost) * (1 + project_labor_markup / 100)
+        })
+
+    # Add legacy technician entries
+    for t in legacy_labor:
+        labor_by_technician.append({
             "technician_id": t.technician_id,
             "technician_name": tech_names.get(t.technician_id, "Unknown"),
             "hours": decimal_to_float(t.hours),
             "cost": decimal_to_float(t.cost),
             "billable": decimal_to_float(t.cost) * (1 + project_labor_markup / 100)
-        }
-        for t in technician_labor
-    ]
+        })
 
     # Get work order details for breakdown
     wo_details = []

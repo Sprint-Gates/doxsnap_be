@@ -337,6 +337,7 @@ class JournalPostingService:
 
         site_id = work_order.site_id
         contract_id = work_order.contract_id
+        project_id = work_order.project_id  # Track project for cost accounting
 
         # Calculate labor cost from time entries
         labor_cost = 0
@@ -418,6 +419,7 @@ class JournalPostingService:
                     site_id=site_id,
                     contract_id=contract_id,
                     work_order_id=work_order.id,
+                    project_id=project_id,
                     line_number=line_number
                 )
                 self.db.add(labor_debit)
@@ -433,6 +435,7 @@ class JournalPostingService:
                     description="Accrued labor",
                     site_id=site_id,
                     work_order_id=work_order.id,
+                    project_id=project_id,
                     line_number=line_number
                 )
                 self.db.add(labor_credit)
@@ -451,6 +454,7 @@ class JournalPostingService:
                     site_id=site_id,
                     contract_id=contract_id,
                     work_order_id=work_order.id,
+                    project_id=project_id,
                     line_number=line_number
                 )
                 self.db.add(parts_debit)
@@ -466,6 +470,7 @@ class JournalPostingService:
                     description="Inventory reduction",
                     site_id=site_id,
                     work_order_id=work_order.id,
+                    project_id=project_id,
                     line_number=line_number
                 )
                 self.db.add(parts_credit)
@@ -530,6 +535,7 @@ class JournalPostingService:
 
         site_id = work_order.site_id
         contract_id = work_order.contract_id
+        project_id = work_order.project_id  # Track project for financial reporting
 
         # Get client info from site
         client_id = None
@@ -689,6 +695,7 @@ class JournalPostingService:
                 site_id=site_id,
                 contract_id=contract_id,
                 work_order_id=work_order.id,
+                project_id=project_id,
                 address_book_id=client_address_book_id,
                 business_unit_id=business_unit_id,
                 line_number=line_number
@@ -709,6 +716,7 @@ class JournalPostingService:
                 site_id=site_id,
                 contract_id=contract_id,
                 work_order_id=work_order.id,
+                project_id=project_id,
                 address_book_id=client_address_book_id,
                 business_unit_id=business_unit_id,
                 line_number=line_number
@@ -728,6 +736,7 @@ class JournalPostingService:
                 description=f"VAT Output - WO {work_order.wo_number}",
                 site_id=site_id,
                 work_order_id=work_order.id,
+                project_id=project_id,
                 business_unit_id=business_unit_id,
                 line_number=line_number
             )
@@ -750,6 +759,7 @@ class JournalPostingService:
                     site_id=site_id,
                     contract_id=contract_id,
                     work_order_id=work_order.id,
+                    project_id=project_id,
                     business_unit_id=business_unit_id,
                     line_number=line_number
                 )
@@ -767,6 +777,7 @@ class JournalPostingService:
                     description=f"Labor Payable - WO {work_order.wo_number}",
                     site_id=site_id,
                     work_order_id=work_order.id,
+                    project_id=project_id,
                     business_unit_id=business_unit_id,
                     line_number=line_number
                 )
@@ -789,6 +800,7 @@ class JournalPostingService:
                     site_id=site_id,
                     contract_id=contract_id,
                     work_order_id=work_order.id,
+                    project_id=project_id,
                     business_unit_id=business_unit_id,
                     line_number=line_number
                 )
@@ -806,6 +818,7 @@ class JournalPostingService:
                     description=f"Inventory Relief - WO {work_order.wo_number}",
                     site_id=site_id,
                     work_order_id=work_order.id,
+                    project_id=project_id,
                     business_unit_id=business_unit_id,
                     line_number=line_number
                 )
