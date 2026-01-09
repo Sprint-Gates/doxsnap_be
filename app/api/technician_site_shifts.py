@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from typing import Optional, List
 from datetime import time
 from app.database import get_db
-from app.models import Technician, Site, TechnicianSiteShift, User
+from app.models import Technician, Site, TechnicianSiteShift, User, AddressBook
 from app.utils.security import verify_token
 import logging
 
@@ -87,10 +87,18 @@ class ShiftResponse(BaseModel):
 
 def shift_to_response(shift: TechnicianSiteShift) -> dict:
     """Convert model to response dict"""
+    # Get technician name from address_book (preferred) or legacy technician
+    technician_name = ""
+    technician_id = shift.address_book_id or shift.technician_id
+    if shift.address_book:
+        technician_name = shift.address_book.alpha_name
+    elif shift.technician:
+        technician_name = shift.technician.name
+
     return {
         "id": shift.id,
-        "technician_id": shift.technician_id,
-        "technician_name": shift.technician.name if shift.technician else "",
+        "technician_id": technician_id,  # Return address_book_id if present, else legacy technician_id
+        "technician_name": technician_name,
         "site_id": shift.site_id,
         "site_name": shift.site.name if shift.site else "",
         "day_of_week": shift.day_of_week,
@@ -112,14 +120,24 @@ async def get_shifts(
     db: Session = Depends(get_db)
 ):
     """Retrieve shifts, optionally filtered by site or technician"""
-    query = db.query(TechnicianSiteShift)
+    from sqlalchemy.orm import joinedload
+    query = db.query(TechnicianSiteShift).options(
+        joinedload(TechnicianSiteShift.address_book),
+        joinedload(TechnicianSiteShift.technician),
+        joinedload(TechnicianSiteShift.site)
+    )
 
     if site_id:
         query = query.filter(TechnicianSiteShift.site_id == site_id)
     if technician_id:
-        query = query.filter(TechnicianSiteShift.technician_id == technician_id)
+        # technician_id filter can match either address_book_id or legacy technician_id
+        query = query.filter(
+            (TechnicianSiteShift.address_book_id == technician_id) |
+            (TechnicianSiteShift.technician_id == technician_id)
+        )
 
     shifts = query.order_by(
+        TechnicianSiteShift.address_book_id,
         TechnicianSiteShift.technician_id,
         TechnicianSiteShift.day_of_week,
         TechnicianSiteShift.start_time
@@ -140,13 +158,13 @@ async def create_shift(
         if data.start_time >= data.end_time:
             raise HTTPException(status_code=400, detail="start_time must be before end_time")
 
-        # Validate technician exists and is active
-        technician = db.query(Technician).filter(
-            Technician.id == data.technician_id,
-            Technician.is_active == True
+        # Validate technician exists - technician_id is actually address_book_id
+        address_book_entry = db.query(AddressBook).filter(
+            AddressBook.id == data.technician_id,
+            AddressBook.is_active == True
         ).first()
-        if not technician:
-            raise HTTPException(status_code=400, detail=f"Technician {data.technician_id} not found or inactive")
+        if not address_book_entry:
+            raise HTTPException(status_code=400, detail=f"Employee {data.technician_id} not found or inactive")
 
         # Validate site exists and is active
         site = db.query(Site).filter(
@@ -156,9 +174,9 @@ async def create_shift(
         if not site:
             raise HTTPException(status_code=400, detail=f"Site {data.site_id} not found or inactive")
 
-        # Prevent overlapping shifts
+        # Prevent overlapping shifts (check by address_book_id)
         overlap = db.query(TechnicianSiteShift).filter(
-            TechnicianSiteShift.technician_id == data.technician_id,
+            TechnicianSiteShift.address_book_id == data.technician_id,
             TechnicianSiteShift.site_id == data.site_id,
             TechnicianSiteShift.day_of_week == data.day_of_week,
             TechnicianSiteShift.is_active == True,
@@ -170,9 +188,9 @@ async def create_shift(
         if overlap:
             raise HTTPException(status_code=400, detail="Overlapping shift exists")
 
-        # Create the shift
+        # Create the shift using address_book_id
         shift = TechnicianSiteShift(
-            technician_id=data.technician_id,
+            address_book_id=data.technician_id,  # Store as address_book_id, not technician_id
             site_id=data.site_id,
             day_of_week=data.day_of_week,
             start_time=data.start_time,
@@ -184,7 +202,7 @@ async def create_shift(
         db.commit()
         db.refresh(shift)
 
-        logger.info(f"Shift created: Technician {shift.technician_id} Site {shift.site_id}")
+        logger.info(f"Shift created: Employee {shift.address_book_id} Site {shift.site_id}")
 
         return shift_to_response(shift)
 

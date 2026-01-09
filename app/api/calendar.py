@@ -110,7 +110,7 @@ class CalendarSlotCreate(BaseModel):
     start_time: str  # "09:00" format
     end_time: str    # "10:00" format
     max_capacity: Optional[int] = 1
-    technician_id: Optional[int] = None
+    technician_id: Optional[int] = None  # Address book ID (employee) - named for backwards compat
     site_id: Optional[int] = None
     notes: Optional[str] = None
 
@@ -338,7 +338,7 @@ async def create_calendar_slot(
         CalendarSlot.company_id == auth_context.company_id,
         CalendarSlot.slot_date == slot_data.slot_date,
         CalendarSlot.start_time == start_time,
-        CalendarSlot.technician_id == slot_data.technician_id,
+        CalendarSlot.address_book_id == slot_data.technician_id,  # technician_id is actually address_book_id
         CalendarSlot.is_active == True
     ).first()
 
@@ -354,7 +354,7 @@ async def create_calendar_slot(
         start_time=start_time,
         end_time=end_time,
         max_capacity=slot_data.max_capacity,
-        technician_id=slot_data.technician_id,
+        address_book_id=slot_data.technician_id,  # Use address_book_id, not technician_id
         site_id=slot_data.site_id,
         notes=slot_data.notes,
         created_by=auth_context.id
@@ -411,7 +411,7 @@ async def create_calendar_slots_bulk(
             CalendarSlot.company_id == auth_context.company_id,
             CalendarSlot.slot_date == bulk_data.slot_date,
             CalendarSlot.start_time == start_t,
-            CalendarSlot.technician_id == bulk_data.technician_id,
+            CalendarSlot.address_book_id == bulk_data.technician_id,  # technician_id is actually address_book_id
             CalendarSlot.is_active == True
         ).first()
 
@@ -422,7 +422,7 @@ async def create_calendar_slots_bulk(
                 start_time=start_t,
                 end_time=end_t,
                 max_capacity=bulk_data.max_capacity,
-                technician_id=bulk_data.technician_id,
+                address_book_id=bulk_data.technician_id,  # Use address_book_id, not technician_id
                 site_id=bulk_data.site_id,
                 created_by=auth_context.id
             )
@@ -672,7 +672,7 @@ async def get_week_view(
     auth_context = Depends(get_current_user_or_hhd),
     db: Session = Depends(get_db)
 ):
-    """Get week view with all slots and assignments"""
+    """Get week view with all slots, assignments, and unassigned work orders"""
     if not auth_context.company_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No company associated")
 
@@ -713,10 +713,56 @@ async def get_week_view(
         if day_key in slots_by_day:
             slots_by_day[day_key].append(slot_to_response(slot, include_assignments=True))
 
+    # Also fetch work orders with scheduled_start but no slot assignment
+    # These are "unassigned" work orders that should still appear on the calendar
+    week_start_dt = datetime.combine(week_start, time.min)
+    week_end_dt = datetime.combine(week_end, time.max)
+
+    # Get IDs of work orders that already have slot assignments
+    assigned_wo_ids = db.query(WorkOrderSlotAssignment.work_order_id).filter(
+        WorkOrderSlotAssignment.status != "cancelled"
+    ).subquery()
+
+    unassigned_wos = db.query(WorkOrder).options(
+        joinedload(WorkOrder.site)
+    ).filter(
+        WorkOrder.company_id == auth_context.company_id,
+        WorkOrder.scheduled_start >= week_start_dt,
+        WorkOrder.scheduled_start <= week_end_dt,
+        WorkOrder.status.notin_(["completed", "cancelled"]),
+        ~WorkOrder.id.in_(assigned_wo_ids)
+    )
+
+    if site_id:
+        unassigned_wos = unassigned_wos.filter(WorkOrder.site_id == site_id)
+
+    unassigned_work_orders = unassigned_wos.all()
+
+    # Group unassigned WOs by day
+    unassigned_by_day = {}
+    for wo in unassigned_work_orders:
+        if wo.scheduled_start:
+            day_key = wo.scheduled_start.date().isoformat()
+            if day_key not in unassigned_by_day:
+                unassigned_by_day[day_key] = []
+            unassigned_by_day[day_key].append({
+                "id": wo.id,
+                "wo_number": wo.wo_number,
+                "title": wo.title,
+                "status": wo.status,
+                "priority": wo.priority,
+                "site_id": wo.site_id,
+                "site_name": wo.site.name if wo.site else None,
+                "scheduled_start": wo.scheduled_start.isoformat() if wo.scheduled_start else None,
+                "scheduled_end": wo.scheduled_end.isoformat() if wo.scheduled_end else None,
+                "is_unassigned": True
+            })
+
     return {
         "week_start": week_start.isoformat(),
         "week_end": week_end.isoformat(),
-        "slots_by_day": slots_by_day
+        "slots_by_day": slots_by_day,
+        "unassigned_work_orders": unassigned_by_day
     }
 
 
@@ -1076,12 +1122,12 @@ async def generate_slots_from_template(
 
                 end_t = time(end_hour, end_minute)
 
-                # Check for existing slot
+                # Check for existing slot (template technician_id is legacy, don't use it)
                 existing = db.query(CalendarSlot).filter(
                     CalendarSlot.company_id == auth_context.company_id,
                     CalendarSlot.slot_date == current_date,
                     CalendarSlot.start_time == start_t,
-                    CalendarSlot.technician_id == template.technician_id,
+                    CalendarSlot.site_id == request.site_id,
                     CalendarSlot.is_active == True
                 ).first()
 
@@ -1092,7 +1138,7 @@ async def generate_slots_from_template(
                         start_time=start_t,
                         end_time=end_t,
                         max_capacity=template.default_capacity,
-                        technician_id=template.technician_id,
+                        # Don't use technician_id from template - it's legacy
                         site_id=request.site_id,
                         created_by=auth_context.id
                     )

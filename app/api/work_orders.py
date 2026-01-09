@@ -20,7 +20,8 @@ from app.models import (
     User, WorkOrder, WorkOrderTimeEntry, WorkOrderChecklistItem, WorkOrderSnapshot,
     WorkOrderCompletion, Technician, Equipment, SubEquipment,
     Site, Floor, Room, Project, work_order_technicians, work_order_technicians_ab,
-    HandHeldDevice, ItemMaster, ItemStock, ItemLedger, Account, AddressBook, Company
+    HandHeldDevice, ItemMaster, ItemStock, ItemLedger, Account, AddressBook, Company,
+    CalendarSlot, WorkOrderSlotAssignment
 )
 from app.services.journal_posting import JournalPostingService
 from app.api.auth import verify_token
@@ -788,6 +789,52 @@ async def create_work_order(
                     )
                 )
 
+        # Auto-create calendar slot and assignment if scheduled_start is provided
+        if data.scheduled_start:
+            slot_date = data.scheduled_start.date()
+            start_time = data.scheduled_start.time()
+
+            # Calculate end time - use scheduled_end if provided, otherwise default to 1 hour
+            if data.scheduled_end:
+                end_time = data.scheduled_end.time()
+            else:
+                from datetime import timedelta as td
+                end_datetime = data.scheduled_start + td(hours=1)
+                end_time = end_datetime.time()
+
+            # Get site_id from equipment if available
+            site_id = None
+            if data.equipment_id:
+                equipment = db.query(Equipment).filter(Equipment.id == data.equipment_id).first()
+                if equipment:
+                    site_id = equipment.site_id
+
+            # Create calendar slot
+            calendar_slot = CalendarSlot(
+                company_id=user.company_id,
+                slot_date=slot_date,
+                start_time=start_time,
+                end_time=end_time,
+                max_capacity=1,
+                current_bookings=1,
+                status="fully_booked",
+                site_id=site_id,
+                notes=f"Auto-created for {wo.wo_number}"
+            )
+            db.add(calendar_slot)
+            db.flush()
+
+            # Create slot assignment
+            slot_assignment = WorkOrderSlotAssignment(
+                work_order_id=wo.id,
+                calendar_slot_id=calendar_slot.id,
+                assigned_by=user.id,
+                status="scheduled",
+                notes="Auto-assigned on work order creation"
+            )
+            db.add(slot_assignment)
+            logger.info(f"Auto-created calendar slot and assignment for WO {wo.wo_number}")
+
         db.commit()
         db.refresh(wo)
 
@@ -904,6 +951,57 @@ async def update_work_order(
             wo.completed_at = datetime.utcnow()
             if wo.actual_end is None:
                 wo.actual_end = datetime.utcnow()
+
+        # Auto-create calendar slot if scheduled_start is being set and WO has no slot assignment
+        if data.scheduled_start is not None:
+            # Check if WO already has a slot assignment
+            existing_assignment = db.query(WorkOrderSlotAssignment).filter(
+                WorkOrderSlotAssignment.work_order_id == wo_id,
+                WorkOrderSlotAssignment.status != "cancelled"
+            ).first()
+
+            if not existing_assignment:
+                slot_date = data.scheduled_start.date()
+                start_time = data.scheduled_start.time()
+
+                # Calculate end time
+                if data.scheduled_end:
+                    end_time = data.scheduled_end.time()
+                elif wo.scheduled_end:
+                    end_time = wo.scheduled_end.time()
+                else:
+                    from datetime import timedelta as td
+                    end_datetime = data.scheduled_start + td(hours=1)
+                    end_time = end_datetime.time()
+
+                # Get site_id from work order
+                site_id = wo.site_id
+
+                # Create calendar slot
+                calendar_slot = CalendarSlot(
+                    company_id=auth_context.company_id,
+                    slot_date=slot_date,
+                    start_time=start_time,
+                    end_time=end_time,
+                    max_capacity=1,
+                    current_bookings=1,
+                    status="fully_booked",
+                    site_id=site_id,
+                    notes=f"Auto-created for {wo.wo_number}"
+                )
+                db.add(calendar_slot)
+                db.flush()
+
+                # Create slot assignment
+                slot_assignment = WorkOrderSlotAssignment(
+                    work_order_id=wo.id,
+                    calendar_slot_id=calendar_slot.id,
+                    assigned_by=auth_context.id,
+                    status="scheduled",
+                    notes="Auto-assigned on schedule update"
+                )
+                db.add(slot_assignment)
+                logger.info(f"Auto-created calendar slot for WO {wo.wo_number} on update")
 
         db.commit()
         db.refresh(wo)

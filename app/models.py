@@ -423,7 +423,10 @@ class TechnicianSiteShift(Base):
 
     id = Column(Integer, primary_key=True)
 
-    technician_id = Column(Integer, ForeignKey("technicians.id"), nullable=False, index=True)
+    technician_id = Column(Integer, ForeignKey("technicians.id"), nullable=True, index=True)  # Legacy
+
+    # Address Book employee (replaces technician_id)
+    address_book_id = Column(Integer, ForeignKey("address_book.id"), nullable=True, index=True)
 
     site_id = Column(Integer, ForeignKey("sites.id"), nullable=False, index=True)
 
@@ -438,6 +441,7 @@ class TechnicianSiteShift(Base):
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
 
     technician = relationship("Technician", back_populates="site_shifts")
+    address_book = relationship("AddressBook")
     site = relationship("Site", back_populates="technician_shifts")
 
 
