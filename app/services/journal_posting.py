@@ -285,6 +285,8 @@ class JournalPostingService:
                     credit=0,
                     description="VAT Input",
                     site_id=site_id,
+                    contract_id=allocation.contract_id,
+                    project_id=allocation.project_id,
                     address_book_id=vendor_id,
                     line_number=line_number
                 )
@@ -301,6 +303,8 @@ class JournalPostingService:
                 credit=amount,  # Full amount including VAT
                 description=f"Payable to {supplier_info.get('company_name', 'vendor')}",
                 site_id=site_id,
+                contract_id=allocation.contract_id,
+                project_id=allocation.project_id,
                 address_book_id=vendor_id,
                 line_number=line_number
             )
