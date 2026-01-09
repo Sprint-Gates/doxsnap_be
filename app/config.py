@@ -46,6 +46,9 @@ class Settings(BaseSettings):
     smtp_username: Optional[str] = None
     smtp_password: Optional[str] = None
     company_support_email: str = "noreply@coresrp.com"
+
+    # Frontend URL for email links
+    frontend_url: str = "http://localhost:4200"
     
     @property
     def database_connection_url(self) -> str:

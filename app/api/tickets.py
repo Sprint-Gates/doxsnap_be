@@ -12,7 +12,7 @@ import os
 import json
 
 from app.database import get_db
-from app.models import Ticket, User, Site, Equipment, WorkOrder, Company
+from app.models import Ticket, User, Site, Equipment, WorkOrder, Company, AddressBook
 from app.schemas import (
     TicketCreate, TicketUpdate, Ticket as TicketSchema,
     TicketList, TicketStatusUpdate, TicketConvertToWorkOrder
@@ -208,13 +208,22 @@ async def create_ticket(
     if ticket_data.priority not in valid_priorities:
         raise HTTPException(status_code=400, detail=f"Invalid priority. Must be one of: {', '.join(valid_priorities)}")
 
-    # Validate site if provided
+    # Validate site if provided - must be linked via address_book
     if ticket_data.site_id:
-        site = db.query(Site).filter(
-            Site.id == ticket_data.site_id,
-            Site.client.has(company_id=current_user.company_id)
-        ).first()
+        site = db.query(Site).filter(Site.id == ticket_data.site_id).first()
         if not site:
+            raise HTTPException(status_code=400, detail="Invalid site")
+
+        # Site must be linked to an address book entry
+        if not site.address_book_id:
+            raise HTTPException(status_code=400, detail="Invalid site - not linked to Address Book")
+
+        # Verify ownership via address_book
+        ab_entry = db.query(AddressBook).filter(
+            AddressBook.id == site.address_book_id,
+            AddressBook.company_id == current_user.company_id
+        ).first()
+        if not ab_entry:
             raise HTTPException(status_code=400, detail="Invalid site")
 
     # Validate equipment if provided
@@ -252,6 +261,11 @@ async def create_ticket(
     db.add(ticket)
     db.commit()
     db.refresh(ticket)
+
+    # Log activity
+    from app.api.ticket_timeline import log_ticket_created
+    log_ticket_created(db, ticket, current_user)
+    db.commit()
 
     # Load relationships
     ticket = db.query(Ticket).options(
@@ -340,6 +354,9 @@ async def update_ticket_status(
     if status_data.status not in valid_statuses:
         raise HTTPException(status_code=400, detail=f"Invalid status. Cannot set to 'converted' directly - use the convert endpoint")
 
+    # Track old status for activity log
+    old_status = ticket.status
+
     # Update status
     ticket.status = status_data.status
     ticket.reviewed_by = current_user.id
@@ -353,6 +370,12 @@ async def update_ticket_status(
 
     db.commit()
     db.refresh(ticket)
+
+    # Log activity
+    from app.api.ticket_timeline import log_status_change
+    notes = status_data.review_notes or status_data.rejection_reason
+    log_status_change(db, ticket, old_status, status_data.status, current_user, notes)
+    db.commit()
 
     # Load relationships
     ticket = db.query(Ticket).options(
@@ -447,6 +470,7 @@ async def convert_ticket_to_work_order(
         work_order.assigned_technicians = technicians
 
     # Update ticket
+    old_status = ticket.status
     ticket.status = "converted"
     ticket.work_order_id = work_order.id
     ticket.converted_at = datetime.utcnow()
@@ -454,6 +478,11 @@ async def convert_ticket_to_work_order(
 
     db.commit()
     db.refresh(ticket)
+
+    # Log activity
+    from app.api.ticket_timeline import log_conversion
+    log_conversion(db, ticket, work_order, current_user)
+    db.commit()
 
     # Load relationships
     ticket = db.query(Ticket).options(

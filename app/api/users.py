@@ -52,6 +52,10 @@ class UserUpdate(BaseModel):
     role: Optional[str] = None
     phone: Optional[str] = None
     is_active: Optional[bool] = None
+    # PR Approval permissions
+    can_approve_pr: Optional[bool] = None
+    approval_limit: Optional[float] = None  # None means unlimited
+    can_convert_po: Optional[bool] = None  # Can convert approved PRs to POs
 
 
 class UserResponse(BaseModel):
@@ -63,6 +67,10 @@ class UserResponse(BaseModel):
     is_active: bool
     created_at: datetime
     updated_at: Optional[datetime]
+    # PR Approval permissions
+    can_approve_pr: bool = False
+    approval_limit: Optional[float] = None  # None means unlimited
+    can_convert_po: bool = False  # Can convert approved PRs to POs
 
     class Config:
         from_attributes = True
@@ -204,6 +212,13 @@ async def update_user(
         target_user.phone = data.phone
     if data.is_active is not None:
         target_user.is_active = data.is_active
+    # PR Approval permissions
+    if data.can_approve_pr is not None:
+        target_user.can_approve_pr = data.can_approve_pr
+    if data.approval_limit is not None:
+        target_user.approval_limit = data.approval_limit
+    if data.can_convert_po is not None:
+        target_user.can_convert_po = data.can_convert_po
 
     db.commit()
     db.refresh(target_user)

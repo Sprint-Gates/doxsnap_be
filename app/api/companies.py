@@ -410,7 +410,7 @@ async def update_my_company(
 @router.get("/companies/stats")
 async def get_company_stats(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Get company statistics"""
-    from app.models import Client, Branch, Project, ProcessedImage
+    from app.models import Client, Site, Project, ProcessedImage, AddressBook
 
     if not user.company_id:
         raise HTTPException(
@@ -427,13 +427,23 @@ async def get_company_stats(user: User = Depends(get_current_user), db: Session 
 
     # Count stats
     total_users = db.query(User).filter(User.company_id == company.id).count()
-    total_clients = db.query(Client).filter(Client.company_id == company.id).count()
 
-    # Count branches through clients
-    total_branches = db.query(Branch).join(Client).filter(Client.company_id == company.id).count()
+    # Count clients from Address Book (search_type='C')
+    total_clients = db.query(AddressBook).filter(
+        AddressBook.company_id == company.id,
+        AddressBook.search_type == 'C'
+    ).count()
 
-    # Count projects through branches and clients
-    total_projects = db.query(Project).join(Branch).join(Client).filter(Client.company_id == company.id).count()
+    # Count sites (now using Sites instead of Branches)
+    # Sites linked to Address Book customers
+    ab_customer_ids = db.query(AddressBook.id).filter(
+        AddressBook.company_id == company.id,
+        AddressBook.search_type == 'C'
+    ).subquery()
+    total_branches = db.query(Site).filter(Site.address_book_id.in_(ab_customer_ids)).count()
+
+    # Count projects through sites
+    total_projects = db.query(Project).join(Site).filter(Site.address_book_id.in_(ab_customer_ids)).count()
 
     # Count invoices for this company's users
     total_invoices = db.query(ProcessedImage).join(User).filter(User.company_id == company.id).count()
@@ -441,7 +451,7 @@ async def get_company_stats(user: User = Depends(get_current_user), db: Session 
     return {
         "total_users": total_users,
         "total_clients": total_clients,
-        "total_branches": total_branches,
+        "total_branches": total_branches,  # Now counts sites
         "total_projects": total_projects,
         "total_invoices": total_invoices,
         "documents_used": company.documents_used_this_month,

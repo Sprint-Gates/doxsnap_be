@@ -43,6 +43,10 @@ class User(UserBase):
     phone: Optional[str] = None
     role: Optional[str] = None
     created_at: datetime
+    # PR Approval permissions
+    can_approve_pr: bool = False
+    approval_limit: Optional[float] = None  # None means unlimited
+    can_convert_po: bool = False  # Can convert approved PRs to POs
 
     class Config:
         from_attributes = True
@@ -56,6 +60,10 @@ class UserInfo(BaseModel):
     role: Optional[str] = None
     is_active: bool
     phone: Optional[str] = None
+    # PR Approval permissions
+    can_approve_pr: bool = False
+    approval_limit: Optional[float] = None  # None means unlimited
+    can_convert_po: bool = False  # Can convert approved PRs to POs
 
 
 class Token(BaseModel):
@@ -192,7 +200,8 @@ class SiteBase(BaseModel):
 
 
 class SiteCreate(SiteBase):
-    client_id: int
+    client_id: Optional[int] = None  # Legacy - use address_book_id for new sites
+    address_book_id: Optional[int] = None  # Link to Address Book customer (search_type='C')
 
 
 class SiteUpdate(BaseModel):
@@ -212,7 +221,8 @@ class SiteUpdate(BaseModel):
 
 class Site(SiteBase):
     id: int
-    client_id: int
+    client_id: Optional[int] = None  # Legacy
+    address_book_id: Optional[int] = None  # New: Address Book customer link
     created_at: datetime
     updated_at: datetime
 
@@ -912,7 +922,7 @@ class Ticket(TicketBase):
     review_notes: Optional[str] = None
     rejection_reason: Optional[str] = None
     internal_notes: Optional[str] = None
-    requested_by: int
+    requested_by: Optional[int] = None
     created_at: datetime
     updated_at: datetime
 
@@ -931,6 +941,49 @@ class TicketList(BaseModel):
     total: int
     page: int
     size: int
+
+
+# ============================================================================
+# Ticket Timeline/Activity Schemas
+# ============================================================================
+
+class TicketNoteCreate(BaseModel):
+    """Schema for creating a manual note"""
+    subject: str = Field(..., min_length=1, max_length=255)
+    description: Optional[str] = None
+
+
+class TicketNoteUpdate(BaseModel):
+    """Schema for updating a note"""
+    subject: Optional[str] = Field(None, min_length=1, max_length=255)
+    description: Optional[str] = None
+
+
+class TimelineActivity(BaseModel):
+    """Single activity/event in the timeline"""
+    id: int
+    activity_type: str
+    subject: str
+    description: Optional[str] = None
+    created_at: datetime
+    created_by_name: Optional[str] = None
+    source: str  # 'ticket' or 'work_order'
+    previous_status: Optional[str] = None
+    new_status: Optional[str] = None
+    extra_data: Optional[dict] = None
+
+    class Config:
+        from_attributes = True
+
+
+class TicketTimeline(BaseModel):
+    """Full timeline response for a ticket"""
+    ticket_id: int
+    ticket_number: str
+    work_order_id: Optional[int] = None
+    work_order_number: Optional[str] = None
+    activities: List[TimelineActivity]
+    total_count: int
 
 
 # ============================================================================
@@ -2468,6 +2521,31 @@ class AddressBookBase(BaseModel):
     email: Optional[EmailStr] = None
     website: Optional[str] = None
 
+    @model_validator(mode='before')
+    @classmethod
+    def convert_empty_strings_to_none(cls, values):
+        """Convert empty strings to None for fields that use validators like EmailStr"""
+        if isinstance(values, dict):
+            # Handle email field - empty string should become None
+            if 'email' in values and values['email'] == '':
+                values['email'] = None
+            # Handle other optional string fields that might have empty strings
+            string_fields = [
+                'mailing_name', 'tax_id', 'registration_number',
+                'address_line_1', 'address_line_2', 'address_line_3', 'address_line_4',
+                'city', 'state', 'postal_code', 'country',
+                'phone_primary', 'phone_secondary', 'fax', 'website',
+                'notes', 'employee_id', 'specialization', 'allowances_notes', 'deductions_notes',
+                'category_code_01', 'category_code_02', 'category_code_03',
+                'category_code_04', 'category_code_05', 'category_code_06',
+                'category_code_07', 'category_code_08', 'category_code_09', 'category_code_10',
+                'salary_type', 'salary_currency'
+            ]
+            for field in string_fields:
+                if field in values and values[field] == '':
+                    values[field] = None
+        return values
+
     # Location (GPS)
     latitude: Optional[float] = None
     longitude: Optional[float] = None
@@ -2592,6 +2670,31 @@ class AddressBookUpdate(BaseModel):
     notes: Optional[str] = None
     is_active: Optional[bool] = None
 
+    @model_validator(mode='before')
+    @classmethod
+    def convert_empty_strings_to_none(cls, values):
+        """Convert empty strings to None for fields that use validators like EmailStr"""
+        if isinstance(values, dict):
+            # Handle email field - empty string should become None
+            if 'email' in values and values['email'] == '':
+                values['email'] = None
+            # Handle other optional string fields that might have empty strings
+            string_fields = [
+                'alpha_name', 'mailing_name', 'tax_id', 'registration_number',
+                'address_line_1', 'address_line_2', 'address_line_3', 'address_line_4',
+                'city', 'state', 'postal_code', 'country',
+                'phone_primary', 'phone_secondary', 'fax', 'website',
+                'notes', 'employee_id', 'specialization', 'allowances_notes', 'deductions_notes',
+                'category_code_01', 'category_code_02', 'category_code_03',
+                'category_code_04', 'category_code_05', 'category_code_06',
+                'category_code_07', 'category_code_08', 'category_code_09', 'category_code_10',
+                'salary_type', 'salary_currency'
+            ]
+            for field in string_fields:
+                if field in values and values[field] == '':
+                    values[field] = None
+        return values
+
 
 class AddressBookBrief(BaseModel):
     """Brief schema for dropdowns and quick references"""
@@ -2655,6 +2758,151 @@ class AddressBookHierarchy(BaseModel):
 class AddressBookList(BaseModel):
     """Paginated list response"""
     entries: List[AddressBookResponse]
+    total: int
+    page: int
+    size: int
+
+
+# =============================================================================
+# CLIENT PORTAL SCHEMAS
+# =============================================================================
+
+class ClientUserBase(BaseModel):
+    """Base schema for client user data"""
+    email: str
+    name: str
+    phone: Optional[str] = None
+
+
+class ClientUserInvite(BaseModel):
+    """Schema for inviting a new client user (admin action)"""
+    email: str
+    name: str
+    address_book_id: int
+    phone: Optional[str] = None
+
+
+class ClientUserAcceptInvitation(BaseModel):
+    """Schema for accepting an invitation and setting password"""
+    invitation_token: str
+    password: str
+
+
+class ClientUserLogin(BaseModel):
+    """Schema for client login"""
+    email: str
+    password: str
+
+
+class ClientUserResponse(ClientUserBase):
+    """Response schema for client user"""
+    id: int
+    company_id: int
+    address_book_id: int
+    is_active: bool
+    invitation_sent_at: Optional[datetime] = None
+    invitation_accepted_at: Optional[datetime] = None
+    created_at: datetime
+    last_login_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class ClientUserWithAddressBook(ClientUserResponse):
+    """Client user with address book details"""
+    address_book_name: Optional[str] = None
+    address_book_number: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class ClientToken(BaseModel):
+    """Token response for client authentication"""
+    access_token: str
+    refresh_token: str
+    token_type: str = "bearer"
+    expires_in: int
+    user: ClientUserResponse
+
+
+class ClientRefreshTokenRequest(BaseModel):
+    """Request to refresh client access token"""
+    refresh_token: str
+
+
+class ClientPasswordResetRequest(BaseModel):
+    """Request password reset"""
+    email: str
+
+
+class ClientPasswordReset(BaseModel):
+    """Reset password with token"""
+    reset_token: str
+    new_password: str
+
+
+class ClientProfileUpdate(BaseModel):
+    """Update client profile"""
+    name: Optional[str] = None
+    phone: Optional[str] = None
+
+
+class ClientPasswordChange(BaseModel):
+    """Change password (requires current password)"""
+    current_password: str
+    new_password: str
+
+
+class ClientUserList(BaseModel):
+    """Paginated list of client users for admin"""
+    users: List[ClientUserWithAddressBook]
+    total: int
+    page: int
+    size: int
+
+
+class ClientDashboard(BaseModel):
+    """Dashboard summary for client portal"""
+    total_sites: int
+    total_tickets: int
+    open_tickets: int
+    pending_work_orders: int
+    completed_work_orders: int
+    recent_tickets: List[dict] = []
+    upcoming_work_orders: List[dict] = []
+
+
+class ClientTicketCreate(BaseModel):
+    """Schema for client creating a ticket"""
+    site_id: int
+    service_id: Optional[int] = None
+    priority: Optional[str] = "Medium"
+    description: str
+    contact_name: Optional[str] = None
+    contact_phone: Optional[str] = None
+    contact_email: Optional[str] = None
+
+
+class ClientWorkOrderBrief(BaseModel):
+    """Limited work order info for client view"""
+    id: int
+    wo_number: str
+    status: str
+    scheduled_date: Optional[datetime] = None
+    completed_date: Optional[datetime] = None
+    technician_name: Optional[str] = None
+    completion_notes: Optional[str] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class ClientWorkOrderList(BaseModel):
+    """Paginated list of work orders for client"""
+    work_orders: List[ClientWorkOrderBrief]
     total: int
     page: int
     size: int

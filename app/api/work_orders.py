@@ -19,7 +19,7 @@ from app.database import get_db
 from app.models import (
     User, WorkOrder, WorkOrderTimeEntry, WorkOrderChecklistItem, WorkOrderSnapshot,
     WorkOrderCompletion, Technician, Equipment, SubEquipment,
-    Branch, Floor, Room, Project, work_order_technicians, work_order_technicians_ab,
+    Site, Floor, Room, Project, work_order_technicians, work_order_technicians_ab,
     HandHeldDevice, ItemMaster, ItemStock, ItemLedger, Account, AddressBook, Company
 )
 from app.services.journal_posting import JournalPostingService

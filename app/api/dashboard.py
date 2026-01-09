@@ -10,7 +10,7 @@ from decimal import Decimal
 
 from app.database import get_db
 from app.models import (
-    User, WorkOrder, Technician, WorkOrderTimeEntry, Branch,
+    User, WorkOrder, Technician, WorkOrderTimeEntry, Site,
     work_order_technicians, WorkOrderSparePart, Contract, Client,
     AddressBook, ProcessedImage, ItemMaster, ItemStock, ItemTransfer,
     ItemLedger, Warehouse, PettyCashFund, PettyCashTransaction
@@ -228,21 +228,23 @@ async def get_accounting_dashboard(
     ).first()
 
     # ===== REVENUE BY CLIENT (TOP 5) =====
+    # Join through Site->AddressBook to get client info
     revenue_by_client = db.query(
-        Client.id,
-        Client.name,
+        AddressBook.id,
+        AddressBook.alpha_name.label('name'),
         func.count(WorkOrder.id).label('work_order_count'),
         func.coalesce(func.sum(WorkOrder.billable_amount), 0).label('total_revenue')
     ).join(
-        Branch, Branch.id == WorkOrder.branch_id
+        Site, Site.id == WorkOrder.site_id
     ).join(
-        Client, Client.id == Branch.client_id
+        AddressBook, AddressBook.id == Site.address_book_id
     ).filter(
         WorkOrder.company_id == company_id,
         WorkOrder.is_billable == True,
         WorkOrder.created_at >= start_date,
-        WorkOrder.created_at < end_date
-    ).group_by(Client.id, Client.name).order_by(
+        WorkOrder.created_at < end_date,
+        Site.address_book_id.isnot(None)  # Only count work orders with linked sites
+    ).group_by(AddressBook.id, AddressBook.alpha_name).order_by(
         func.sum(WorkOrder.billable_amount).desc()
     ).limit(5).all()
 

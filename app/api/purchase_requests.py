@@ -116,6 +116,48 @@ def require_admin(user: User = Depends(get_current_user)):
     return user
 
 
+def can_approve_pr(user: User, pr_amount: Decimal) -> tuple[bool, str]:
+    """
+    Check if a user can approve a PR of the given amount.
+    Returns (can_approve, reason) tuple.
+
+    Approval rules:
+    1. User must have can_approve_pr = True
+    2. PR amount must be within user's approval_limit (NULL = unlimited)
+    3. Self-approval is allowed (per business requirement)
+    """
+    # Check if user has approval permission
+    if not user.can_approve_pr:
+        return False, "You do not have PR approval permission. Contact an administrator."
+
+    # Check approval limit (NULL = unlimited)
+    if user.approval_limit is not None:
+        if pr_amount > user.approval_limit:
+            return False, f"This PR amount ({pr_amount:,.2f}) exceeds your approval limit ({user.approval_limit:,.2f})."
+
+    return True, "Approved"
+
+
+def require_pr_approver(user: User = Depends(get_current_user)):
+    """Require user to have PR approval permission"""
+    if not user.can_approve_pr:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to approve purchase requests"
+        )
+    return user
+
+
+def require_po_converter(user: User = Depends(get_current_user)):
+    """Require user to have PO conversion permission (admin or can_convert_po)"""
+    if user.role != "admin" and not user.can_convert_po:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to convert PRs to Purchase Orders"
+        )
+    return user
+
+
 def generate_pr_number(db: Session, company_id: int) -> str:
     """Generate next PR number: PR-YYYY-NNNNN"""
     year = datetime.now().year
@@ -568,9 +610,9 @@ async def approve_purchase_request(
     pr_id: int,
     approval_data: PurchaseRequestApproval,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin)
+    current_user: User = Depends(get_current_user)
 ):
-    """Approve a purchase request"""
+    """Approve a purchase request (requires approval permission and sufficient limit)"""
     pr = db.query(PurchaseRequest).filter(
         PurchaseRequest.id == pr_id,
         PurchaseRequest.company_id == current_user.company_id
@@ -581,6 +623,12 @@ async def approve_purchase_request(
 
     if pr.status != 'submitted':
         raise HTTPException(status_code=400, detail="Can only approve submitted purchase requests")
+
+    # Check if user can approve this PR amount
+    pr_amount = Decimal(str(pr.estimated_total or 0))
+    can_approve, reason = can_approve_pr(current_user, pr_amount)
+    if not can_approve:
+        raise HTTPException(status_code=403, detail=reason)
 
     # Apply line approvals if provided
     if approval_data.line_approvals:
@@ -606,7 +654,7 @@ async def approve_purchase_request(
     db.commit()
     db.refresh(pr)
 
-    logger.info(f"Purchase request approved: {pr.pr_number}")
+    logger.info(f"Purchase request approved: {pr.pr_number} by user {current_user.id} (limit: {current_user.approval_limit})")
     return pr
 
 
@@ -615,9 +663,9 @@ async def reject_purchase_request(
     pr_id: int,
     rejection_data: PurchaseRequestRejection,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin)
+    current_user: User = Depends(require_pr_approver)
 ):
-    """Reject a purchase request"""
+    """Reject a purchase request (requires approval permission)"""
     pr = db.query(PurchaseRequest).filter(
         PurchaseRequest.id == pr_id,
         PurchaseRequest.company_id == current_user.company_id
@@ -637,7 +685,7 @@ async def reject_purchase_request(
     db.commit()
     db.refresh(pr)
 
-    logger.info(f"Purchase request rejected: {pr.pr_number}")
+    logger.info(f"Purchase request rejected: {pr.pr_number} by user {current_user.id}")
     return pr
 
 
@@ -646,9 +694,9 @@ async def convert_pr_to_po(
     pr_id: int,
     convert_data: ConvertToPORequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin)
+    current_user: User = Depends(require_po_converter)
 ):
-    """Convert an approved purchase request to a purchase order"""
+    """Convert an approved purchase request to a purchase order (requires admin or can_convert_po permission)"""
     from app.api.purchase_orders import generate_po_number
 
     pr = db.query(PurchaseRequest).filter(

@@ -3,7 +3,8 @@ from sqlalchemy.orm import relationship, backref
 from sqlalchemy.sql import func
 from app.database import Base
 
-# Association table for Operator-Branch many-to-many relationship
+# DEPRECATED: Association table for Operator-Branch - Use operator_sites instead
+# Keeping table definition to avoid migration issues with existing data
 operator_branches = Table(
     'operator_branches',
     Base.metadata,
@@ -144,12 +145,15 @@ class Client(Base):
 
     # Relationships
     company = relationship("Company", back_populates="clients")
-    branches = relationship("Branch", back_populates="client")
+    # DEPRECATED: branches relationship - use Sites instead
+    # branches = relationship("Branch", back_populates="client")
     address_book = relationship("AddressBook", backref="client")
 
 
+# DEPRECATED: Branch model - Use Site model instead
+# Keeping model definition to avoid migration issues with existing data
 class Branch(Base):
-    """Branch/Location of a client"""
+    """DEPRECATED: Branch/Location of a client - Use Site instead"""
     __tablename__ = "branches"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -170,11 +174,11 @@ class Branch(Base):
     # Address Book link (for transition to Address Book as master data)
     address_book_id = Column(Integer, ForeignKey("address_book.id"), nullable=True)
 
-    # Relationships
-    client = relationship("Client", back_populates="branches")
+    # Relationships - DEPRECATED
+    client = relationship("Client")
     address_book = relationship("AddressBook", foreign_keys=[address_book_id])
-    operators = relationship("User", secondary=operator_branches, back_populates="assigned_branches")
-    floors = relationship("Floor", back_populates="branch")
+    # operators = relationship("User", secondary=operator_branches, back_populates="assigned_branches")  # Use operator_sites
+    # floors = relationship("Floor", back_populates="branch")  # Use Floor.site instead
 
 class Project(Base):
     """Project under a site"""
@@ -215,8 +219,13 @@ class User(Base):
 
     # Multi-tenant fields
     company_id = Column(Integer, ForeignKey("companies.id"), nullable=True)
-    role = Column(String, default="admin")  # admin, operator, accounting
+    role = Column(String, default="admin")  # admin, operator, accounting, approver
     phone = Column(String, nullable=True)
+
+    # PR Approval settings
+    can_approve_pr = Column(Boolean, default=False)  # Can this user approve purchase requests?
+    approval_limit = Column(Numeric(15, 2), nullable=True)  # Max amount user can approve (NULL = unlimited for admins)
+    can_convert_po = Column(Boolean, default=False)  # Can this user convert approved PRs to Purchase Orders?
 
     # Link to Address Book employee record (search_type='E')
     # This allows users to have associated petty cash funds, attendance, etc.
@@ -228,7 +237,8 @@ class User(Base):
     # Relationships
     company = relationship("Company", back_populates="users")
     processed_images = relationship("ProcessedImage", back_populates="user")
-    assigned_branches = relationship("Branch", secondary=operator_branches, back_populates="operators")
+    # DEPRECATED: Use assigned_sites via operator_sites table instead
+    # assigned_branches = relationship("Branch", secondary=operator_branches, back_populates="operators")
     address_book = relationship("AddressBook", foreign_keys=[address_book_id], backref="user_account")
 
 
@@ -474,11 +484,11 @@ class HandHeldDevice(Base):
 
 
 class Floor(Base):
-    """Floor within a building for asset capturing"""
+    """Floor within a building/site for asset capturing"""
     __tablename__ = "floors"
 
     id = Column(Integer, primary_key=True, index=True)
-    branch_id = Column(Integer, ForeignKey("branches.id"), nullable=True)  # Legacy field
+    site_id = Column(Integer, ForeignKey("sites.id"), nullable=True)  # Direct link to Site
     building_id = Column(Integer, ForeignKey("buildings.id"), nullable=True)
     name = Column(String, nullable=False)  # e.g., "Ground Floor", "Floor 1", "Basement"
     code = Column(String, nullable=True)  # e.g., "GF", "F1", "B1"
@@ -490,7 +500,7 @@ class Floor(Base):
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
 
     # Relationships
-    branch = relationship("Branch", back_populates="floors")
+    site = relationship("Site", back_populates="floors")
     building = relationship("Building", back_populates="floors")
     rooms = relationship("Room", back_populates="floor", cascade="all, delete-orphan")
     units = relationship("Unit", back_populates="floor", cascade="all, delete-orphan")
@@ -1645,7 +1655,7 @@ class Site(Base):
     __tablename__ = "sites"
 
     id = Column(Integer, primary_key=True, index=True)
-    client_id = Column(Integer, ForeignKey("clients.id"), nullable=False)
+    client_id = Column(Integer, ForeignKey("clients.id"), nullable=True)  # Legacy - use address_book_id for new sites
     name = Column(String, nullable=False)
     code = Column(String, nullable=True, index=True)  # Site code for reference
     address = Column(Text, nullable=True)
@@ -1670,6 +1680,7 @@ class Site(Base):
     blocks = relationship("Block", back_populates="site", cascade="all, delete-orphan")
     buildings = relationship("Building", back_populates="site", cascade="all, delete-orphan")
     spaces = relationship("Space", back_populates="site", cascade="all, delete-orphan")
+    floors = relationship("Floor", back_populates="site", cascade="all, delete-orphan")  # Direct floor relationship for assets
     operators = relationship("User", secondary=operator_sites, backref="assigned_sites")
     contracts = relationship("Contract", secondary=contract_sites, back_populates="sites")
     projects = relationship("Project", back_populates="site", cascade="all, delete-orphan")
@@ -1948,7 +1959,7 @@ class Ticket(Base):
     equipment_id = Column(Integer, ForeignKey("equipment.id"), nullable=True)
 
     # Requester info
-    requested_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    requested_by = Column(Integer, ForeignKey("users.id"), nullable=True)  # Null for client portal submissions
     requester_name = Column(String(200), nullable=True)  # Can be different from logged-in user
     requester_email = Column(String(200), nullable=True)
     requester_phone = Column(String(50), nullable=True)
@@ -1974,6 +1985,15 @@ class Ticket(Base):
     # Internal notes (for admins)
     internal_notes = Column(Text, nullable=True)
 
+    # Source tracking (where the ticket was submitted from)
+    source = Column(String(50), default="admin_portal")  # admin_portal, client_portal, email, api
+
+    # Client portal user reference (if submitted via client portal)
+    client_user_id = Column(Integer, ForeignKey("client_users.id"), nullable=True)
+
+    # Service reference (optional, for categorization)
+    service_id = Column(Integer, ForeignKey("services.id"), nullable=True)
+
     # Audit
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
@@ -1989,6 +2009,49 @@ class Ticket(Base):
     converter = relationship("User", foreign_keys=[converted_by])
     reviewer = relationship("User", foreign_keys=[reviewed_by])
     work_order = relationship("WorkOrder", backref="source_ticket")
+    client_user = relationship("ClientUser", backref="tickets")
+    service = relationship("Service", backref="tickets")
+
+
+class TicketActivity(Base):
+    """
+    Activity/Timeline entry for a Ticket/Service Request.
+    Tracks ticket lifecycle events and user-added notes.
+    """
+    __tablename__ = "ticket_activities"
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+    ticket_id = Column(Integer, ForeignKey("tickets.id", ondelete="CASCADE"), nullable=False, index=True)
+
+    # Activity type: ticket_created, status_changed, approved, rejected, converted, note
+    activity_type = Column(String(50), nullable=False)
+
+    # Content
+    subject = Column(String(255), nullable=False)
+    description = Column(Text, nullable=True)
+
+    # Status change tracking
+    previous_status = Column(String(50), nullable=True)
+    new_status = Column(String(50), nullable=True)
+
+    # Flexible metadata (JSON for additional data like rejection_reason, work_order_id, etc.)
+    extra_data = Column(Text, nullable=True)
+
+    # Audit
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=func.now(), index=True)
+
+    # Soft delete for notes
+    is_deleted = Column(Boolean, default=False)
+    deleted_at = Column(DateTime, nullable=True)
+    deleted_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+
+    # Relationships
+    company = relationship("Company")
+    ticket = relationship("Ticket", backref="activities")
+    creator = relationship("User", foreign_keys=[created_by])
+    deleter = relationship("User", foreign_keys=[deleted_by])
 
 
 # ============================================================================
@@ -2134,10 +2197,10 @@ class ConditionReport(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
-    client_id = Column(Integer, ForeignKey("clients.id"), nullable=False)
+    client_id = Column(Integer, ForeignKey("clients.id"), nullable=True)  # Legacy: Can be null if using address_book_id
 
     # Address Book link (for transition to Address Book as master data)
-    address_book_id = Column(Integer, ForeignKey("address_book.id"), nullable=True)
+    address_book_id = Column(Integer, ForeignKey("address_book.id"), nullable=True)  # New: Use this for customers
 
     # Report details
     report_number = Column(String, nullable=True, index=True)  # Auto-generated: CR-YYYYMMDD-XXX
@@ -4998,3 +5061,88 @@ class VehicleFuelLog(Base):
     vehicle = relationship("Vehicle", back_populates="fuel_records")
     driver = relationship("AddressBook", foreign_keys=[driver_id])
     creator = relationship("User", foreign_keys=[created_by])
+
+
+# =============================================================================
+# CLIENT PORTAL MODELS
+# =============================================================================
+
+class Service(Base):
+    """
+    Service types available for client portal ticket submission.
+    Examples: HVAC Repair, Electrical, Plumbing, General Maintenance, etc.
+    """
+    __tablename__ = "services"
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+    name = Column(String(255), nullable=False)
+    description = Column(Text, nullable=True)
+    is_active = Column(Boolean, default=True)
+    display_order = Column(Integer, default=0)  # For ordering in dropdowns
+
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    # Relationships
+    company = relationship("Company", backref="services")
+
+    __table_args__ = (
+        UniqueConstraint('company_id', 'name', name='uq_service_name_per_company'),
+    )
+
+
+class ClientUser(Base):
+    """
+    Client Portal User - Separate from internal Users, linked to AddressBook Customer/Branch.
+    Clients can submit tickets and view work orders for their accessible sites.
+    """
+    __tablename__ = "client_users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+    address_book_id = Column(Integer, ForeignKey("address_book.id"), nullable=False)  # Customer (C) or Branch (CB)
+    email = Column(String(255), unique=True, nullable=False, index=True)
+    name = Column(String(255), nullable=False)
+    phone = Column(String(50), nullable=True)
+    hashed_password = Column(String(255), nullable=True)  # Null until invitation accepted
+    is_active = Column(Boolean, default=True)
+
+    # Invitation tracking
+    invitation_token = Column(String(255), nullable=True, index=True)
+    invitation_sent_at = Column(DateTime, nullable=True)
+    invitation_accepted_at = Column(DateTime, nullable=True)
+    invited_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+
+    # Password reset
+    reset_token = Column(String(255), nullable=True)
+    reset_token_expires_at = Column(DateTime, nullable=True)
+
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+    last_login_at = Column(DateTime, nullable=True)
+
+    # Relationships
+    company = relationship("Company", backref="client_users")
+    address_book = relationship("AddressBook", backref="client_user")
+    inviter = relationship("User", foreign_keys=[invited_by])
+
+    __table_args__ = (
+        UniqueConstraint('company_id', 'email', name='uq_client_user_email_per_company'),
+    )
+
+
+class ClientRefreshToken(Base):
+    """Refresh tokens for Client Portal authentication"""
+    __tablename__ = "client_refresh_tokens"
+
+    id = Column(Integer, primary_key=True, index=True)
+    client_user_id = Column(Integer, ForeignKey("client_users.id", ondelete="CASCADE"), nullable=False)
+    token = Column(String(255), unique=True, nullable=False, index=True)
+    expires_at = Column(DateTime, nullable=False)
+    is_revoked = Column(Boolean, default=False)
+    revoked_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=func.now())
+
+    # Relationships
+    client_user = relationship("ClientUser", backref="refresh_tokens")

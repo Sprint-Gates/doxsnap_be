@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from typing import Optional, List
 from datetime import date
 from app.database import get_db
-from app.models import User, Branch, Client, Floor, Room, Equipment, SubEquipment, HandHeldDevice
+from app.models import User, Site, AddressBook, Floor, Room, Equipment, SubEquipment, HandHeldDevice
 import os
 from app.utils.security import verify_token
 from jose import jwt
@@ -126,7 +126,7 @@ def require_admin(user: User = Depends(get_current_user)):
 # ============================================================================
 
 class FloorCreate(BaseModel):
-    branch_id: int
+    site_id: int
     name: str
     code: Optional[str] = None
     level: Optional[int] = 0
@@ -243,20 +243,29 @@ class SubEquipmentUpdate(BaseModel):
 # Helper Functions
 # ============================================================================
 
-def verify_branch_access(branch_id: int, auth_context, db: Session) -> Branch:
-    """Verify user/HHD has access to the branch"""
-    branch = db.query(Branch).join(Client).filter(
-        Branch.id == branch_id,
-        Client.company_id == auth_context.company_id
-    ).first()
+def verify_site_access(site_id: int, auth_context, db: Session) -> Site:
+    """Verify user/HHD has access to the site"""
+    site = db.query(Site).filter(Site.id == site_id).first()
 
-    if not branch:
+    if not site:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Branch not found"
+            detail="Site not found"
         )
 
-    return branch
+    # Verify site belongs to company (via address_book_id)
+    if site.address_book_id:
+        ab_entry = db.query(AddressBook).filter(
+            AddressBook.id == site.address_book_id,
+            AddressBook.company_id == auth_context.company_id
+        ).first()
+        if not ab_entry:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Site not found"
+            )
+
+    return site
 
 
 def sub_equipment_to_response(sub: SubEquipment) -> dict:
@@ -359,7 +368,7 @@ def room_to_response(room: Room, include_children: bool = False) -> dict:
 def floor_to_response(floor: Floor, include_children: bool = False) -> dict:
     result = {
         "id": floor.id,
-        "branch_id": floor.branch_id,
+        "site_id": floor.site_id,
         "name": floor.name,
         "code": floor.code,
         "level": floor.level,
@@ -383,42 +392,49 @@ def floor_to_response(floor: Floor, include_children: bool = False) -> dict:
 # Asset Tree Endpoint - Get Full Hierarchy
 # ============================================================================
 
-@router.get("/branches/{branch_id}/assets")
-async def get_branch_assets(
-    branch_id: int,
+@router.get("/sites/{site_id}/assets")
+async def get_site_assets(
+    site_id: int,
     include_inactive: bool = False,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Get complete asset tree for a branch"""
-    branch = verify_branch_access(branch_id, user, db)
+    """Get complete asset tree for a site"""
+    site = verify_site_access(site_id, user, db)
 
-    query = db.query(Floor).filter(Floor.branch_id == branch_id)
+    query = db.query(Floor).filter(Floor.site_id == site_id)
     if not include_inactive:
         query = query.filter(Floor.is_active == True)
 
     floors = query.order_by(Floor.level).all()
 
+    # Get client name from address book
+    client_name = None
+    if site.address_book_id:
+        ab_entry = db.query(AddressBook).filter(AddressBook.id == site.address_book_id).first()
+        if ab_entry:
+            client_name = ab_entry.alpha_name
+
     return {
-        "branch_id": branch.id,
-        "branch_name": branch.name,
-        "client_id": branch.client_id,
-        "client_name": branch.client.name if branch.client else None,
+        "site_id": site.id,
+        "site_name": site.name,
+        "client_id": site.address_book_id,
+        "client_name": client_name,
         "floors": [floor_to_response(f, include_children=True) for f in floors]
     }
 
 
-@router.get("/branches/{branch_id}/assets/summary")
-async def get_branch_assets_summary(
-    branch_id: int,
+@router.get("/sites/{site_id}/assets/summary")
+async def get_site_assets_summary(
+    site_id: int,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Get asset summary/counts for a branch"""
-    branch = verify_branch_access(branch_id, user, db)
+    """Get asset summary/counts for a site"""
+    site = verify_site_access(site_id, user, db)
 
     floors = db.query(Floor).filter(
-        Floor.branch_id == branch_id,
+        Floor.site_id == site_id,
         Floor.is_active == True
     ).all()
 
@@ -456,8 +472,8 @@ async def get_branch_assets_summary(
                                 total_sub_equipment += 1
 
     return {
-        "branch_id": branch.id,
-        "branch_name": branch.name,
+        "site_id": site.id,
+        "site_name": site.name,
         "floors_count": len(floors),
         "rooms_count": total_rooms,
         "equipment_count": total_equipment,
@@ -473,15 +489,15 @@ async def get_branch_assets_summary(
 
 @router.get("/floors/")
 async def get_floors(
-    branch_id: int,
+    site_id: int,
     include_inactive: bool = False,
     auth_context = Depends(get_current_user_or_hhd),
     db: Session = Depends(get_db)
 ):
-    """Get all floors for a branch (supports both admin and HHD authentication)"""
-    verify_branch_access(branch_id, auth_context, db)
+    """Get all floors for a site (supports both admin and HHD authentication)"""
+    verify_site_access(site_id, auth_context, db)
 
-    query = db.query(Floor).filter(Floor.branch_id == branch_id)
+    query = db.query(Floor).filter(Floor.site_id == site_id)
     if not include_inactive:
         query = query.filter(Floor.is_active == True)
 
@@ -500,7 +516,7 @@ async def get_floor(
     if not floor:
         raise HTTPException(status_code=404, detail="Floor not found")
 
-    verify_branch_access(floor.branch_id, auth_context, db)
+    verify_site_access(floor.site_id, auth_context, db)
     return floor_to_response(floor, include_children=True)
 
 
@@ -511,10 +527,10 @@ async def create_floor(
     db: Session = Depends(get_db)
 ):
     """Create a new floor"""
-    verify_branch_access(data.branch_id, user, db)
+    verify_site_access(data.site_id, user, db)
 
     floor = Floor(
-        branch_id=data.branch_id,
+        site_id=data.site_id,
         name=data.name,
         code=data.code,
         level=data.level or 0,
@@ -542,7 +558,7 @@ async def update_floor(
     if not floor:
         raise HTTPException(status_code=404, detail="Floor not found")
 
-    verify_branch_access(floor.branch_id, user, db)
+    verify_site_access(floor.site_id, user, db)
 
     update_data = data.dict(exclude_unset=True)
     for field, value in update_data.items():
@@ -566,7 +582,7 @@ async def delete_floor(
     if not floor:
         raise HTTPException(status_code=404, detail="Floor not found")
 
-    verify_branch_access(floor.branch_id, user, db)
+    verify_site_access(floor.site_id, user, db)
 
     floor.is_active = False
     db.commit()
@@ -591,7 +607,7 @@ async def get_rooms(
     if not floor:
         raise HTTPException(status_code=404, detail="Floor not found")
 
-    verify_branch_access(floor.branch_id, auth_context, db)
+    verify_site_access(floor.site_id, auth_context, db)
 
     query = db.query(Room).filter(Room.floor_id == floor_id)
     if not include_inactive:
@@ -612,7 +628,7 @@ async def get_room(
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
 
-    verify_branch_access(room.floor.branch_id, auth_context, db)
+    verify_site_access(room.floor.site_id, auth_context, db)
     return room_to_response(room, include_children=True)
 
 
@@ -627,7 +643,7 @@ async def create_room(
     if not floor:
         raise HTTPException(status_code=404, detail="Floor not found")
 
-    verify_branch_access(floor.branch_id, user, db)
+    verify_site_access(floor.site_id, user, db)
 
     room = Room(
         floor_id=data.floor_id,
@@ -659,7 +675,7 @@ async def update_room(
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
 
-    verify_branch_access(room.floor.branch_id, user, db)
+    verify_site_access(room.floor.site_id, user, db)
 
     update_data = data.dict(exclude_unset=True)
     for field, value in update_data.items():
@@ -683,7 +699,7 @@ async def delete_room(
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
 
-    verify_branch_access(room.floor.branch_id, user, db)
+    verify_site_access(room.floor.site_id, user, db)
 
     room.is_active = False
     db.commit()
@@ -699,7 +715,7 @@ async def delete_room(
 @router.get("/equipment/")
 async def get_equipment(
     room_id: Optional[int] = None,
-    branch_id: Optional[int] = None,
+    site_id: Optional[int] = None,
     category: Optional[str] = None,
     status: Optional[str] = None,
     include_inactive: bool = False,
@@ -714,15 +730,19 @@ async def get_equipment(
         room = db.query(Room).filter(Room.id == room_id).first()
         if not room:
             raise HTTPException(status_code=404, detail="Room not found")
-        verify_branch_access(room.floor.branch_id, auth_context, db)
+        verify_site_access(room.floor.site_id, auth_context, db)
         query = db.query(Equipment).filter(Equipment.room_id == room_id)
-    elif branch_id:
-        verify_branch_access(branch_id, auth_context, db)
-        query = db.query(Equipment).join(Room).join(Floor).filter(Floor.branch_id == branch_id)
+    elif site_id:
+        verify_site_access(site_id, auth_context, db)
+        query = db.query(Equipment).join(Room).join(Floor).filter(Floor.site_id == site_id)
     else:
-        # Get all equipment for company
-        query = db.query(Equipment).join(Room).join(Floor).join(Branch).join(Client).filter(
-            Client.company_id == auth_context.company_id
+        # Get all equipment for company via sites linked to address book
+        ab_customer_ids = db.query(AddressBook.id).filter(
+            AddressBook.company_id == auth_context.company_id,
+            AddressBook.search_type == 'C'
+        ).subquery()
+        query = db.query(Equipment).join(Room).join(Floor).join(Site).filter(
+            Site.address_book_id.in_(ab_customer_ids)
         )
 
     if not include_inactive:
@@ -749,7 +769,7 @@ async def get_equipment_item(
     if not equip:
         raise HTTPException(status_code=404, detail="Equipment not found")
 
-    verify_branch_access(equip.room.floor.branch_id, auth_context, db)
+    verify_site_access(equip.room.floor.site_id, auth_context, db)
     return equipment_to_response(equip, include_children=True)
 
 
@@ -764,7 +784,7 @@ async def create_equipment(
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
 
-    verify_branch_access(room.floor.branch_id, user, db)
+    verify_site_access(room.floor.site_id, user, db)
 
     # Validate category
     valid_categories = ["electrical", "mechanical", "plumbing", "hvac", "furniture", "building", "fire_safety", "other"]
@@ -815,7 +835,7 @@ async def update_equipment(
     if not equip:
         raise HTTPException(status_code=404, detail="Equipment not found")
 
-    verify_branch_access(equip.room.floor.branch_id, user, db)
+    verify_site_access(equip.room.floor.site_id, user, db)
 
     valid_categories = ["electrical", "mechanical", "plumbing", "hvac", "furniture", "building", "fire_safety", "other"]
     if data.category and data.category not in valid_categories:
@@ -846,7 +866,7 @@ async def delete_equipment(
     if not equip:
         raise HTTPException(status_code=404, detail="Equipment not found")
 
-    verify_branch_access(equip.room.floor.branch_id, user, db)
+    verify_site_access(equip.room.floor.site_id, user, db)
 
     equip.is_active = False
     equip.status = "retired"
@@ -872,7 +892,7 @@ async def get_sub_equipment(
     if not equip:
         raise HTTPException(status_code=404, detail="Equipment not found")
 
-    verify_branch_access(equip.room.floor.branch_id, user, db)
+    verify_site_access(equip.room.floor.site_id, user, db)
 
     query = db.query(SubEquipment).filter(SubEquipment.equipment_id == equipment_id)
     if not include_inactive:
@@ -893,7 +913,7 @@ async def get_sub_equipment_item(
     if not sub:
         raise HTTPException(status_code=404, detail="Sub-equipment not found")
 
-    verify_branch_access(sub.parent_equipment.room.floor.branch_id, user, db)
+    verify_site_access(sub.parent_equipment.room.floor.site_id, user, db)
     return sub_equipment_to_response(sub)
 
 
@@ -908,7 +928,7 @@ async def create_sub_equipment(
     if not equip:
         raise HTTPException(status_code=404, detail="Equipment not found")
 
-    verify_branch_access(equip.room.floor.branch_id, user, db)
+    verify_site_access(equip.room.floor.site_id, user, db)
 
     sub = SubEquipment(
         equipment_id=data.equipment_id,
@@ -947,7 +967,7 @@ async def update_sub_equipment(
     if not sub:
         raise HTTPException(status_code=404, detail="Sub-equipment not found")
 
-    verify_branch_access(sub.parent_equipment.room.floor.branch_id, user, db)
+    verify_site_access(sub.parent_equipment.room.floor.site_id, user, db)
 
     update_data = data.dict(exclude_unset=True)
     for field, value in update_data.items():
@@ -971,7 +991,7 @@ async def delete_sub_equipment(
     if not sub:
         raise HTTPException(status_code=404, detail="Sub-equipment not found")
 
-    verify_branch_access(sub.parent_equipment.room.floor.branch_id, user, db)
+    verify_site_access(sub.parent_equipment.room.floor.site_id, user, db)
 
     sub.is_active = False
     sub.status = "retired"
@@ -982,7 +1002,8 @@ async def delete_sub_equipment(
 
 
 # ============================================================================
-# Bulk Import
+# Bulk Import (DEPRECATED - Uses legacy Branch model)
+# This endpoint needs to be updated to use Sites instead of Branches
 # ============================================================================
 
 @router.post("/bulk-import")
@@ -990,6 +1011,16 @@ async def bulk_import_assets(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
+    """
+    DEPRECATED: This bulk import endpoint uses the legacy Branch model.
+    Please use the new Sites-based import or create assets through the UI.
+    """
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail="This bulk import endpoint is deprecated. Please use Sites-based asset creation."
+    )
+
+    # Legacy code kept for reference - DO NOT USE
     """
     Bulk import assets from misc/assets-mmg.xlsx and misc/client-branch-mmg.xlsx.
     Creates clients, branches, floors, rooms, and equipment.

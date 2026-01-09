@@ -8,9 +8,9 @@ import os
 import logging
 import google.generativeai as genai
 
-from app.api import auth, images, otp, admin, document_types, technician_site_shifts, plans, companies, branches, projects, operators, handheld_devices, assets, attendance, work_orders, warehouses, pm_checklists, pm_work_orders, dashboard, item_master, cycle_count, hhd_auth, users, sites, contracts, tickets, calendar, condition_reports, technician_evaluations, nps, petty_cash, docs, allocations, accounting, exchange_rates, purchase_requests, purchase_orders, goods_receipts, crm_leads, crm_opportunities, crm_activities, crm_campaigns, tools, disposals, business_units, address_book, clients, supplier_invoices, supplier_payments, technicians, import_export, fleet
+from app.api import auth, images, otp, admin, document_types, technician_site_shifts, plans, companies, projects, operators, handheld_devices, assets, attendance, work_orders, warehouses, pm_checklists, pm_work_orders, dashboard, item_master, cycle_count, hhd_auth, users, sites, contracts, tickets, ticket_timeline, calendar, condition_reports, technician_evaluations, nps, petty_cash, docs, allocations, accounting, exchange_rates, purchase_requests, purchase_orders, goods_receipts, crm_leads, crm_opportunities, crm_activities, crm_campaigns, tools, disposals, business_units, address_book, supplier_invoices, supplier_payments, technicians, import_export, fleet, client_portal, client_admin
 from app.database import engine, get_db
-from app.models import Base, User, ProcessedImage, DocumentType, Warehouse, Plan, Company, Client, Branch, Project, Technician, HandHeldDevice, Floor, Room, Equipment, SubEquipment, TechnicianAttendance, SparePart, WorkOrder, WorkOrderSparePart, WorkOrderTimeEntry, PMSchedule, ItemCategory, ItemMaster, ItemStock, ItemLedger, ItemTransfer, ItemTransferLine, InvoiceItem, CycleCount, CycleCountItem, RefreshToken, Site, Building, Space, Scope, Contract, ContractScope, Ticket, CalendarSlot, WorkOrderSlotAssignment, CalendarTemplate, InvoiceAllocation, AllocationPeriod, RecognitionLog, AccountType, Account, FiscalPeriod, JournalEntry, JournalEntryLine, AccountBalance, DefaultAccountMapping, ExchangeRate, ExchangeRateLog, PurchaseRequest, PurchaseRequestLine, PurchaseOrder, PurchaseOrderLine, PurchaseOrderInvoice, GoodsReceipt, GoodsReceiptLine, LeadSource, PipelineStage, Lead, Opportunity, CRMActivity, Campaign, CampaignLead, ToolCategory, Tool, ToolPurchase, ToolPurchaseLine, ToolAllocationHistory, Disposal, DisposalToolLine, DisposalItemLine, BusinessUnit, AddressBook, AddressBookContact, SupplierInvoice, SupplierInvoiceLine, SupplierPayment, SupplierPaymentAllocation, DebitNote, DebitNoteLine, PurchaseOrderAmendment
+from app.models import Base, User, ProcessedImage, DocumentType, Warehouse, Plan, Company, Client, Project, Technician, HandHeldDevice, Floor, Room, Equipment, SubEquipment, TechnicianAttendance, SparePart, WorkOrder, WorkOrderSparePart, WorkOrderTimeEntry, PMSchedule, ItemCategory, ItemMaster, ItemStock, ItemLedger, ItemTransfer, ItemTransferLine, InvoiceItem, CycleCount, CycleCountItem, RefreshToken, Site, Building, Space, Scope, Contract, ContractScope, Ticket, CalendarSlot, WorkOrderSlotAssignment, CalendarTemplate, InvoiceAllocation, AllocationPeriod, RecognitionLog, AccountType, Account, FiscalPeriod, JournalEntry, JournalEntryLine, AccountBalance, DefaultAccountMapping, ExchangeRate, ExchangeRateLog, PurchaseRequest, PurchaseRequestLine, PurchaseOrder, PurchaseOrderLine, PurchaseOrderInvoice, GoodsReceipt, GoodsReceiptLine, LeadSource, PipelineStage, Lead, Opportunity, CRMActivity, Campaign, CampaignLead, ToolCategory, Tool, ToolPurchase, ToolPurchaseLine, ToolAllocationHistory, Disposal, DisposalToolLine, DisposalItemLine, BusinessUnit, AddressBook, AddressBookContact, SupplierInvoice, SupplierInvoiceLine, SupplierPayment, SupplierPaymentAllocation, DebitNote, DebitNoteLine, PurchaseOrderAmendment, Service, ClientUser, ClientRefreshToken
 from app.config import settings
 from app.utils.security import verify_token
 from sqlalchemy import text
@@ -49,6 +49,18 @@ def run_migrations():
         ("journal_entry_lines", "address_book_id", "ALTER TABLE journal_entry_lines ADD COLUMN IF NOT EXISTS address_book_id INTEGER REFERENCES address_book(id)"),
         # Petty cash vendor linking
         ("petty_cash_transactions", "vendor_address_book_id", "ALTER TABLE petty_cash_transactions ADD COLUMN IF NOT EXISTS vendor_address_book_id INTEGER REFERENCES address_book(id)"),
+        # Make sites.client_id nullable (sites can now use address_book_id instead)
+        ("sites", "client_id_nullable", "ALTER TABLE sites ALTER COLUMN client_id DROP NOT NULL"),
+        # Migrate floors from branch_id to site_id (replacing Branch with Site for asset hierarchy)
+        ("floors", "site_id", "ALTER TABLE floors ADD COLUMN IF NOT EXISTS site_id INTEGER REFERENCES sites(id)"),
+        # Make condition_reports.client_id nullable (can now use address_book_id instead)
+        ("condition_reports", "client_id_nullable", "ALTER TABLE condition_reports ALTER COLUMN client_id DROP NOT NULL"),
+        # Client Portal: Add source and client_user_id to tickets table
+        ("tickets", "source", "ALTER TABLE tickets ADD COLUMN IF NOT EXISTS source VARCHAR(50) DEFAULT 'admin_portal'"),
+        ("tickets", "client_user_id", "ALTER TABLE tickets ADD COLUMN IF NOT EXISTS client_user_id INTEGER REFERENCES client_users(id)"),
+        ("tickets", "service_id", "ALTER TABLE tickets ADD COLUMN IF NOT EXISTS service_id INTEGER REFERENCES services(id)"),
+        # Client Portal: Make tickets.requested_by nullable (for client portal submissions)
+        ("tickets", "requested_by_nullable", "ALTER TABLE tickets ALTER COLUMN requested_by DROP NOT NULL"),
     ]
 
     with engine.connect() as conn:
@@ -209,7 +221,8 @@ app.include_router(document_types.router, prefix="/api/document-types", tags=["D
 # app.include_router(vendors.router, prefix="/api/vendors", tags=["Vendors"])
 app.include_router(plans.router, prefix="/api", tags=["Plans"])
 app.include_router(companies.router, prefix="/api", tags=["Companies"])
-app.include_router(branches.router, prefix="/api", tags=["Branches"])
+# REMOVED: Branches API - Use Sites with Address Book instead
+# app.include_router(branches.router, prefix="/api", tags=["Branches"])
 app.include_router(projects.router, prefix="/api", tags=["Projects"])
 app.include_router(operators.router, prefix="/api", tags=["Operators"])
 app.include_router(handheld_devices.router, prefix="/api", tags=["HandHeld Devices"])
@@ -227,6 +240,7 @@ app.include_router(users.router, prefix="/api", tags=["Users"])
 app.include_router(sites.router, prefix="/api/sites", tags=["Sites"])
 app.include_router(contracts.router, prefix="/api/contracts", tags=["Contracts"])
 app.include_router(tickets.router, prefix="/api", tags=["Tickets"])
+app.include_router(ticket_timeline.router, prefix="/api", tags=["Ticket Timeline"])
 app.include_router(calendar.router, prefix="/api/calendar", tags=["Calendar"])
 app.include_router(technician_site_shifts.router, prefix="/api", tags=["Technicians Site Shifts"])
 app.include_router(technicians.router, prefix="/api", tags=["Technicians"])
@@ -256,10 +270,11 @@ app.include_router(tools.router, prefix="/api", tags=["Tools Management"])
 app.include_router(disposals.router, prefix="/api", tags=["Disposals"])
 
 # Address Book Router (Oracle JDE F0101 equivalent)
+# NOTE: Clients are managed via Address Book with search_type='C' (Customer)
 app.include_router(address_book.router, prefix="/api", tags=["Address Book"])
 
-# Clients Router
-app.include_router(clients.router, prefix="/api/clients", tags=["Clients"])
+# REMOVED: Clients API - Use Address Book with search_type='C' instead
+# app.include_router(clients.router, prefix="/api/clients", tags=["Clients"])
 
 # Supplier Invoice & Payment Routers (Procure-to-Pay)
 app.include_router(supplier_invoices.router, prefix="/api/supplier-invoices", tags=["Supplier Invoices"])
@@ -270,6 +285,10 @@ app.include_router(import_export.router, prefix="/api", tags=["Import Export"])
 
 # Fleet Management Router
 app.include_router(fleet.router, prefix="/api/fleet", tags=["Fleet Management"])
+
+# Client Portal Routers
+app.include_router(client_portal.router, prefix="/api", tags=["Client Portal"])
+app.include_router(client_admin.router, prefix="/api", tags=["Client Admin"])
 
 @app.get("/")
 async def root():

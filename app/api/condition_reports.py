@@ -7,7 +7,7 @@ from typing import Optional, List
 from decimal import Decimal
 from datetime import datetime
 from app.database import get_db
-from app.models import ConditionReport, ConditionReportImage, User, Client, Site, Building, Floor, Space
+from app.models import ConditionReport, ConditionReportImage, User, Client, Site, Building, Floor, Space, AddressBook
 from app.api.auth import get_current_user
 from app.config import settings
 from jose import jwt
@@ -48,7 +48,8 @@ VALID_PRIORITIES = ["low", "medium", "high", "critical"]
 # ============================================================================
 
 class ConditionReportCreate(BaseModel):
-    client_id: int
+    client_id: Optional[int] = None  # Legacy: Client table ID
+    address_book_id: Optional[int] = None  # New: Address Book ID (search_type='C')
     title: str
     description: str
     issue_class: str
@@ -99,7 +100,8 @@ class ConditionReportImageResponse(BaseModel):
 class ConditionReportResponse(BaseModel):
     id: int
     company_id: int
-    client_id: int
+    client_id: Optional[int]  # Legacy Client table ID
+    address_book_id: Optional[int]  # Address Book ID
     client_name: Optional[str]
     report_number: Optional[str]
     title: str
@@ -171,13 +173,23 @@ def image_to_response(image: ConditionReportImage) -> ConditionReportImageRespon
     )
 
 
-def report_to_response(report: ConditionReport) -> ConditionReportResponse:
+def report_to_response(report: ConditionReport, db: Session = None) -> ConditionReportResponse:
     """Convert ConditionReport to response"""
+    # Get client name from either Address Book or legacy Client table
+    client_name = None
+    if report.address_book_id and db:
+        ab_entry = db.query(AddressBook).filter(AddressBook.id == report.address_book_id).first()
+        if ab_entry:
+            client_name = ab_entry.alpha_name
+    elif report.client:
+        client_name = report.client.name
+
     return ConditionReportResponse(
         id=report.id,
         company_id=report.company_id,
         client_id=report.client_id,
-        client_name=report.client.name if report.client else None,
+        address_book_id=report.address_book_id,
+        client_name=client_name,
         report_number=report.report_number,
         title=report.title,
         description=report.description,
@@ -217,7 +229,7 @@ def report_to_response(report: ConditionReport) -> ConditionReportResponse:
 async def get_condition_reports(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
-    client_id: Optional[int] = Query(None, description="Filter by client"),
+    client_id: Optional[int] = Query(None, description="Filter by client (address_book_id or legacy client_id)"),
     site_id: Optional[int] = Query(None, description="Filter by site"),
     issue_class: Optional[str] = Query(None, description="Filter by issue class"),
     status: Optional[str] = Query(None, description="Filter by status"),
@@ -225,6 +237,8 @@ async def get_condition_reports(
     search: Optional[str] = Query(None, description="Search by title or description")
 ):
     """Get all condition reports with optional filtering"""
+    logger.info(f"[GetReports] Filters: client_id={client_id}, site_id={site_id}, issue_class={issue_class}, status={status}")
+
     query = db.query(ConditionReport).options(
         joinedload(ConditionReport.client),
         joinedload(ConditionReport.site),
@@ -237,7 +251,14 @@ async def get_condition_reports(
     ).filter(ConditionReport.company_id == current_user.company_id)
 
     if client_id:
-        query = query.filter(ConditionReport.client_id == client_id)
+        # Filter by either address_book_id (new) OR client_id (legacy)
+        logger.info(f"[GetReports] Filtering by client_id={client_id} (checking both address_book_id and client_id)")
+        query = query.filter(
+            or_(
+                ConditionReport.address_book_id == client_id,
+                ConditionReport.client_id == client_id
+            )
+        )
 
     if site_id:
         query = query.filter(ConditionReport.site_id == site_id)
@@ -263,14 +284,18 @@ async def get_condition_reports(
 
     reports = query.order_by(ConditionReport.created_at.desc()).all()
 
-    return [report_to_response(r) for r in reports]
+    logger.info(f"[GetReports] Found {len(reports)} reports")
+    for r in reports[:5]:  # Log first 5 for debugging
+        logger.info(f"[GetReports] Report: id={r.id}, client_id={r.client_id}, address_book_id={r.address_book_id}")
+
+    return [report_to_response(r, db) for r in reports]
 
 
 @router.get("/stats/summary")
 async def get_condition_reports_stats(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
-    client_id: Optional[int] = Query(None, description="Filter by client")
+    client_id: Optional[int] = Query(None, description="Filter by client (address_book_id or legacy client_id)")
 ):
     """Get summary statistics for condition reports"""
     base_query = db.query(ConditionReport).filter(
@@ -278,7 +303,13 @@ async def get_condition_reports_stats(
     )
 
     if client_id:
-        base_query = base_query.filter(ConditionReport.client_id == client_id)
+        # Filter by either address_book_id (new) OR client_id (legacy)
+        base_query = base_query.filter(
+            or_(
+                ConditionReport.address_book_id == client_id,
+                ConditionReport.client_id == client_id
+            )
+        )
 
     # Count by status
     status_counts = {}
@@ -336,7 +367,7 @@ async def get_condition_report(
             detail="Condition report not found"
         )
 
-    return report_to_response(report)
+    return report_to_response(report, db)
 
 
 @router.post("/", response_model=ConditionReportResponse, status_code=status.HTTP_201_CREATED)
@@ -360,29 +391,76 @@ async def create_condition_report(
             detail=f"Invalid priority. Must be one of: {', '.join(VALID_PRIORITIES)}"
         )
 
-    # Verify client exists and belongs to company
-    client = db.query(Client).filter(
-        Client.id == report_data.client_id,
-        Client.company_id == current_user.company_id
-    ).first()
-
-    if not client:
+    # Must have either client_id or address_book_id
+    if not report_data.client_id and not report_data.address_book_id:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Client not found"
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Either client_id or address_book_id is required"
         )
+
+    # Variables to track client info
+    client_id_to_use = None
+    address_book_id_to_use = None
+    client_name = None
+
+    # If address_book_id is provided, use that (new method)
+    if report_data.address_book_id:
+        ab_entry = db.query(AddressBook).filter(
+            AddressBook.id == report_data.address_book_id,
+            AddressBook.company_id == current_user.company_id,
+            AddressBook.search_type == 'C'  # Must be a Customer
+        ).first()
+        if not ab_entry:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Client not found in Address Book"
+            )
+        address_book_id_to_use = ab_entry.id
+        client_name = ab_entry.alpha_name
+    # Otherwise use legacy client_id
+    elif report_data.client_id:
+        client = db.query(Client).filter(
+            Client.id == report_data.client_id,
+            Client.company_id == current_user.company_id
+        ).first()
+        if not client:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Client not found"
+            )
+        client_id_to_use = client.id
+        client_name = client.name
 
     # Verify site if provided
     if report_data.site_id:
-        site = db.query(Site).filter(
-            Site.id == report_data.site_id,
-            Site.company_id == current_user.company_id
-        ).first()
+        site = db.query(Site).filter(Site.id == report_data.site_id).first()
         if not site:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Site not found"
             )
+        # Verify site belongs to company via address_book_id or client_id
+        if site.address_book_id:
+            ab_entry = db.query(AddressBook).filter(
+                AddressBook.id == site.address_book_id,
+                AddressBook.company_id == current_user.company_id
+            ).first()
+            if not ab_entry:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Site not found"
+                )
+        elif site.client_id:
+            # Legacy: check via client table
+            client_check = db.query(Client).filter(
+                Client.id == site.client_id,
+                Client.company_id == current_user.company_id
+            ).first()
+            if not client_check:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Site not found"
+                )
 
     # Generate report number
     report_number = generate_report_number(db, current_user.company_id)
@@ -390,7 +468,8 @@ async def create_condition_report(
     # Create condition report
     report = ConditionReport(
         company_id=current_user.company_id,
-        client_id=report_data.client_id,
+        client_id=client_id_to_use,  # May be None if using address_book_id
+        address_book_id=address_book_id_to_use,  # May be None if using client_id
         report_number=report_number,
         title=report_data.title,
         description=report_data.description,
@@ -423,7 +502,7 @@ async def create_condition_report(
         joinedload(ConditionReport.images)
     ).filter(ConditionReport.id == report.id).first()
 
-    return report_to_response(report)
+    return report_to_response(report, db)
 
 
 @router.put("/{report_id}", response_model=ConditionReportResponse)
@@ -497,7 +576,7 @@ async def update_condition_report(
         joinedload(ConditionReport.images).joinedload(ConditionReportImage.uploader)
     ).filter(ConditionReport.id == report.id).first()
 
-    return report_to_response(report)
+    return report_to_response(report, db)
 
 
 @router.delete("/{report_id}")
@@ -576,6 +655,7 @@ async def upload_condition_report_image(
     db: Session = Depends(get_db)
 ):
     """Upload an image to a condition report"""
+    logger.info(f"[ImageUpload] report_id={report_id}, filename={file.filename}, user={current_user.email}")
     # Verify report exists and belongs to user's company
     report = db.query(ConditionReport).filter(
         ConditionReport.id == report_id,
@@ -660,17 +740,32 @@ async def get_condition_report_image_file(
     # Verify token
     payload = verify_token_payload(token)
     if not payload:
+        logger.error("[ImageFile] Token verification failed - invalid token")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid token"
         )
 
-    company_id = payload.get("company_id")
-    if not company_id:
+    # Get email from token (stored in 'sub' claim)
+    email = payload.get("sub")
+    if not email:
+        logger.error("[ImageFile] No email (sub) in token payload")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid token"
         )
+
+    # Look up user to get company_id
+    user = db.query(User).filter(User.email == email).first()
+    if not user or not user.company_id:
+        logger.error(f"[ImageFile] User not found or no company_id for email: {email}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token"
+        )
+
+    company_id = user.company_id
+    logger.info(f"[ImageFile] Verified user {email}, company_id={company_id}")
 
     # Get image
     image = db.query(ConditionReportImage).filter(

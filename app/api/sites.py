@@ -4,7 +4,8 @@ from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session, joinedload
 from typing import Optional, List
 from app.database import get_db
-from app.models import Site, Block, Building, Space, Floor, Unit, Room, Desk, Equipment, SubEquipment, User, Client, PMAssetType, PMEquipmentClass
+from app.models import Site, Block, Building, Space, Floor, Unit, Room, Desk, Equipment, SubEquipment, User, Client, PMAssetType, PMEquipmentClass, AddressBook
+from sqlalchemy import or_
 from app.utils.security import verify_token
 from app.schemas import (
     SiteCreate, SiteUpdate, Site as SiteSchema,
@@ -78,20 +79,37 @@ def get_site_from_building(building: Building, db: Session) -> Site:
 
 @router.get("/", response_model=List[SiteSchema])
 async def get_sites(
-    client_id: Optional[int] = Query(None, description="Filter by client ID"),
+    client_id: Optional[int] = Query(None, description="Filter by client ID (legacy) or Address Book ID"),
+    address_book_id: Optional[int] = Query(None, description="Filter by Address Book ID (Customer)"),
     is_active: Optional[bool] = Query(None, description="Filter by active status"),
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=1000),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Get all sites, optionally filtered by client"""
-    query = db.query(Site).filter(Site.client_id.in_(
-        db.query(Client.id).filter(Client.company_id == current_user.company_id)
-    ))
+    """Get all sites, optionally filtered by client (legacy) or address book customer"""
+    # Get valid client IDs from legacy clients table
+    legacy_client_ids = db.query(Client.id).filter(Client.company_id == current_user.company_id).subquery()
 
+    # Get valid address book customer IDs (search_type='C')
+    ab_customer_ids = db.query(AddressBook.id).filter(
+        AddressBook.company_id == current_user.company_id,
+        AddressBook.search_type == 'C'
+    ).subquery()
+
+    # Sites can be linked via client_id (legacy) OR address_book_id (new)
+    query = db.query(Site).filter(
+        or_(
+            Site.client_id.in_(legacy_client_ids),
+            Site.address_book_id.in_(ab_customer_ids)
+        )
+    )
+
+    # Filter by client_id (legacy) or address_book_id
     if client_id is not None:
         query = query.filter(Site.client_id == client_id)
+    if address_book_id is not None:
+        query = query.filter(Site.address_book_id == address_book_id)
 
     if is_active is not None:
         query = query.filter(Site.is_active == is_active)
@@ -111,9 +129,22 @@ async def get_site(
     if not site:
         raise HTTPException(status_code=404, detail="Site not found")
 
-    # Verify user has access to this site's client
-    client = db.query(Client).filter(Client.id == site.client_id).first()
-    if not client or client.company_id != current_user.company_id:
+    # Verify user has access to this site via client_id (legacy) or address_book_id
+    has_access = False
+
+    # Check legacy client_id
+    if site.client_id:
+        client = db.query(Client).filter(Client.id == site.client_id).first()
+        if client and client.company_id == current_user.company_id:
+            has_access = True
+
+    # Check address_book_id (new)
+    if not has_access and site.address_book_id:
+        ab_entry = db.query(AddressBook).filter(AddressBook.id == site.address_book_id).first()
+        if ab_entry and ab_entry.company_id == current_user.company_id:
+            has_access = True
+
+    if not has_access:
         raise HTTPException(status_code=403, detail="Access denied")
 
     return site
@@ -125,11 +156,25 @@ async def create_site(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Create a new site"""
-    # Verify client belongs to user's company
-    client = db.query(Client).filter(Client.id == site_data.client_id).first()
-    if not client or client.company_id != current_user.company_id:
-        raise HTTPException(status_code=403, detail="Client not found or access denied")
+    """Create a new site linked to a client (legacy) or Address Book customer"""
+    # Must have either client_id or address_book_id
+    if not site_data.client_id and not site_data.address_book_id:
+        raise HTTPException(status_code=400, detail="Either client_id or address_book_id is required")
+
+    # Verify access via client_id (legacy)
+    if site_data.client_id:
+        client = db.query(Client).filter(Client.id == site_data.client_id).first()
+        if not client or client.company_id != current_user.company_id:
+            raise HTTPException(status_code=403, detail="Client not found or access denied")
+
+    # Verify access via address_book_id (new)
+    if site_data.address_book_id:
+        ab_entry = db.query(AddressBook).filter(
+            AddressBook.id == site_data.address_book_id,
+            AddressBook.search_type == 'C'  # Must be a Customer
+        ).first()
+        if not ab_entry or ab_entry.company_id != current_user.company_id:
+            raise HTTPException(status_code=403, detail="Address Book customer not found or access denied")
 
     site = Site(**site_data.model_dump())
     db.add(site)
@@ -153,9 +198,18 @@ async def update_site(
     if not site:
         raise HTTPException(status_code=404, detail="Site not found")
 
-    # Verify access
-    client = db.query(Client).filter(Client.id == site.client_id).first()
-    if not client or client.company_id != current_user.company_id:
+    # Verify access via client_id (legacy) or address_book_id
+    has_access = False
+    if site.client_id:
+        client = db.query(Client).filter(Client.id == site.client_id).first()
+        if client and client.company_id == current_user.company_id:
+            has_access = True
+    if not has_access and site.address_book_id:
+        ab_entry = db.query(AddressBook).filter(AddressBook.id == site.address_book_id).first()
+        if ab_entry and ab_entry.company_id == current_user.company_id:
+            has_access = True
+
+    if not has_access:
         raise HTTPException(status_code=403, detail="Access denied")
 
     update_data = site_data.model_dump(exclude_unset=True)

@@ -18,6 +18,9 @@ from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func, or_
 from typing import Optional, List
 from datetime import datetime
+import logging
+
+logger = logging.getLogger(__name__)
 
 from app.database import get_db
 from app.models import AddressBook, AddressBookContact, BusinessUnit, User, Client
@@ -50,18 +53,23 @@ PARENT_TYPE_CONSTRAINTS = {
 
 def generate_next_address_number(db: Session, company_id: int) -> str:
     """Generate next sequential address number for company (8-digit padded)"""
-    last_entry = db.query(AddressBook).filter(
+    # Find the maximum numeric address number for this company
+    # We need to handle both numeric and non-numeric address numbers
+    entries = db.query(AddressBook.address_number).filter(
         AddressBook.company_id == company_id
-    ).order_by(AddressBook.id.desc()).first()
+    ).all()
 
-    if last_entry:
+    max_num = 0
+    for (addr_num,) in entries:
         try:
-            last_num = int(last_entry.address_number)
-            return str(last_num + 1).zfill(8)
-        except ValueError:
+            num = int(addr_num)
+            if num > max_num:
+                max_num = num
+        except (ValueError, TypeError):
+            # Skip non-numeric address numbers
             pass
 
-    return "00000001"
+    return str(max_num + 1).zfill(8)
 
 
 def validate_parent_address_book(
@@ -268,10 +276,8 @@ async def create_address_book_entry(
     Create a new Address Book entry.
     Optionally auto-creates a linked Business Unit for cost tracking.
     """
-    # Debug: Log salary fields
-    import logging
-    logger = logging.getLogger(__name__)
-    logger.info(f"Creating AB with salary_type={data.salary_type}, base_salary={data.base_salary}, employee_id={data.employee_id}")
+    logger.info(f"[CreateAB] Creating entry: search_type={data.search_type}, alpha_name={data.alpha_name}")
+    logger.info(f"[CreateAB] salary_type={data.salary_type}, base_salary={data.base_salary}, employee_id={data.employee_id}")
 
     # Validate search type
     if data.search_type not in VALID_SEARCH_TYPES:

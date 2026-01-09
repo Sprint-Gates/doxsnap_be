@@ -4,7 +4,7 @@ from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
 from typing import Optional, List
 from app.database import get_db
-from app.models import User, Company, Branch, Client, operator_branches
+from app.models import User, Company, Site, AddressBook, operator_sites
 from app.utils.security import verify_token, get_password_hash
 import logging
 
@@ -51,7 +51,7 @@ class OperatorCreate(BaseModel):
     name: str
     password: str
     phone: Optional[str] = None
-    branch_ids: Optional[List[int]] = None
+    site_ids: Optional[List[int]] = None  # Sites to assign operator to
 
 
 class OperatorUpdate(BaseModel):
@@ -60,18 +60,25 @@ class OperatorUpdate(BaseModel):
     is_active: Optional[bool] = None
 
 
-class BranchAssignment(BaseModel):
-    branch_ids: List[int]
+class SiteAssignment(BaseModel):
+    site_ids: List[int]
 
 
 def operator_to_response(user: User, db: Session) -> dict:
     """Convert User model to operator response dict"""
-    assigned_branches = []
-    for branch in user.assigned_branches:
-        assigned_branches.append({
-            "id": branch.id,
-            "name": branch.name,
-            "client_name": branch.client.name if branch.client else None
+    # Get assigned sites (using operator_sites relationship)
+    assigned_sites = []
+    for site in user.assigned_sites:
+        # Get client name from Address Book if linked
+        client_name = None
+        if site.address_book_id:
+            ab_entry = db.query(AddressBook).filter(AddressBook.id == site.address_book_id).first()
+            if ab_entry:
+                client_name = ab_entry.alpha_name
+        assigned_sites.append({
+            "id": site.id,
+            "name": site.name,
+            "client_name": client_name
         })
 
     return {
@@ -81,8 +88,8 @@ def operator_to_response(user: User, db: Session) -> dict:
         "phone": user.phone,
         "role": user.role,
         "is_active": user.is_active,
-        "assigned_branches": assigned_branches,
-        "branches_count": len(assigned_branches),
+        "assigned_branches": assigned_sites,  # Keep key for frontend compatibility
+        "branches_count": len(assigned_sites),  # Keep key for frontend compatibility
         "created_at": user.created_at.isoformat()
     }
 
@@ -183,20 +190,29 @@ async def create_operator(
                 detail=f"User limit reached ({company.plan.max_users}). Upgrade your plan to add more users."
             )
 
-    # Validate branch_ids if provided
-    branches = []
-    if data.branch_ids:
-        for branch_id in data.branch_ids:
-            branch = db.query(Branch).join(Client).filter(
-                Branch.id == branch_id,
-                Client.company_id == user.company_id
-            ).first()
-            if not branch:
+    # Validate site_ids if provided
+    sites = []
+    if data.site_ids:
+        for site_id in data.site_ids:
+            # Sites can be linked via address_book_id to customers
+            site = db.query(Site).filter(Site.id == site_id).first()
+            if not site:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Branch with ID {branch_id} not found"
+                    detail=f"Site with ID {site_id} not found"
                 )
-            branches.append(branch)
+            # Verify site belongs to company (via address_book_id)
+            if site.address_book_id:
+                ab_entry = db.query(AddressBook).filter(
+                    AddressBook.id == site.address_book_id,
+                    AddressBook.company_id == user.company_id
+                ).first()
+                if not ab_entry:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Site with ID {site_id} not found in your company"
+                    )
+            sites.append(site)
 
     try:
         operator = User(
@@ -210,8 +226,8 @@ async def create_operator(
             remaining_documents=company.plan.documents_max if company and company.plan else 100
         )
 
-        # Add branch assignments
-        operator.assigned_branches = branches
+        # Add site assignments
+        operator.assigned_sites = sites
 
         db.add(operator)
         db.commit()
@@ -368,13 +384,13 @@ async def toggle_operator_status(
 
 
 @router.put("/operators/{operator_id}/branches")
-async def update_operator_branches(
+async def update_operator_sites(
     operator_id: int,
-    data: BranchAssignment,
+    data: SiteAssignment,
     user: User = Depends(require_admin),
     db: Session = Depends(get_db)
 ):
-    """Update operator's branch assignments (admin only)"""
+    """Update operator's site assignments (admin only)"""
     if not user.company_id:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -393,47 +409,55 @@ async def update_operator_branches(
             detail="Operator not found"
         )
 
-    # Validate all branch_ids
-    branches = []
-    for branch_id in data.branch_ids:
-        branch = db.query(Branch).join(Client).filter(
-            Branch.id == branch_id,
-            Client.company_id == user.company_id
-        ).first()
-        if not branch:
+    # Validate all site_ids
+    sites = []
+    for site_id in data.site_ids:
+        site = db.query(Site).filter(Site.id == site_id).first()
+        if not site:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Branch with ID {branch_id} not found"
+                detail=f"Site with ID {site_id} not found"
             )
-        branches.append(branch)
+        # Verify site belongs to company (via address_book_id)
+        if site.address_book_id:
+            ab_entry = db.query(AddressBook).filter(
+                AddressBook.id == site.address_book_id,
+                AddressBook.company_id == user.company_id
+            ).first()
+            if not ab_entry:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Site with ID {site_id} not found in your company"
+                )
+        sites.append(site)
 
     try:
-        # Replace all branch assignments
-        operator.assigned_branches = branches
+        # Replace all site assignments
+        operator.assigned_sites = sites
         db.commit()
         db.refresh(operator)
 
-        logger.info(f"Operator '{operator.email}' branches updated by '{user.email}'")
+        logger.info(f"Operator '{operator.email}' sites updated by '{user.email}'")
 
         return operator_to_response(operator, db)
 
     except Exception as e:
         db.rollback()
-        logger.error(f"Error updating operator branches: {str(e)}")
+        logger.error(f"Error updating operator sites: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error updating operator branches: {str(e)}"
+            detail=f"Error updating operator sites: {str(e)}"
         )
 
 
 @router.post("/operators/{operator_id}/branches/{branch_id}")
-async def add_operator_to_branch(
+async def add_operator_to_site(
     operator_id: int,
-    branch_id: int,
+    branch_id: int,  # This is now site_id but keeping param name for API compatibility
     user: User = Depends(require_admin),
     db: Session = Depends(get_db)
 ):
-    """Add an operator to a branch (admin only)"""
+    """Add an operator to a site (admin only)"""
     if not user.company_id:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -452,50 +476,59 @@ async def add_operator_to_branch(
             detail="Operator not found"
         )
 
-    branch = db.query(Branch).join(Client).filter(
-        Branch.id == branch_id,
-        Client.company_id == user.company_id
-    ).first()
+    site = db.query(Site).filter(Site.id == branch_id).first()
 
-    if not branch:
+    if not site:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Branch not found"
+            detail="Site not found"
         )
 
+    # Verify site belongs to company (via address_book_id)
+    if site.address_book_id:
+        ab_entry = db.query(AddressBook).filter(
+            AddressBook.id == site.address_book_id,
+            AddressBook.company_id == user.company_id
+        ).first()
+        if not ab_entry:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Site not found in your company"
+            )
+
     # Check if already assigned
-    if branch in operator.assigned_branches:
+    if site in operator.assigned_sites:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Operator is already assigned to this branch"
+            detail="Operator is already assigned to this site"
         )
 
     try:
-        operator.assigned_branches.append(branch)
+        operator.assigned_sites.append(site)
         db.commit()
         db.refresh(operator)
 
-        logger.info(f"Operator '{operator.email}' added to branch '{branch.name}' by '{user.email}'")
+        logger.info(f"Operator '{operator.email}' added to site '{site.name}' by '{user.email}'")
 
         return operator_to_response(operator, db)
 
     except Exception as e:
         db.rollback()
-        logger.error(f"Error adding operator to branch: {str(e)}")
+        logger.error(f"Error adding operator to site: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error adding operator to branch: {str(e)}"
+            detail=f"Error adding operator to site: {str(e)}"
         )
 
 
 @router.delete("/operators/{operator_id}/branches/{branch_id}")
-async def remove_operator_from_branch(
+async def remove_operator_from_site(
     operator_id: int,
-    branch_id: int,
+    branch_id: int,  # This is now site_id but keeping param name for API compatibility
     user: User = Depends(require_admin),
     db: Session = Depends(get_db)
 ):
-    """Remove an operator from a branch (admin only)"""
+    """Remove an operator from a site (admin only)"""
     if not user.company_id:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -514,33 +547,33 @@ async def remove_operator_from_branch(
             detail="Operator not found"
         )
 
-    branch = db.query(Branch).filter(Branch.id == branch_id).first()
+    site = db.query(Site).filter(Site.id == branch_id).first()
 
-    if not branch:
+    if not site:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Branch not found"
+            detail="Site not found"
         )
 
-    if branch not in operator.assigned_branches:
+    if site not in operator.assigned_sites:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Operator is not assigned to this branch"
+            detail="Operator is not assigned to this site"
         )
 
     try:
-        operator.assigned_branches.remove(branch)
+        operator.assigned_sites.remove(site)
         db.commit()
         db.refresh(operator)
 
-        logger.info(f"Operator '{operator.email}' removed from branch '{branch.name}' by '{user.email}'")
+        logger.info(f"Operator '{operator.email}' removed from site '{site.name}' by '{user.email}'")
 
         return operator_to_response(operator, db)
 
     except Exception as e:
         db.rollback()
-        logger.error(f"Error removing operator from branch: {str(e)}")
+        logger.error(f"Error removing operator from site: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error removing operator from branch: {str(e)}"
+            detail=f"Error removing operator from site: {str(e)}"
         )
