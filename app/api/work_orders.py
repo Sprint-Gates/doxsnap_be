@@ -116,7 +116,10 @@ class WorkOrderCreate(BaseModel):
     priority: Optional[str] = "medium"
     equipment_id: Optional[int] = None
     sub_equipment_id: Optional[int] = None
+    site_id: Optional[int] = None  # Location - required for cost center tracking
     branch_id: Optional[int] = None
+    floor_id: Optional[int] = None
+    room_id: Optional[int] = None
     project_id: Optional[int] = None
     scheduled_start: Optional[datetime] = None
     scheduled_end: Optional[datetime] = None
@@ -137,6 +140,7 @@ class WorkOrderUpdate(BaseModel):
     status: Optional[str] = None
     equipment_id: Optional[int] = None
     sub_equipment_id: Optional[int] = None
+    site_id: Optional[int] = None  # Location
     branch_id: Optional[int] = None
     floor_id: Optional[int] = None
     room_id: Optional[int] = None
@@ -708,6 +712,13 @@ async def create_work_order(
             if not data.parts_markup_percent and project.parts_markup_percent:
                 parts_markup = float(project.parts_markup_percent)
 
+    # Determine site_id: use provided value, or derive from equipment
+    site_id = data.site_id
+    if not site_id and data.equipment_id:
+        equipment = db.query(Equipment).filter(Equipment.id == data.equipment_id).first()
+        if equipment:
+            site_id = equipment.site_id
+
     try:
         wo = WorkOrder(
             company_id=user.company_id,
@@ -720,9 +731,10 @@ async def create_work_order(
             status="draft",
             equipment_id=data.equipment_id,
             sub_equipment_id=data.sub_equipment_id,
+            site_id=site_id,
             branch_id=branch_id,
-            floor_id=floor_id,
-            room_id=room_id,
+            floor_id=data.floor_id or floor_id,
+            room_id=data.room_id or room_id,
             project_id=data.project_id,
             assigned_hhd_id=data.assigned_hhd_id,
             scheduled_start=data.scheduled_start,

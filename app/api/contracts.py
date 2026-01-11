@@ -849,8 +849,9 @@ async def get_contract_cost_center(
     # This allows work orders for ANY site belonging to the same client to show in cost center
     all_client_site_ids = []
     if contract.address_book_id:
+        # Site doesn't have company_id, so we filter by address_book_id only
+        # The address_book entry is already company-scoped
         all_client_sites = db.query(Site.id).filter(
-            Site.company_id == current_user.company_id,
             Site.address_book_id == contract.address_book_id
         ).all()
         all_client_site_ids = [s.id for s in all_client_sites]
@@ -1149,10 +1150,11 @@ async def get_contract_cost_center(
         account_types_map[at.id] = at.code
 
     # Build filter for journal entry lines
-    # Include lines linked via: site_id (for contract sites) OR contract_id (direct)
+    # Include lines linked via: site_id (for ALL client sites) OR contract_id (direct)
+    # Use all_client_site_ids to be consistent with work order query - shows all JEs for the client's sites
     je_line_conditions = [JournalEntryLine.contract_id == contract_id]
-    if site_ids:
-        je_line_conditions.append(JournalEntryLine.site_id.in_(site_ids))
+    if all_client_site_ids:
+        je_line_conditions.append(JournalEntryLine.site_id.in_(all_client_site_ids))
 
     # Get totals by account for this contract
     account_totals = db.query(
