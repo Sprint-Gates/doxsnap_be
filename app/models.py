@@ -231,6 +231,9 @@ class User(Base):
     approval_limit = Column(Numeric(15, 2), nullable=True)  # Max amount user can approve (NULL = unlimited for admins)
     can_convert_po = Column(Boolean, default=False)  # Can this user convert approved PRs to Purchase Orders?
 
+    # Work Order Approval settings
+    can_approve_wo = Column(Boolean, default=False)  # Can this user approve work orders?
+
     # Link to Address Book employee record (search_type='E')
     # This allows users to have associated petty cash funds, attendance, etc.
     address_book_id = Column(Integer, ForeignKey("address_book.id"), nullable=True)

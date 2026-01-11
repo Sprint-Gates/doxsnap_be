@@ -57,6 +57,8 @@ class UserUpdate(BaseModel):
     can_approve_pr: Optional[bool] = None
     approval_limit: Optional[float] = None  # None means unlimited
     can_convert_po: Optional[bool] = None  # Can convert approved PRs to POs
+    # Work Order Approval permissions
+    can_approve_wo: Optional[bool] = None  # Can approve work orders
 
 
 class UserResponse(BaseModel):
@@ -72,6 +74,8 @@ class UserResponse(BaseModel):
     can_approve_pr: bool = False
     approval_limit: Optional[float] = None  # None means unlimited
     can_convert_po: bool = False  # Can convert approved PRs to POs
+    # Work Order Approval permissions
+    can_approve_wo: bool = False  # Can approve work orders
 
     class Config:
         from_attributes = True
@@ -237,6 +241,9 @@ async def update_user(
         target_user.approval_limit = data.approval_limit
     if data.can_convert_po is not None:
         target_user.can_convert_po = data.can_convert_po
+    # Work Order Approval permissions
+    if data.can_approve_wo is not None:
+        target_user.can_approve_wo = data.can_approve_wo
 
     db.commit()
     db.refresh(target_user)
