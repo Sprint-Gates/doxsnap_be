@@ -98,6 +98,12 @@ async def get_warehouses(
     search: Optional[str] = Query(None, description="Search by name, code, or city")
 ):
     """Get all warehouses for the current user's company"""
+    if not current_user.company_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="User is not associated with a company"
+        )
+
     query = db.query(Warehouse).options(
         joinedload(Warehouse.business_unit)
     ).filter(Warehouse.company_id == current_user.company_id)

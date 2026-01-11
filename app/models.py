@@ -110,6 +110,10 @@ class Company(Base):
     subscription_end = Column(DateTime, nullable=True)
     documents_used_this_month = Column(Integer, default=0)
 
+    # Custom limits (override plan limits when set)
+    max_users_override = Column(Integer, nullable=True)  # Override plan's max_users if set
+    documents_limit_override = Column(Integer, nullable=True)  # Override plan's documents_max if set
+
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
@@ -240,6 +244,35 @@ class User(Base):
     # DEPRECATED: Use assigned_sites via operator_sites table instead
     # assigned_branches = relationship("Branch", secondary=operator_branches, back_populates="operators")
     address_book = relationship("AddressBook", foreign_keys=[address_book_id], backref="user_account")
+
+
+class SuperAdmin(Base):
+    """Platform super admin for managing all companies and subscriptions"""
+    __tablename__ = "super_admins"
+
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String, unique=True, index=True, nullable=False)
+    name = Column(String, nullable=False)
+    hashed_password = Column(String, nullable=False)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+    last_login = Column(DateTime, nullable=True)
+
+
+class SuperAdminRefreshToken(Base):
+    """Refresh tokens for super admin authentication"""
+    __tablename__ = "super_admin_refresh_tokens"
+
+    id = Column(Integer, primary_key=True, index=True)
+    super_admin_id = Column(Integer, ForeignKey("super_admins.id"), nullable=False)
+    token = Column(String, unique=True, nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+    created_at = Column(DateTime, default=func.now())
+    is_revoked = Column(Boolean, default=False)
+
+    # Relationships
+    super_admin = relationship("SuperAdmin", backref="refresh_tokens")
 
 
 class ProcessedImage(Base):
@@ -1812,7 +1845,7 @@ class Contract(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
-    client_id = Column(Integer, ForeignKey("clients.id"), nullable=False)
+    client_id = Column(Integer, ForeignKey("clients.id"), nullable=True)  # Legacy - use address_book_id for new contracts
 
     # Address Book link (for transition to Address Book as master data)
     address_book_id = Column(Integer, ForeignKey("address_book.id"), nullable=True)

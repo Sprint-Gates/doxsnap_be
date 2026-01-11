@@ -758,7 +758,8 @@ class ContractBase(BaseModel):
 
 
 class ContractCreate(ContractBase):
-    client_id: int
+    client_id: Optional[int] = None  # Legacy - use address_book_id for new contracts
+    address_book_id: Optional[int] = None  # New - Address Book customer ID
     site_ids: Optional[List[int]] = []  # Sites covered by this contract
     scopes: Optional[List[ContractScopeCreate]] = []  # Scopes with SLAs
 
@@ -790,7 +791,8 @@ class ContractUpdate(BaseModel):
 class Contract(ContractBase):
     id: int
     company_id: int
-    client_id: int
+    client_id: Optional[int] = None  # Legacy - can be null for new contracts using address_book_id
+    address_book_id: Optional[int] = None  # New - Address Book customer ID
     created_by: Optional[int] = None
     updated_by: Optional[int] = None
     created_at: datetime

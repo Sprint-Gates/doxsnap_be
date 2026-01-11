@@ -11,6 +11,7 @@ from datetime import datetime
 from app.database import get_db
 from app.models import User
 from app.utils.security import get_password_hash, verify_token
+from app.utils.limits import check_user_limit, enforce_user_limit
 
 router = APIRouter()
 security = HTTPBearer()
@@ -102,6 +103,16 @@ async def get_users(
     return users
 
 
+@router.get("/users/limit-info")
+async def get_user_limit_info(
+    user: User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """Get current user count and limit for the company."""
+    limit_info = check_user_limit(db, user.company_id)
+    return limit_info
+
+
 @router.get("/users/{user_id}", response_model=UserResponse)
 async def get_user(
     user_id: int,
@@ -127,6 +138,9 @@ async def create_user(
     db: Session = Depends(get_db)
 ):
     """Create a new user in the company"""
+    # Check user limit before creating
+    enforce_user_limit(db, user.company_id)
+
     # Validate role
     valid_roles = ["admin", "operator", "accounting", "procurement", "general_manager"]
     if data.role not in valid_roles:
@@ -182,6 +196,10 @@ async def update_user(
             status_code=400,
             detail="You cannot deactivate your own account"
         )
+
+    # Check user limit when reactivating a user
+    if data.is_active == True and not target_user.is_active:
+        enforce_user_limit(db, user.company_id)
 
     # Validate role if provided
     if data.role:

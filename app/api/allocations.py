@@ -300,7 +300,7 @@ def get_allocation_with_access_check(
 # Allocation Endpoints
 # ============================================================================
 
-@router.post("/", status_code=status.HTTP_201_CREATED)
+@router.post("", status_code=status.HTTP_201_CREATED)
 async def create_allocation(
     allocation_data: AllocationCreate,
     db: Session = Depends(get_db),
@@ -353,10 +353,21 @@ async def create_allocation(
 
     elif allocation_data.site_id:
         allocation_type = "site"
-        # Verify site exists and belongs to a client in user's company
-        site = db.query(Site).join(Client).filter(
+        # Verify site exists and belongs to user's company
+        # Sites can be linked via client_id (legacy) or address_book_id (new)
+        from app.models import AddressBook
+        from sqlalchemy import or_
+
+        site = db.query(Site).outerjoin(
+            Client, Site.client_id == Client.id
+        ).outerjoin(
+            AddressBook, Site.address_book_id == AddressBook.id
+        ).filter(
             Site.id == allocation_data.site_id,
-            Client.company_id == current_user.company_id
+            or_(
+                Client.company_id == current_user.company_id,
+                AddressBook.company_id == current_user.company_id
+            )
         ).first()
         if not site:
             raise HTTPException(status_code=404, detail="Site not found")
@@ -369,9 +380,20 @@ async def create_allocation(
     elif allocation_data.project_id:
         allocation_type = "project"
         # Verify project exists and belongs to a site in user's company
-        project = db.query(Project).join(Site).join(Client).filter(
+        # Sites can be linked via client_id (legacy) or address_book_id (new)
+        from app.models import AddressBook
+        from sqlalchemy import or_
+
+        project = db.query(Project).join(Site).outerjoin(
+            Client, Site.client_id == Client.id
+        ).outerjoin(
+            AddressBook, Site.address_book_id == AddressBook.id
+        ).filter(
             Project.id == allocation_data.project_id,
-            Client.company_id == current_user.company_id
+            or_(
+                Client.company_id == current_user.company_id,
+                AddressBook.company_id == current_user.company_id
+            )
         ).first()
         if not project:
             raise HTTPException(status_code=404, detail="Project not found")
@@ -440,7 +462,7 @@ async def create_allocation(
     return build_allocation_response(allocation, db)
 
 
-@router.get("/", response_model=List[AllocationResponse])
+@router.get("", response_model=List[AllocationResponse])
 async def get_allocations(
     contract_id: Optional[int] = Query(None),
     site_id: Optional[int] = Query(None),

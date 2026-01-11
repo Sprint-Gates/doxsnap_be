@@ -1422,46 +1422,57 @@ def lookup_vendor_in_database(supplier_name: str, db_session=None, supplier_data
 
         # If no vendor found and we have company_id and supplier name, auto-create Address Book entry
         if not vendor and company_id and supplier_name and supplier_name.strip():
-            try:
-                # Generate address number
-                address_number = generate_address_number(db_session, company_id)
+            # Use savepoint to avoid rolling back the entire transaction on failure
+            max_retries = 3
+            for retry in range(max_retries):
+                savepoint = db_session.begin_nested()  # Create a savepoint
+                try:
+                    # Generate address number
+                    address_number = generate_address_number(db_session, company_id)
 
-                # Create Business Unit for the vendor
-                bu = BusinessUnit(
-                    company_id=company_id,
-                    code=f"V{address_number}",
-                    name=supplier_name.strip()[:100],
-                    description=f"Auto-created for vendor: {supplier_name.strip()}"
-                )
-                db_session.add(bu)
-                db_session.flush()
+                    # Create Business Unit for the vendor
+                    bu = BusinessUnit(
+                        company_id=company_id,
+                        code=f"V{address_number}",
+                        name=supplier_name.strip()[:100],
+                        description=f"Auto-created for vendor: {supplier_name.strip()}"
+                    )
+                    db_session.add(bu)
+                    db_session.flush()
 
-                # Create Address Book entry with search_type='V'
-                new_vendor = AddressBook(
-                    company_id=company_id,
-                    address_number=address_number,
-                    search_type='V',  # Vendor type
-                    alpha_name=supplier_name.strip()[:100],
-                    mailing_name=supplier_name.strip()[:100],
-                    email=extracted_email.strip()[:255] if extracted_email else None,
-                    phone_primary=extracted_phone.strip()[:30] if extracted_phone else None,  # Truncate to DB limit
-                    address_line_1=extracted_address.strip()[:200] if extracted_address else None,
-                    city=extracted_city.strip()[:100] if extracted_city else None,
-                    country=extracted_country.strip()[:50] if extracted_country else None,
-                    tax_id=extracted_tax_number.strip()[:50] if extracted_tax_number else None,
-                    registration_number=extracted_registration_number.strip()[:50] if extracted_registration_number else None,
-                    business_unit_id=bu.id,
-                    is_active=True
-                )
-                db_session.add(new_vendor)
-                db_session.flush()  # Get the ID without committing
+                    # Create Address Book entry with search_type='V'
+                    new_vendor = AddressBook(
+                        company_id=company_id,
+                        address_number=address_number,
+                        search_type='V',  # Vendor type
+                        alpha_name=supplier_name.strip()[:100],
+                        mailing_name=supplier_name.strip()[:100],
+                        email=extracted_email.strip()[:255] if extracted_email else None,
+                        phone_primary=extracted_phone.strip()[:30] if extracted_phone else None,  # Truncate to DB limit
+                        address_line_1=extracted_address.strip()[:200] if extracted_address else None,
+                        city=extracted_city.strip()[:100] if extracted_city else None,
+                        country=extracted_country.strip()[:50] if extracted_country else None,
+                        tax_id=extracted_tax_number.strip()[:50] if extracted_tax_number else None,
+                        registration_number=extracted_registration_number.strip()[:50] if extracted_registration_number else None,
+                        business_unit_id=bu.id,
+                        is_active=True
+                    )
+                    db_session.add(new_vendor)
+                    db_session.flush()  # Get the ID without committing
+                    savepoint.commit()  # Commit the savepoint
 
-                vendor = new_vendor
-                match_method = "auto_created"
-                logger.info(f"Auto-created vendor '{supplier_name}' in Address Book (ID: {vendor.id}) for company {company_id}")
-            except Exception as create_error:
-                logger.error(f"Failed to auto-create vendor in Address Book: {create_error}")
-                # Continue without vendor creation
+                    vendor = new_vendor
+                    match_method = "auto_created"
+                    logger.info(f"Auto-created vendor '{supplier_name}' in Address Book (ID: {vendor.id}) for company {company_id}")
+                    break  # Success, exit retry loop
+                except Exception as create_error:
+                    savepoint.rollback()  # Rollback only the savepoint, not the entire transaction
+                    if "unique" in str(create_error).lower() and retry < max_retries - 1:
+                        logger.warning(f"Retry {retry + 1}/{max_retries} for auto-creating vendor due to unique constraint")
+                        continue  # Try again with a new address number
+                    logger.error(f"Failed to auto-create vendor in Address Book: {create_error}")
+                    # Continue without vendor creation - main transaction is still valid
+                    break
 
         if vendor:
             return {

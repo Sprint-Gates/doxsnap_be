@@ -10,7 +10,7 @@ from PIL import Image
 
 from app.database import get_db
 from app.schemas import ProcessedImage, ProcessedImageList
-from app.models import ProcessedImage as ProcessedImageModel, User, InvoiceItem, ItemLedger, PurchaseOrderInvoice, PurchaseOrder, InvoiceAllocation, AllocationPeriod
+from app.models import ProcessedImage as ProcessedImageModel, User, InvoiceItem, ItemLedger, PurchaseOrderInvoice, PurchaseOrder, InvoiceAllocation, AllocationPeriod, Company
 from app.api.auth import get_current_user
 from app.services.s3 import upload_to_s3, process_image, generate_presigned_url, delete_from_s3
 from app.services.email import EmailService
@@ -113,7 +113,16 @@ async def upload_image(
 
         # Process image (resize, compress, OCR, AI extraction) - pass db and company_id for vendor lookup/creation
         processed_image_path, invoice_results = process_image(temp_file_path, file_bytes, db, current_user.company_id)
-        
+
+        # Increment company's document usage counter IMMEDIATELY after OCR processing
+        # This counts the API usage regardless of whether the invoice is saved or rejected
+        if current_user.company_id:
+            company_for_counter = db.query(Company).filter(Company.id == current_user.company_id).first()
+            if company_for_counter:
+                company_for_counter.documents_used_this_month += 1
+                db.commit()
+                logger.info(f"[DOCUMENT_COUNTER] Upload - Company {company_for_counter.id}: incremented to {company_for_counter.documents_used_this_month}")
+
         # Try to upload to S3, fallback to local if it fails
         try:
             s3_key, s3_url = upload_to_s3(processed_image_path, unique_filename)
@@ -224,7 +233,7 @@ async def upload_image(
         db.refresh(current_user)
 
         return db_image
-        
+
     except Exception as e:
         # Cleanup temporary files
         if os.path.exists(temp_file_path):
@@ -388,6 +397,14 @@ async def create_manual_document(
         )
 
         db.add(db_image)
+
+        # Increment company's document usage counter for this month
+        if current_user.company_id:
+            company = db.query(Company).filter(Company.id == current_user.company_id).first()
+            if company:
+                company.documents_used_this_month += 1
+                logger.info(f"[DOCUMENT_COUNTER] Manual entry - Incremented for company {company.id}: now {company.documents_used_this_month}")
+
         db.commit()
         db.refresh(db_image)
 

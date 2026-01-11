@@ -8,7 +8,7 @@ import os
 import logging
 import google.generativeai as genai
 
-from app.api import auth, images, otp, admin, document_types, technician_site_shifts, plans, companies, projects, operators, handheld_devices, assets, attendance, work_orders, warehouses, pm_checklists, pm_work_orders, dashboard, item_master, cycle_count, hhd_auth, users, sites, contracts, tickets, ticket_timeline, calendar, condition_reports, technician_evaluations, nps, petty_cash, docs, allocations, accounting, exchange_rates, purchase_requests, purchase_orders, goods_receipts, crm_leads, crm_opportunities, crm_activities, crm_campaigns, tools, disposals, business_units, address_book, supplier_invoices, supplier_payments, technicians, import_export, fleet, client_portal, client_admin
+from app.api import auth, images, otp, admin, document_types, technician_site_shifts, plans, companies, projects, operators, handheld_devices, assets, attendance, work_orders, warehouses, pm_checklists, pm_work_orders, dashboard, item_master, cycle_count, hhd_auth, users, sites, contracts, tickets, ticket_timeline, calendar, condition_reports, technician_evaluations, nps, petty_cash, docs, allocations, accounting, exchange_rates, purchase_requests, purchase_orders, goods_receipts, crm_leads, crm_opportunities, crm_activities, crm_campaigns, tools, disposals, business_units, address_book, supplier_invoices, supplier_payments, technicians, import_export, fleet, client_portal, client_admin, platform_admin
 from app.database import engine, get_db
 from app.models import Base, User, ProcessedImage, DocumentType, Warehouse, Plan, Company, Client, Project, Technician, HandHeldDevice, Floor, Room, Equipment, SubEquipment, TechnicianAttendance, SparePart, WorkOrder, WorkOrderSparePart, WorkOrderTimeEntry, PMSchedule, ItemCategory, ItemMaster, ItemStock, ItemLedger, ItemTransfer, ItemTransferLine, InvoiceItem, CycleCount, CycleCountItem, RefreshToken, Site, Building, Space, Scope, Contract, ContractScope, Ticket, CalendarSlot, WorkOrderSlotAssignment, CalendarTemplate, InvoiceAllocation, AllocationPeriod, RecognitionLog, AccountType, Account, FiscalPeriod, JournalEntry, JournalEntryLine, AccountBalance, DefaultAccountMapping, ExchangeRate, ExchangeRateLog, PurchaseRequest, PurchaseRequestLine, PurchaseOrder, PurchaseOrderLine, PurchaseOrderInvoice, GoodsReceipt, GoodsReceiptLine, LeadSource, PipelineStage, Lead, Opportunity, CRMActivity, Campaign, CampaignLead, ToolCategory, Tool, ToolPurchase, ToolPurchaseLine, ToolAllocationHistory, Disposal, DisposalToolLine, DisposalItemLine, BusinessUnit, AddressBook, AddressBookContact, SupplierInvoice, SupplierInvoiceLine, SupplierPayment, SupplierPaymentAllocation, DebitNote, DebitNoteLine, PurchaseOrderAmendment, Service, ClientUser, ClientRefreshToken
 from app.config import settings
@@ -101,32 +101,49 @@ def validate_google_api_key():
 
 google_api_valid = validate_google_api_key()
 
-app = FastAPI(title="Image Processor API", version="1.0.0")
+app = FastAPI(title="Image Processor API", version="1.0.0", redirect_slashes=False)
 
 
 # Subscription enforcement middleware
 class SubscriptionEnforcementMiddleware(BaseHTTPMiddleware):
     """Middleware to enforce subscription/trial period for protected API routes."""
 
-    # Routes that don't require subscription check
+    # Routes that don't require subscription check (must be exact prefixes)
     EXEMPT_PATHS = [
         "/api/auth/",
+        "/api/auth",
         "/api/plans",
         "/api/companies/register",
         "/api/health",
         "/api/otp",
         "/api/docs",
+        "/api/platform-admin",  # Platform admin has its own auth
         "/uploads/",
-        "/",
+        "/uploads",
+        "/openapi.json",
+        "/docs",
+        "/redoc",
     ]
+
+    # Exact match only paths (not prefix match)
+    EXEMPT_EXACT = ["/", "/health"]
 
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
+        logger.info(f"[SubscriptionMiddleware] Request: {request.method} {path}")
 
-        # Skip check for exempt paths
+        # Check exact matches first
+        if path in self.EXEMPT_EXACT:
+            logger.info(f"[SubscriptionMiddleware] Exempt exact path, skipping: {path}")
+            return await call_next(request)
+
+        # Skip check for exempt path prefixes
         for exempt in self.EXEMPT_PATHS:
-            if path.startswith(exempt) or path == exempt.rstrip('/'):
+            if path.startswith(exempt):
+                logger.info(f"[SubscriptionMiddleware] Exempt path prefix, skipping: {path}")
                 return await call_next(request)
+
+        logger.info(f"[SubscriptionMiddleware] Checking subscription for path: {path}")
 
         # Skip check for non-API routes
         if not path.startswith("/api/"):
@@ -139,6 +156,7 @@ class SubscriptionEnforcementMiddleware(BaseHTTPMiddleware):
         # Get authorization header
         auth_header = request.headers.get("Authorization")
         if not auth_header or not auth_header.startswith("Bearer "):
+            logger.info(f"[SubscriptionMiddleware] No auth header, passing through")
             # Let the route handler deal with missing auth
             return await call_next(request)
 
@@ -146,8 +164,11 @@ class SubscriptionEnforcementMiddleware(BaseHTTPMiddleware):
         email = verify_token(token)
 
         if not email:
+            logger.info(f"[SubscriptionMiddleware] Invalid token, passing through")
             # Invalid token - let route handler deal with it
             return await call_next(request)
+
+        logger.info(f"[SubscriptionMiddleware] Valid token for: {email}")
 
         # Check subscription status
         db = next(get_db())
@@ -172,6 +193,7 @@ class SubscriptionEnforcementMiddleware(BaseHTTPMiddleware):
 
             # Check if trial/subscription has expired
             if company.subscription_end and company.subscription_end < datetime.utcnow():
+                logger.info(f"[SubscriptionMiddleware] Blocking expired user: {email}, company: {company.name}, status: {company.subscription_status}")
                 if company.subscription_status == "trial":
                     return JSONResponse(
                         status_code=403,
@@ -289,6 +311,9 @@ app.include_router(fleet.router, prefix="/api/fleet", tags=["Fleet Management"])
 # Client Portal Routers
 app.include_router(client_portal.router, prefix="/api", tags=["Client Portal"])
 app.include_router(client_admin.router, prefix="/api", tags=["Client Admin"])
+
+# Platform Admin Router (Super Admin for managing subscriptions)
+app.include_router(platform_admin.router, prefix="/api", tags=["Platform Admin"])
 
 @app.get("/")
 async def root():

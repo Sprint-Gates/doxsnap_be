@@ -17,33 +17,78 @@ router = APIRouter()
 security = HTTPBearer(auto_error=False)
 
 
+def get_subscription_info(user, db: Session) -> dict:
+    """
+    Get detailed subscription information for a user's company.
+    Returns dict with subscription status, days remaining, warning flags, etc.
+    """
+    result = {
+        "active": True,
+        "reason": None,
+        "subscription_status": None,
+        "subscription_end": None,
+        "days_remaining": None,
+        "is_trial": False,
+        "show_warning": False,
+        "warning_message": None
+    }
+
+    if not user.company_id:
+        return result  # No company = no restriction
+
+    company = db.query(Company).filter(Company.id == user.company_id).first()
+    if not company:
+        return result
+
+    result["subscription_status"] = company.subscription_status
+    result["subscription_end"] = company.subscription_end.isoformat() if company.subscription_end else None
+    result["is_trial"] = company.subscription_status == "trial"
+
+    # Calculate days remaining
+    if company.subscription_end:
+        now = datetime.utcnow()
+        delta = company.subscription_end - now
+        result["days_remaining"] = max(0, delta.days)
+
+        # Show warning if 3 days or less remaining
+        if 0 < delta.days <= 3:
+            result["show_warning"] = True
+            if company.subscription_status == "trial":
+                result["warning_message"] = f"Your trial expires in {delta.days} day{'s' if delta.days != 1 else ''}. Upgrade now to continue using DoxSnap."
+            else:
+                result["warning_message"] = f"Your subscription expires in {delta.days} day{'s' if delta.days != 1 else ''}. Renew now to avoid interruption."
+
+    # Check subscription status
+    if company.subscription_status == "cancelled":
+        result["active"] = False
+        result["reason"] = "Subscription has been cancelled"
+        return result
+
+    if company.subscription_status == "suspended":
+        result["active"] = False
+        result["reason"] = "Subscription has been suspended"
+        return result
+
+    # Check if trial or subscription has expired
+    if company.subscription_end and company.subscription_end < datetime.utcnow():
+        result["active"] = False
+        result["days_remaining"] = 0
+        if company.subscription_status == "trial":
+            result["reason"] = "Trial period has expired. Please upgrade to continue."
+        else:
+            result["reason"] = "Subscription has expired. Please renew to continue."
+        return result
+
+    return result
+
+
 def check_subscription_active(user, db: Session) -> dict:
     """
     Check if user's company has an active subscription.
     Returns dict with 'active' boolean and 'reason' string.
     """
-    if not user.company_id:
-        return {"active": True, "reason": None}  # No company = no restriction
-
-    company = db.query(Company).filter(Company.id == user.company_id).first()
-    if not company:
-        return {"active": True, "reason": None}
-
-    # Check subscription status
-    if company.subscription_status == "cancelled":
-        return {"active": False, "reason": "Subscription has been cancelled"}
-
-    if company.subscription_status == "suspended":
-        return {"active": False, "reason": "Subscription has been suspended"}
-
-    # Check if trial or subscription has expired
-    if company.subscription_end and company.subscription_end < datetime.utcnow():
-        if company.subscription_status == "trial":
-            return {"active": False, "reason": "Trial period has expired. Please upgrade to continue."}
-        else:
-            return {"active": False, "reason": "Subscription has expired. Please renew to continue."}
-
-    return {"active": True, "reason": None}
+    info = get_subscription_info(user, db)
+    return {"active": info["active"], "reason": info["reason"]}
 
 
 async def get_current_user(
@@ -399,3 +444,16 @@ async def reset_password(password_reset: PasswordResetConfirm, db: Session = Dep
         "success": True,
         "message": "Password has been reset successfully"
     }
+
+
+@router.get("/subscription-status")
+async def get_subscription_status(
+    current_user: UserSchema = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Get current subscription status including warning info.
+    This endpoint doesn't block expired users so they can see their status.
+    """
+    info = get_subscription_info(current_user, db)
+    return info

@@ -113,6 +113,12 @@ async def list_business_units(
     List all business units for the current company.
     Supports filtering by type, status, parent, and search.
     """
+    if not current_user.company_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="User is not associated with a company"
+        )
+
     query = db.query(BusinessUnit).filter(
         BusinessUnit.company_id == current_user.company_id
     )
@@ -175,6 +181,12 @@ async def get_business_unit_hierarchy(
     Get full hierarchy tree of business units organized by type.
     Returns nested structure with parent-child relationships.
     """
+    if not current_user.company_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="User is not associated with a company"
+        )
+
     business_units = db.query(BusinessUnit).options(
         joinedload(BusinessUnit.parent),
         joinedload(BusinessUnit.warehouses)

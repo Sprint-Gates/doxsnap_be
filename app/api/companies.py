@@ -311,7 +311,10 @@ async def get_my_company(user: User = Depends(get_current_user), db: Session = D
             detail="No company associated with this user"
         )
 
+    # Expire any cached data to ensure fresh read from database
+    db.expire_all()
     company = db.query(Company).filter(Company.id == user.company_id).first()
+    logger.info(f"[DOCUMENT_COUNTER] GET /companies/me - Company {company.id if company else 'N/A'}: documents_used_this_month = {company.documents_used_this_month if company else 'N/A'}")
     if not company:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -321,6 +324,20 @@ async def get_my_company(user: User = Depends(get_current_user), db: Session = D
     plan_name = None
     if company.plan:
         plan_name = company.plan.name
+
+    # Calculate effective documents_max (override takes precedence over plan default)
+    effective_documents_max = None
+    if company.documents_limit_override is not None:
+        effective_documents_max = company.documents_limit_override
+    elif company.plan:
+        effective_documents_max = company.plan.documents_max
+
+    # Calculate effective max_users (override takes precedence over plan default)
+    effective_max_users = None
+    if company.max_users_override is not None:
+        effective_max_users = company.max_users_override
+    elif company.plan:
+        effective_max_users = company.plan.max_users
 
     return {
         "id": company.id,
@@ -346,8 +363,8 @@ async def get_my_company(user: User = Depends(get_current_user), db: Session = D
         "plan": {
             "id": company.plan.id,
             "name": company.plan.name,
-            "documents_max": company.plan.documents_max,
-            "max_users": company.plan.max_users,
+            "documents_max": effective_documents_max,  # Use effective limit (override or plan default)
+            "max_users": effective_max_users,  # Use effective limit (override or plan default)
             "max_clients": company.plan.max_clients,
             "max_branches": company.plan.max_branches,
             "max_projects": company.plan.max_projects
@@ -457,6 +474,43 @@ async def get_company_stats(user: User = Depends(get_current_user), db: Session 
         "documents_used": company.documents_used_this_month,
         "documents_limit": company.plan.documents_max if company.plan else 0,
         "subscription_status": company.subscription_status
+    }
+
+
+@router.get("/companies/document-counter-debug")
+async def debug_document_counter(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Debug endpoint to check document counter vs actual processed images"""
+    from app.models import ProcessedImage
+    from datetime import datetime
+
+    if not user.company_id:
+        raise HTTPException(status_code=404, detail="No company associated with this user")
+
+    company = db.query(Company).filter(Company.id == user.company_id).first()
+    if not company:
+        raise HTTPException(status_code=404, detail="Company not found")
+
+    # Count actual processed images for this user this month
+    current_month_start = datetime.utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+    processed_this_month = db.query(ProcessedImage).filter(
+        ProcessedImage.user_id == user.id,
+        ProcessedImage.created_at >= current_month_start
+    ).count()
+
+    total_processed = db.query(ProcessedImage).filter(
+        ProcessedImage.user_id == user.id
+    ).count()
+
+    return {
+        "company_id": company.id,
+        "company_name": company.name,
+        "documents_used_this_month_db": company.documents_used_this_month,
+        "actual_processed_this_month": processed_this_month,
+        "total_processed_all_time": total_processed,
+        "user_id": user.id,
+        "user_remaining_documents": user.remaining_documents,
+        "mismatch": company.documents_used_this_month != processed_this_month
     }
 
 
@@ -629,7 +683,7 @@ async def flush_company_data(
 
     This will PRESERVE:
     - Company record and settings
-    - User accounts
+    - Only the current user account (all other users will be deleted)
     - Plan subscription
     - PM Templates (Checklists, Activities, Equipment Classes, etc.)
     - Document Types
@@ -774,18 +828,19 @@ async def flush_company_data(
             # TECHNICIANS
             # =================================================================
             ("technician_attendance", "DELETE FROM technician_attendance WHERE company_id = :company_id"),
-            ("technician_site_shifts", "DELETE FROM technician_site_shifts WHERE technician_id IN (SELECT id FROM technicians WHERE company_id = :company_id)"),
+            # Delete technician_site_shifts by technician OR by site (sites can be linked via address_book)
+            ("technician_site_shifts", "DELETE FROM technician_site_shifts WHERE technician_id IN (SELECT id FROM technicians WHERE company_id = :company_id) OR site_id IN (SELECT id FROM sites WHERE client_id IN (SELECT id FROM clients WHERE company_id = :company_id) OR address_book_id IN (SELECT id FROM address_book WHERE company_id = :company_id))"),
             ("technicians", "DELETE FROM technicians WHERE company_id = :company_id"),
 
             # =================================================================
-            # ASSETS & EQUIPMENT (linked via client_id -> clients.company_id)
+            # ASSETS & EQUIPMENT (linked via client_id -> clients.company_id OR via address_book)
             # =================================================================
             ("sub_equipment", "DELETE FROM sub_equipment WHERE equipment_id IN (SELECT id FROM equipment WHERE client_id IN (SELECT id FROM clients WHERE company_id = :company_id))"),
             ("equipment", "DELETE FROM equipment WHERE client_id IN (SELECT id FROM clients WHERE company_id = :company_id)"),
-            ("desks", "DELETE FROM desks WHERE room_id IN (SELECT id FROM rooms WHERE floor_id IN (SELECT id FROM floors WHERE building_id IN (SELECT id FROM buildings WHERE site_id IN (SELECT id FROM sites WHERE client_id IN (SELECT id FROM clients WHERE company_id = :company_id)))))"),
-            ("rooms", "DELETE FROM rooms WHERE floor_id IN (SELECT id FROM floors WHERE building_id IN (SELECT id FROM buildings WHERE site_id IN (SELECT id FROM sites WHERE client_id IN (SELECT id FROM clients WHERE company_id = :company_id))))"),
-            ("units", "DELETE FROM units WHERE floor_id IN (SELECT id FROM floors WHERE building_id IN (SELECT id FROM buildings WHERE site_id IN (SELECT id FROM sites WHERE client_id IN (SELECT id FROM clients WHERE company_id = :company_id))))"),
-            ("floors", "DELETE FROM floors WHERE building_id IN (SELECT id FROM buildings WHERE site_id IN (SELECT id FROM sites WHERE client_id IN (SELECT id FROM clients WHERE company_id = :company_id)))"),
+            ("desks", "DELETE FROM desks WHERE room_id IN (SELECT id FROM rooms WHERE floor_id IN (SELECT id FROM floors WHERE building_id IN (SELECT id FROM buildings WHERE site_id IN (SELECT id FROM sites WHERE client_id IN (SELECT id FROM clients WHERE company_id = :company_id) OR address_book_id IN (SELECT id FROM address_book WHERE company_id = :company_id)))))"),
+            ("rooms", "DELETE FROM rooms WHERE floor_id IN (SELECT id FROM floors WHERE building_id IN (SELECT id FROM buildings WHERE site_id IN (SELECT id FROM sites WHERE client_id IN (SELECT id FROM clients WHERE company_id = :company_id) OR address_book_id IN (SELECT id FROM address_book WHERE company_id = :company_id))))"),
+            ("units", "DELETE FROM units WHERE floor_id IN (SELECT id FROM floors WHERE building_id IN (SELECT id FROM buildings WHERE site_id IN (SELECT id FROM sites WHERE client_id IN (SELECT id FROM clients WHERE company_id = :company_id) OR address_book_id IN (SELECT id FROM address_book WHERE company_id = :company_id))))"),
+            ("floors", "DELETE FROM floors WHERE building_id IN (SELECT id FROM buildings WHERE site_id IN (SELECT id FROM sites WHERE client_id IN (SELECT id FROM clients WHERE company_id = :company_id) OR address_book_id IN (SELECT id FROM address_book WHERE company_id = :company_id))) OR site_id IN (SELECT id FROM sites WHERE client_id IN (SELECT id FROM clients WHERE company_id = :company_id) OR address_book_id IN (SELECT id FROM address_book WHERE company_id = :company_id))"),
 
             # =================================================================
             # CONTRACTS & SCOPES
@@ -796,18 +851,19 @@ async def flush_company_data(
 
             # =================================================================
             # SITES, BUILDINGS, SPACES
+            # Sites can be linked via client_id (legacy) or address_book_id (new)
             # =================================================================
-            ("spaces", "DELETE FROM spaces WHERE building_id IN (SELECT id FROM buildings WHERE site_id IN (SELECT id FROM sites WHERE client_id IN (SELECT id FROM clients WHERE company_id = :company_id)))"),
-            ("buildings", "DELETE FROM buildings WHERE site_id IN (SELECT id FROM sites WHERE client_id IN (SELECT id FROM clients WHERE company_id = :company_id))"),
-            ("blocks", "DELETE FROM blocks WHERE site_id IN (SELECT id FROM sites WHERE client_id IN (SELECT id FROM clients WHERE company_id = :company_id))"),
-            ("sites", "DELETE FROM sites WHERE client_id IN (SELECT id FROM clients WHERE company_id = :company_id)"),
+            ("spaces", "DELETE FROM spaces WHERE building_id IN (SELECT id FROM buildings WHERE site_id IN (SELECT id FROM sites WHERE client_id IN (SELECT id FROM clients WHERE company_id = :company_id) OR address_book_id IN (SELECT id FROM address_book WHERE company_id = :company_id)))"),
+            ("buildings", "DELETE FROM buildings WHERE site_id IN (SELECT id FROM sites WHERE client_id IN (SELECT id FROM clients WHERE company_id = :company_id) OR address_book_id IN (SELECT id FROM address_book WHERE company_id = :company_id))"),
+            ("blocks", "DELETE FROM blocks WHERE site_id IN (SELECT id FROM sites WHERE client_id IN (SELECT id FROM clients WHERE company_id = :company_id) OR address_book_id IN (SELECT id FROM address_book WHERE company_id = :company_id))"),
+            ("sites", "DELETE FROM sites WHERE client_id IN (SELECT id FROM clients WHERE company_id = :company_id) OR address_book_id IN (SELECT id FROM address_book WHERE company_id = :company_id)"),
 
             # =================================================================
             # DEVICES & PROJECTS
             # =================================================================
             ("handheld_device_technicians_ab", "DELETE FROM handheld_device_technicians_ab WHERE handheld_device_id IN (SELECT id FROM handheld_devices WHERE company_id = :company_id)"),
             ("handheld_devices", "DELETE FROM handheld_devices WHERE company_id = :company_id"),
-            ("projects", "DELETE FROM projects WHERE site_id IN (SELECT id FROM sites WHERE client_id IN (SELECT id FROM clients WHERE company_id = :company_id))"),
+            ("projects", "DELETE FROM projects WHERE site_id IN (SELECT id FROM sites WHERE client_id IN (SELECT id FROM clients WHERE company_id = :company_id) OR address_book_id IN (SELECT id FROM address_book WHERE company_id = :company_id))"),
             ("branches", "DELETE FROM branches WHERE client_id IN (SELECT id FROM clients WHERE company_id = :company_id)"),
 
             # =================================================================
@@ -821,9 +877,87 @@ async def flush_company_data(
             # =================================================================
             # Delete address_book_contacts first (FK to address_book)
             ("address_book_contacts", "DELETE FROM address_book_contacts WHERE address_book_id IN (SELECT id FROM address_book WHERE company_id = :company_id)"),
-            # Clear self-referential FK before deleting address_book entries
+
+            # Clear ALL foreign key references to address_book before deletion
+            # Users - preserve but unlink
+            ("users_clear_address_book", "UPDATE users SET address_book_id = NULL WHERE company_id = :company_id"),
+            # Client refresh tokens - must be deleted before client_users
+            ("client_refresh_tokens_delete", "DELETE FROM client_refresh_tokens WHERE client_user_id IN (SELECT id FROM client_users WHERE company_id = :company_id)"),
+            # Client users - delete them since they reference address_book
+            ("client_users_delete", "DELETE FROM client_users WHERE company_id = :company_id"),
+            # Self-referential FK
             ("address_book_clear_parent", "UPDATE address_book SET parent_address_book_id = NULL WHERE company_id = :company_id"),
+            # Business unit FK
+            ("address_book_clear_business_unit", "UPDATE address_book SET business_unit_id = NULL WHERE company_id = :company_id"),
+            # Clients
+            ("clients_clear_address_book", "UPDATE clients SET address_book_id = NULL WHERE company_id = :company_id"),
+            # Technicians
+            ("technicians_clear_address_book", "UPDATE technicians SET address_book_id = NULL WHERE company_id = :company_id"),
+            # Branches
+            ("branches_clear_address_book", "UPDATE branches SET address_book_id = NULL WHERE client_id IN (SELECT id FROM clients WHERE company_id = :company_id)"),
+            # Sites
+            ("sites_clear_address_book", "UPDATE sites SET address_book_id = NULL WHERE client_id IN (SELECT id FROM clients WHERE company_id = :company_id) OR address_book_id IN (SELECT id FROM address_book WHERE company_id = :company_id)"),
+            # Contracts
+            ("contracts_clear_address_book", "UPDATE contracts SET address_book_id = NULL WHERE company_id = :company_id"),
+            # Equipment & Sub-equipment
+            ("equipment_clear_address_book", "UPDATE equipment SET address_book_id = NULL WHERE client_id IN (SELECT id FROM clients WHERE company_id = :company_id)"),
+            ("sub_equipment_clear_address_book", "UPDATE sub_equipment SET address_book_id = NULL WHERE equipment_id IN (SELECT id FROM equipment WHERE client_id IN (SELECT id FROM clients WHERE company_id = :company_id))"),
+            # Handheld devices
+            ("handheld_devices_clear_address_book", "UPDATE handheld_devices SET address_book_id = NULL WHERE company_id = :company_id"),
+            # Tools
+            ("tools_clear_address_book", "UPDATE tools SET vendor_address_book_id = NULL, address_book_id = NULL WHERE company_id = :company_id"),
+            # Tool allocation history
+            ("tool_allocation_history_clear_address_book", "UPDATE tool_allocation_history SET from_address_book_id = NULL, to_address_book_id = NULL WHERE tool_id IN (SELECT id FROM tools WHERE company_id = :company_id)"),
+            # Tool purchases
+            ("tool_purchases_clear_address_book", "UPDATE tool_purchases SET address_book_id = NULL WHERE company_id = :company_id"),
+            # Item master & aliases
+            ("item_master_clear_address_book", "UPDATE item_master SET primary_address_book_id = NULL WHERE company_id = :company_id"),
+            ("item_aliases_clear_address_book", "UPDATE item_aliases SET address_book_id = NULL WHERE item_id IN (SELECT id FROM item_master WHERE company_id = :company_id)"),
+            # Petty cash
+            ("petty_cash_funds_clear_address_book", "UPDATE petty_cash_funds SET address_book_id = NULL WHERE company_id = :company_id"),
+            ("petty_cash_transactions_clear_address_book", "UPDATE petty_cash_transactions SET vendor_address_book_id = NULL WHERE company_id = :company_id"),
+            # CRM
+            ("leads_clear_address_book", "UPDATE leads SET converted_to_address_book_id = NULL WHERE company_id = :company_id"),
+            ("opportunities_clear_address_book", "UPDATE opportunities SET address_book_id = NULL WHERE company_id = :company_id"),
+            ("crm_activities_clear_address_book", "UPDATE crm_activities SET address_book_id = NULL WHERE company_id = :company_id"),
+            # Calendar slots
+            ("calendar_slots_clear_address_book", "UPDATE calendar_slots SET address_book_id = NULL WHERE company_id = :company_id"),
+            # Condition reports
+            ("condition_reports_clear_address_book", "UPDATE condition_reports SET address_book_id = NULL WHERE company_id = :company_id"),
+            # NPS surveys
+            ("nps_surveys_clear_address_book", "UPDATE nps_surveys SET address_book_id = NULL WHERE company_id = :company_id"),
+            # Technician evaluations
+            ("technician_evaluations_clear_address_book", "UPDATE technician_evaluations SET address_book_id = NULL WHERE company_id = :company_id"),
+            # Technician attendance
+            ("technician_attendance_clear_address_book", "UPDATE technician_attendance SET address_book_id = NULL WHERE company_id = :company_id"),
+            # Technician site shifts
+            ("technician_site_shifts_clear_address_book", "UPDATE technician_site_shifts SET address_book_id = NULL WHERE site_id IN (SELECT id FROM sites WHERE client_id IN (SELECT id FROM clients WHERE company_id = :company_id) OR address_book_id IN (SELECT id FROM address_book WHERE company_id = :company_id))"),
+            # Work order related
+            ("work_order_technicians_ab_clear", "DELETE FROM work_order_technicians_ab WHERE work_order_id IN (SELECT id FROM work_orders WHERE company_id = :company_id)"),
+            ("work_order_time_entries_clear_address_book", "UPDATE work_order_time_entries SET address_book_id = NULL WHERE work_order_id IN (SELECT id FROM work_orders WHERE company_id = :company_id)"),
+            ("work_order_slot_assignments_clear_address_book", "UPDATE work_order_slot_assignments SET address_book_id = NULL WHERE calendar_slot_id IN (SELECT id FROM calendar_slots WHERE company_id = :company_id)"),
+            # Journal entry lines
+            ("journal_entry_lines_clear_address_book", "UPDATE journal_entry_lines SET address_book_id = NULL WHERE journal_entry_id IN (SELECT id FROM journal_entries WHERE company_id = :company_id)"),
+            # Processed images
+            ("processed_images_clear_address_book", "UPDATE processed_images SET address_book_id = NULL WHERE user_id IN (SELECT id FROM users WHERE company_id = :company_id)"),
+            # Purchase requests & orders
+            ("purchase_requests_clear_address_book", "UPDATE purchase_requests SET address_book_id = NULL WHERE company_id = :company_id"),
+            ("purchase_orders_clear_address_book", "UPDATE purchase_orders SET address_book_id = NULL WHERE company_id = :company_id"),
+            # Goods receipt extra costs
+            ("goods_receipt_extra_costs_clear_address_book", "UPDATE goods_receipt_extra_costs SET address_book_id = NULL WHERE goods_receipt_id IN (SELECT id FROM goods_receipts WHERE company_id = :company_id)"),
+            # Debit notes
+            ("debit_notes_clear_address_book", "UPDATE debit_notes SET address_book_id = NULL WHERE company_id = :company_id"),
+            # Supplier invoices & payments
+            ("supplier_invoices_clear_address_book", "UPDATE supplier_invoices SET address_book_id = NULL WHERE company_id = :company_id"),
+            ("supplier_payments_clear_address_book", "UPDATE supplier_payments SET address_book_id = NULL WHERE company_id = :company_id"),
+            # Vehicles (fleet)
+            ("vehicles_clear_address_book", "UPDATE vehicles SET assigned_driver_id = NULL WHERE company_id = :company_id"),
+            ("vehicle_maintenance_clear_address_book", "UPDATE vehicle_maintenance SET service_provider_address_book_id = NULL WHERE vehicle_id IN (SELECT id FROM vehicles WHERE company_id = :company_id)"),
+            ("vehicle_fuel_logs_clear_address_book", "UPDATE vehicle_fuel_logs SET driver_id = NULL WHERE vehicle_id IN (SELECT id FROM vehicles WHERE company_id = :company_id)"),
+
+            # Now delete address_book entries
             ("address_book", "DELETE FROM address_book WHERE company_id = :company_id"),
+            # Business units must be deleted after address_book since address_book.business_unit_id references it
             ("business_units", "DELETE FROM business_units WHERE company_id = :company_id"),
 
             # =================================================================
@@ -841,23 +975,41 @@ async def flush_company_data(
             # =================================================================
             ("exchange_rate_logs", "DELETE FROM exchange_rate_logs WHERE company_id = :company_id"),
             ("exchange_rates", "DELETE FROM exchange_rates WHERE company_id = :company_id"),
+
+            # =================================================================
+            # ALL OTHER USERS - Delete all except the current user performing the flush
+            # =================================================================
+            # First delete their refresh tokens
+            ("other_users_refresh_tokens", "DELETE FROM refresh_tokens WHERE user_id IN (SELECT id FROM users WHERE company_id = :company_id AND id != :current_user_id)"),
+            # Clear operator_sites assignments
+            ("other_users_sites_clear", "DELETE FROM operator_sites WHERE user_id IN (SELECT id FROM users WHERE company_id = :company_id AND id != :current_user_id)"),
+            # Delete all other users
+            ("other_users_delete", "DELETE FROM users WHERE company_id = :company_id AND id != :current_user_id"),
         ]
 
         deleted_counts = {}
+        current_user_id = user.id  # The user performing the flush
 
         for table_name, query in delete_queries:
             try:
-                result = db.execute(text(query), {"company_id": company_id})
+                logger.info(f"[FLUSH] Executing: {table_name}")
+                result = db.execute(text(query), {"company_id": company_id, "current_user_id": current_user_id})
                 db.commit()  # Commit after each successful delete
                 deleted_counts[table_name] = result.rowcount
+                logger.info(f"[FLUSH] {table_name}: {result.rowcount} rows affected")
             except Exception as e:
                 db.rollback()  # Rollback failed transaction so next query can run
-                logger.warning(f"Error deleting from {table_name}: {e}")
+                logger.error(f"[FLUSH] ERROR in {table_name}: {e}")
                 deleted_counts[table_name] = f"error: {str(e)}"
 
         # Calculate total deleted
         total_deleted = sum(v for v in deleted_counts.values() if isinstance(v, int))
 
+        # Log all results
+        logger.info(f"[FLUSH] === FLUSH SUMMARY for company {company_id} ===")
+        for table_name, count in deleted_counts.items():
+            logger.info(f"[FLUSH]   {table_name}: {count}")
+        logger.info(f"[FLUSH] Total records deleted: {total_deleted}")
         logger.info(f"Company data flush completed for company {company_id} by {user.email}. Total records deleted: {total_deleted}")
 
         # =================================================================

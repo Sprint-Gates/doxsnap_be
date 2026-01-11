@@ -6,6 +6,7 @@ from typing import Optional, List
 from app.database import get_db
 from app.models import User, Company, Site, AddressBook, operator_sites
 from app.utils.security import verify_token, get_password_hash
+from app.utils.limits import enforce_user_limit
 import logging
 
 logger = logging.getLogger(__name__)
@@ -178,17 +179,7 @@ async def create_operator(
         )
 
     # Check plan limits
-    company = db.query(Company).filter(Company.id == user.company_id).first()
-    if company and company.plan:
-        current_count = db.query(User).filter(
-            User.company_id == user.company_id,
-            User.is_active == True
-        ).count()
-        if current_count >= company.plan.max_users:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"User limit reached ({company.plan.max_users}). Upgrade your plan to add more users."
-            )
+    enforce_user_limit(db, user.company_id)
 
     # Validate site_ids if provided
     sites = []

@@ -861,6 +861,101 @@ def seed_default_client_and_site(company_id: int, db: Session) -> dict:
     return result
 
 
+def seed_default_business_units(company_id: int, db: Session) -> dict:
+    """
+    Seed default Business Units (Cost Centers) for a new company.
+
+    Creates two default BUs:
+    - CORP (balance_sheet) - For assets, liabilities, equity accounts
+    - MAIN (profit_loss) - For revenue and expense accounts
+
+    Args:
+        company_id: The company ID to seed data for
+        db: Database session
+
+    Returns:
+        dict with statistics about what was created
+    """
+    result = {
+        "created": 0,
+        "skipped": 0,
+        "business_units": []
+    }
+
+    default_bus = [
+        {
+            "code": "CORP",
+            "name": "Corporate",
+            "description": "Default balance sheet cost center for assets, liabilities, and equity",
+            "bu_type": "balance_sheet",
+            "level_of_detail": 1,
+            "is_active": True
+        },
+        {
+            "code": "MAIN",
+            "name": "Main Operations",
+            "description": "Default profit & loss cost center for revenue and expenses",
+            "bu_type": "profit_loss",
+            "level_of_detail": 1,
+            "is_active": True
+        }
+    ]
+
+    for bu_data in default_bus:
+        # Check if BU already exists
+        existing = db.query(BusinessUnit).filter(
+            BusinessUnit.company_id == company_id,
+            BusinessUnit.code == bu_data["code"]
+        ).first()
+
+        if existing:
+            result["skipped"] += 1
+            result["business_units"].append({
+                "code": bu_data["code"],
+                "name": bu_data["name"],
+                "created": False,
+                "id": existing.id
+            })
+            logger.info(f"Business Unit '{bu_data['code']}' already exists for company {company_id}")
+        else:
+            bu = BusinessUnit(
+                company_id=company_id,
+                **bu_data
+            )
+            db.add(bu)
+            db.flush()
+            result["created"] += 1
+            result["business_units"].append({
+                "code": bu_data["code"],
+                "name": bu_data["name"],
+                "created": True,
+                "id": bu.id
+            })
+            logger.info(f"Created Business Unit '{bu_data['code']}' for company {company_id}")
+
+    # Link the main warehouse to CORP if it exists and isn't linked
+    corp_bu = db.query(BusinessUnit).filter(
+        BusinessUnit.company_id == company_id,
+        BusinessUnit.code == "CORP"
+    ).first()
+
+    if corp_bu:
+        unlinked_warehouses = db.query(Warehouse).filter(
+            Warehouse.company_id == company_id,
+            Warehouse.business_unit_id == None
+        ).all()
+
+        for wh in unlinked_warehouses:
+            wh.business_unit_id = corp_bu.id
+            logger.info(f"Linked warehouse '{wh.name}' to CORP business unit")
+
+        if unlinked_warehouses:
+            result["warehouses_linked"] = len(unlinked_warehouses)
+            db.flush()
+
+    return result
+
+
 def seed_company_defaults(company_id: int, db: Session) -> dict:
     """
     Seed all default data for a new company.
@@ -869,6 +964,7 @@ def seed_company_defaults(company_id: int, db: Session) -> dict:
     - Chart of Accounts (Account Types and Accounts)
     - Default Account Mappings (for automatic journal entries)
     - Main Warehouse
+    - Default Business Units / Cost Centers (CORP and MAIN)
     - Default Item Categories
     - Default Client and Site (for cost allocations)
 
@@ -885,6 +981,7 @@ def seed_company_defaults(company_id: int, db: Session) -> dict:
         "chart_of_accounts": None,
         "account_mappings": None,
         "warehouse": None,
+        "business_units": None,
         "item_categories": None,
         "client_and_site": None,
         "errors": []
@@ -916,6 +1013,15 @@ def seed_company_defaults(company_id: int, db: Session) -> dict:
     except Exception as e:
         logger.error(f"Error seeding warehouse for company {company_id}: {e}")
         results["errors"].append(f"Warehouse: {str(e)}")
+
+    try:
+        # Seed Default Business Units (Cost Centers) - after warehouse so it can link them
+        bu_stats = seed_default_business_units(company_id, db)
+        results["business_units"] = bu_stats
+        logger.info(f"Business units seeded for company {company_id}: {bu_stats}")
+    except Exception as e:
+        logger.error(f"Error seeding business units for company {company_id}: {e}")
+        results["errors"].append(f"Business units: {str(e)}")
 
     try:
         # Seed Item Categories

@@ -7,7 +7,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from app.database import get_db
 from app.models import (
-    Contract, ContractScope, Scope, Site, Client, User, contract_sites,
+    Contract, ContractScope, Scope, Site, Client, User, contract_sites, AddressBook,
     WorkOrder, WorkOrderTimeEntry, WorkOrderSparePart, Equipment, Building, Block, Floor, Room, Unit,
     Technician, PettyCashTransaction, InvoiceAllocation, AllocationPeriod, ProcessedImage,
     JournalEntry, JournalEntryLine, Account, AccountType
@@ -211,7 +211,8 @@ async def seed_default_scopes(
 
 @router.get("/", response_model=List[ContractSchema])
 async def get_contracts(
-    client_id: Optional[int] = Query(None, description="Filter by client ID"),
+    client_id: Optional[int] = Query(None, description="Filter by client ID (legacy)"),
+    address_book_id: Optional[int] = Query(None, description="Filter by Address Book ID (customer)"),
     site_id: Optional[int] = Query(None, description="Filter by site ID"),
     status_filter: Optional[str] = Query(None, alias="status", description="Filter by status"),
     contract_type: Optional[str] = Query(None, description="Filter by contract type"),
@@ -224,7 +225,10 @@ async def get_contracts(
     """Get all contracts for the company"""
     query = db.query(Contract).filter(Contract.company_id == current_user.company_id)
 
-    if client_id is not None:
+    # Support filtering by address_book_id (new) or client_id (legacy)
+    if address_book_id is not None:
+        query = query.filter(Contract.address_book_id == address_book_id)
+    elif client_id is not None:
         query = query.filter(Contract.client_id == client_id)
 
     if site_id is not None:
@@ -311,14 +315,30 @@ async def create_contract(
     current_user: User = Depends(get_current_user)
 ):
     """Create a new contract"""
-    # Verify client belongs to company
-    client = db.query(Client).filter(
-        Client.id == contract_data.client_id,
-        Client.company_id == current_user.company_id
-    ).first()
+    # Verify client/address_book entry belongs to company
+    # Support both legacy client_id and new address_book_id
+    address_book_entry = None
+    client = None
 
-    if not client:
-        raise HTTPException(status_code=404, detail="Client not found or access denied")
+    if contract_data.address_book_id:
+        # New approach: Use Address Book
+        address_book_entry = db.query(AddressBook).filter(
+            AddressBook.id == contract_data.address_book_id,
+            AddressBook.company_id == current_user.company_id,
+            AddressBook.search_type == 'C'  # Customer type
+        ).first()
+        if not address_book_entry:
+            raise HTTPException(status_code=404, detail="Customer not found or access denied")
+    elif contract_data.client_id:
+        # Legacy approach: Use Client table
+        client = db.query(Client).filter(
+            Client.id == contract_data.client_id,
+            Client.company_id == current_user.company_id
+        ).first()
+        if not client:
+            raise HTTPException(status_code=404, detail="Client not found or access denied")
+    else:
+        raise HTTPException(status_code=400, detail="Either client_id or address_book_id is required")
 
     # Validate dates
     if contract_data.end_date <= contract_data.start_date:
@@ -337,6 +357,11 @@ async def create_contract(
 
     # Create contract (exclude nested fields)
     contract_dict = contract_data.model_dump(exclude={"site_ids", "scopes"})
+
+    # Ensure address_book_id is set for new contracts
+    if contract_data.address_book_id and not contract_dict.get('address_book_id'):
+        contract_dict['address_book_id'] = contract_data.address_book_id
+
     contract = Contract(
         company_id=current_user.company_id,
         created_by=current_user.id,
@@ -347,10 +372,14 @@ async def create_contract(
 
     # Add sites
     if site_ids:
-        sites = db.query(Site).filter(
-            Site.id.in_(site_ids),
-            Site.client_id == contract_data.client_id
-        ).all()
+        # Build site filter based on whether we're using address_book_id or client_id
+        site_query = db.query(Site).filter(Site.id.in_(site_ids))
+        if contract_data.address_book_id:
+            site_query = site_query.filter(Site.address_book_id == contract_data.address_book_id)
+        elif contract_data.client_id:
+            site_query = site_query.filter(Site.client_id == contract_data.client_id)
+
+        sites = site_query.all()
 
         if len(sites) != len(site_ids):
             raise HTTPException(status_code=400, detail="Some sites not found or don't belong to the client")
@@ -816,21 +845,34 @@ async def get_contract_cost_center(
     # Get all equipment IDs for these sites (empty list if no sites)
     equipment_ids = get_equipment_ids_for_sites(db, site_ids) if site_ids else []
 
-    # Get all work orders for this contract
+    # Get ALL site IDs for this client (address_book_id) - not just contract-covered sites
+    # This allows work orders for ANY site belonging to the same client to show in cost center
+    all_client_site_ids = []
+    if contract.address_book_id:
+        all_client_sites = db.query(Site.id).filter(
+            Site.company_id == current_user.company_id,
+            Site.address_book_id == contract.address_book_id
+        ).all()
+        all_client_site_ids = [s.id for s in all_client_sites]
+
+    # Get all equipment IDs for ALL client sites
+    all_client_equipment_ids = get_equipment_ids_for_sites(db, all_client_site_ids) if all_client_site_ids else []
+
+    # Get all work orders for this contract/client
     # Include work orders linked via:
     # 1. Direct contract_id
-    # 2. Direct site_id (for sites covered by this contract)
-    # 3. Equipment in these sites
+    # 2. Direct site_id (for ANY site belonging to the same client)
+    # 3. Equipment in ANY site belonging to the same client
     work_orders = []
 
     # Build the OR conditions for work order query
     wo_conditions = [WorkOrder.contract_id == contract_id]
 
-    if site_ids:
-        wo_conditions.append(WorkOrder.site_id.in_(site_ids))
+    if all_client_site_ids:
+        wo_conditions.append(WorkOrder.site_id.in_(all_client_site_ids))
 
-    if equipment_ids:
-        wo_conditions.append(WorkOrder.equipment_id.in_(equipment_ids))
+    if all_client_equipment_ids:
+        wo_conditions.append(WorkOrder.equipment_id.in_(all_client_equipment_ids))
 
     work_orders = db.query(WorkOrder).filter(
         WorkOrder.company_id == current_user.company_id,

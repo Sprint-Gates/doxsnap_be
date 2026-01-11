@@ -7,7 +7,7 @@ from typing import List, Optional, Tuple, Dict, Any
 from datetime import datetime
 from decimal import Decimal
 from app.database import get_db
-from app.models import User, InvoiceItem, ItemMaster, Warehouse, ItemStock, ItemLedger, ItemAlias
+from app.models import User, InvoiceItem, ItemMaster, Warehouse, ItemStock, ItemLedger, ItemAlias, Company
 from app.utils.security import verify_password, create_access_token, verify_token
 from app.services.journal_posting import JournalPostingService
 import json
@@ -1252,6 +1252,16 @@ async def admin_upload_image(
         # Process image (resize, compress, OCR, AI extraction) - pass db and company_id for vendor lookup/creation
         processed_image_path, invoice_results = process_image(temp_file_path, file_bytes, db, admin_user.company_id)
 
+        # Increment company's document usage counter IMMEDIATELY after OCR processing
+        # This counts the API usage regardless of whether the invoice is a duplicate
+        if admin_user.company_id:
+            company = db.query(Company).filter(Company.id == admin_user.company_id).first()
+            if company:
+                old_count = company.documents_used_this_month
+                company.documents_used_this_month += 1
+                db.commit()
+                logger.info(f"[DOCUMENT_COUNTER] Admin upload - Company {company.id} ({company.name}): {old_count} -> {company.documents_used_this_month}")
+
         # Try to upload to S3, fallback to local if it fails
         try:
             s3_key, s3_url = upload_to_s3(processed_image_path, unique_filename)
@@ -1440,6 +1450,15 @@ async def admin_upload_bulk_images(
 
             # Process image (resize, compress, OCR, AI extraction) - pass company_id for vendor auto-creation
             processed_image_path, invoice_results = process_image(temp_file_path, file_bytes, db, admin_user.company_id)
+
+            # Increment company's document usage counter IMMEDIATELY after OCR processing
+            # This counts the API usage regardless of whether the invoice is a duplicate
+            if admin_user.company_id:
+                company = db.query(Company).filter(Company.id == admin_user.company_id).first()
+                if company:
+                    company.documents_used_this_month += 1
+                    db.commit()
+                    logger.info(f"[DOCUMENT_COUNTER] Bulk upload - Company {company.id}: incremented to {company.documents_used_this_month}")
 
             # Try to upload to S3, fallback to local if it fails
             try:
@@ -1931,6 +1950,357 @@ async def post_invoice_items(
         "message": f"Posted {received_count} items to inventory" + (f" with {len(errors)} errors" if errors else ""),
         "received_count": received_count,
         "total_amount": float(total_inventory_cost),
+        "vat_amount": float(vat_amount),
+        "journal_entry": journal_entry_number,
+        "errors": errors if errors else None
+    }
+
+
+@router.post("/admin/invoices/{invoice_id}/reverse")
+async def reverse_invoice_posting(
+    invoice_id: int,
+    admin_user: User = Depends(get_current_admin),
+    db: Session = Depends(get_db)
+):
+    """
+    Reverse a posted invoice - undo all inventory and accounting effects.
+
+    This endpoint reverses:
+    1. ItemLedger entries (creates negative entries to offset)
+    2. ItemStock quantities (decreases quantity_on_hand)
+    3. JournalEntry (creates reversing entry with flipped debits/credits)
+    4. AccountBalance records (updates balances)
+    5. Resets invoice posting_status and InvoiceItem receive_status
+
+    Only invoices with posting_status='posted' can be reversed.
+    """
+    import json
+    from app.models import User as UserModel, ProcessedImage
+
+    # Get the invoice
+    invoice = db.query(ProcessedImage).join(
+        UserModel, ProcessedImage.user_id == UserModel.id
+    ).filter(
+        ProcessedImage.id == invoice_id,
+        UserModel.company_id == admin_user.company_id
+    ).first()
+
+    if not invoice:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Invoice not found"
+        )
+
+    if invoice.posting_status != "posted":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invoice is not posted (status: {invoice.posting_status}). Only posted invoices can be reversed."
+        )
+
+    # Get all received invoice items
+    received_items = db.query(InvoiceItem).filter(
+        InvoiceItem.invoice_id == invoice_id,
+        InvoiceItem.receive_status == "received",
+        InvoiceItem.item_id.isnot(None)
+    ).all()
+
+    if not received_items:
+        # No items to reverse, just reset status
+        invoice.posting_status = "pending"
+        db.commit()
+        return {
+            "success": True,
+            "message": "Invoice status reset (no items to reverse)",
+            "reversed_count": 0,
+            "journal_entry": None
+        }
+
+    # Process reversal
+    reversed_count = 0
+    total_reversed_cost = Decimal("0")
+    reversed_items_summary = []
+    first_reversal_ledger_id = None
+    first_reversal_transaction_number = None
+    errors = []
+
+    for inv_item in received_items:
+        try:
+            # Get the Item Master
+            item = db.query(ItemMaster).filter(
+                ItemMaster.id == inv_item.item_id,
+                ItemMaster.company_id == admin_user.company_id
+            ).first()
+
+            if not item:
+                errors.append(f"Item ID {inv_item.item_id} not found")
+                continue
+
+            # Get the warehouse where item was received
+            warehouse_id = inv_item.received_to_warehouse_id
+            if not warehouse_id:
+                # Try to find from original ledger entry
+                original_ledger = db.query(ItemLedger).filter(
+                    ItemLedger.invoice_id == invoice_id,
+                    ItemLedger.item_id == inv_item.item_id,
+                    ItemLedger.transaction_type == "RECEIVE_INVOICE"
+                ).first()
+                if original_ledger:
+                    warehouse_id = original_ledger.to_warehouse_id
+
+            if not warehouse_id:
+                # Fall back to main warehouse
+                main_warehouse = db.query(Warehouse).filter(
+                    Warehouse.company_id == admin_user.company_id,
+                    Warehouse.is_main == True,
+                    Warehouse.is_active == True
+                ).first()
+                warehouse_id = main_warehouse.id if main_warehouse else None
+
+            if not warehouse_id:
+                errors.append(f"Could not determine warehouse for item {item.item_number}")
+                continue
+
+            # Get ItemStock
+            stock = db.query(ItemStock).filter(
+                ItemStock.item_id == item.id,
+                ItemStock.warehouse_id == warehouse_id
+            ).first()
+
+            if not stock:
+                errors.append(f"Stock record not found for {item.item_number}")
+                continue
+
+            qty_decimal = Decimal(str(inv_item.quantity_received or inv_item.quantity))
+            unit_price = Decimal(str(inv_item.unit_price)) if inv_item.unit_price else Decimal("0")
+            line_total_net = qty_decimal * unit_price
+
+            # Check if there's enough quantity to reverse
+            current_qty = stock.quantity_on_hand or Decimal("0")
+            if current_qty < qty_decimal:
+                errors.append(f"Insufficient quantity for {item.item_number}. On hand: {current_qty}, need to reverse: {qty_decimal}")
+                continue
+
+            # Update stock quantity (decrease)
+            new_qty = current_qty - qty_decimal
+            stock.quantity_on_hand = new_qty
+            stock.last_movement_date = datetime.utcnow()
+
+            # Generate reversal transaction number
+            reversal_transaction_number = f"INV-REV-{invoice_id}-{inv_item.id}"
+
+            # Create reversal ItemLedger entry (negative quantity)
+            reversal_ledger = ItemLedger(
+                company_id=admin_user.company_id,
+                item_id=item.id,
+                transaction_number=reversal_transaction_number,
+                transaction_type="REVERSE_INVOICE",
+                transaction_date=datetime.utcnow(),
+                quantity=-qty_decimal,  # Negative quantity for reversal
+                unit=inv_item.unit[:20] if inv_item.unit else "EA",
+                unit_cost=unit_price,
+                total_cost=-line_total_net,  # Negative cost
+                from_warehouse_id=warehouse_id,  # Moving FROM warehouse
+                invoice_id=invoice_id,
+                balance_after=new_qty,
+                notes=f"Reversal of invoice posting",
+                created_by=admin_user.id
+            )
+            db.add(reversal_ledger)
+            db.flush()
+
+            total_reversed_cost += line_total_net
+            reversed_items_summary.append(f"{item.item_number} x {qty_decimal}")
+
+            if first_reversal_ledger_id is None:
+                first_reversal_ledger_id = reversal_ledger.id
+                first_reversal_transaction_number = reversal_transaction_number
+
+            # Reset invoice item status
+            inv_item.receive_status = "pending"
+            inv_item.quantity_received = None
+            inv_item.received_to_warehouse_id = None
+            inv_item.received_at = None
+            inv_item.received_by = None
+
+            reversed_count += 1
+            logger.info(f"Reversed invoice item: {item.item_number} x {qty_decimal}")
+
+        except Exception as e:
+            logger.error(f"Error reversing invoice item {inv_item.id}: {e}")
+            errors.append(f"Item {inv_item.item_description or inv_item.id}: {str(e)}")
+
+    # Create reversing journal entry
+    journal_entry_number = None
+
+    # Parse structured data for VAT info
+    structured_data = {}
+    if invoice.structured_data:
+        try:
+            structured_data = json.loads(invoice.structured_data)
+        except (json.JSONDecodeError, TypeError):
+            structured_data = {}
+
+    financial_details = structured_data.get("financial_details", {})
+    vat_amount = Decimal("0")
+    try:
+        tax_str = financial_details.get("total_tax_amount") or financial_details.get("vat_amount") or "0"
+        if isinstance(tax_str, str):
+            tax_str = tax_str.replace("$", "").replace(",", "").strip()
+        vat_amount = Decimal(str(tax_str)) if tax_str else Decimal("0")
+    except (ValueError, TypeError, Exception):
+        vat_amount = Decimal("0")
+
+    if reversed_count > 0 and total_reversed_cost > 0:
+        try:
+            from app.services.journal_posting import JournalPostingService
+            from app.models import JournalEntry, JournalEntryLine
+            from datetime import date
+
+            journal_service = JournalPostingService(db, admin_user.company_id, admin_user.id)
+
+            # Get account mapping
+            mapping = journal_service._get_mapping("invoice_receive_inventory")
+            if not mapping:
+                mapping = journal_service._get_mapping("po_receive_inventory")
+            if not mapping:
+                mapping = journal_service._get_mapping("inventory_increase")
+            if not mapping:
+                mapping = journal_service._get_mapping("goods_received")
+
+            if mapping:
+                # Get business unit from warehouse
+                warehouse = db.query(Warehouse).filter(
+                    Warehouse.company_id == admin_user.company_id,
+                    Warehouse.is_main == True
+                ).first()
+                business_unit_id = journal_service._get_business_unit_from_warehouse(warehouse.id if warehouse else None)
+                if not business_unit_id:
+                    business_unit_id = journal_service._get_default_business_unit("balance_sheet")
+
+                entry_date = date.today()
+                fiscal_period = journal_service._get_fiscal_period(entry_date)
+
+                items_desc = ", ".join(reversed_items_summary[:3])
+                if len(reversed_items_summary) > 3:
+                    items_desc += f" (+{len(reversed_items_summary) - 3} more)"
+
+                # Create reversing journal entry (flip debits and credits)
+                entry = JournalEntry(
+                    company_id=admin_user.company_id,
+                    entry_number=journal_service._generate_entry_number(),
+                    entry_date=entry_date,
+                    description=f"REVERSAL - Invoice Post - {items_desc}",
+                    source_type="invoice_post_reversal",
+                    source_id=first_reversal_ledger_id,
+                    source_number=first_reversal_transaction_number,
+                    reference=f"REV-INV-{invoice_id}",
+                    status="posted",
+                    fiscal_period_id=fiscal_period.id if fiscal_period else None,
+                    created_by=admin_user.id,
+                    is_auto_generated=True
+                )
+                db.add(entry)
+                db.flush()
+
+                je_lines = []
+                line_number = 1
+
+                # Reversing entry: flip debits and credits
+                # Original was: DR Inventory, DR VAT, CR GRNI
+                # Reversal is: CR Inventory, CR VAT, DR GRNI
+
+                # CR: Inventory (was DR in original)
+                if mapping.debit_account_id:
+                    inv_line = JournalEntryLine(
+                        journal_entry_id=entry.id,
+                        account_id=mapping.debit_account_id,
+                        debit=0,
+                        credit=float(total_reversed_cost),  # CREDIT instead of debit
+                        description=f"REVERSAL - Inventory - {items_desc}",
+                        line_number=line_number,
+                        business_unit_id=business_unit_id
+                    )
+                    db.add(inv_line)
+                    je_lines.append(inv_line)
+                    line_number += 1
+
+                # CR: VAT Input (was DR in original)
+                if vat_amount > 0:
+                    vat_mapping = journal_service._get_mapping("po_receive_vat")
+                    if not vat_mapping:
+                        vat_mapping = journal_service._get_mapping("vat_input")
+                    if not vat_mapping:
+                        vat_mapping = journal_service._get_mapping("tax_input")
+
+                    if vat_mapping and vat_mapping.debit_account_id:
+                        vat_line = JournalEntryLine(
+                            journal_entry_id=entry.id,
+                            account_id=vat_mapping.debit_account_id,
+                            debit=0,
+                            credit=float(vat_amount),  # CREDIT instead of debit
+                            description=f"REVERSAL - VAT Input",
+                            line_number=line_number,
+                            business_unit_id=business_unit_id
+                        )
+                        db.add(vat_line)
+                        je_lines.append(vat_line)
+                        line_number += 1
+
+                # DR: GRNI (was CR in original)
+                total_debit = total_reversed_cost + vat_amount
+                if mapping.credit_account_id:
+                    ap_line = JournalEntryLine(
+                        journal_entry_id=entry.id,
+                        account_id=mapping.credit_account_id,
+                        debit=float(total_debit),  # DEBIT instead of credit
+                        credit=0,
+                        description=f"REVERSAL - GRNI for invoice post",
+                        line_number=line_number,
+                        business_unit_id=business_unit_id
+                    )
+                    db.add(ap_line)
+                    je_lines.append(ap_line)
+
+                # Update totals
+                entry.total_debit = sum(float(l.debit) for l in je_lines)
+                entry.total_credit = sum(float(l.credit) for l in je_lines)
+
+                # Update account balances
+                journal_service._update_account_balance(entry)
+
+                journal_entry_number = entry.entry_number
+                logger.info(f"Created reversing journal entry {entry.entry_number}")
+
+                # Mark the original journal entry as "reversed"
+                original_je = db.query(JournalEntry).filter(
+                    JournalEntry.company_id == admin_user.company_id,
+                    JournalEntry.source_type == "invoice_post",
+                    JournalEntry.reference == f"INV-{invoice_id}",
+                    JournalEntry.status == "posted"
+                ).order_by(JournalEntry.id.desc()).first()
+
+                if original_je:
+                    original_je.status = "reversed"
+                    original_je.reversed_by_id = entry.id
+                    logger.info(f"Marked original journal entry {original_je.entry_number} as reversed")
+
+        except Exception as je_error:
+            logger.error(f"Error creating reversing journal entry: {je_error}")
+            import traceback
+            logger.error(f"Reversal journal entry traceback: {traceback.format_exc()}")
+            errors.append(f"Reversing journal entry creation failed: {str(je_error)}")
+
+    # Reset invoice posting status
+    if reversed_count > 0:
+        invoice.posting_status = "pending"
+
+    db.commit()
+
+    return {
+        "success": reversed_count > 0,
+        "message": f"Reversed {reversed_count} items from inventory" + (f" with {len(errors)} errors" if errors else ""),
+        "reversed_count": reversed_count,
+        "total_amount": float(total_reversed_cost),
         "vat_amount": float(vat_amount),
         "journal_entry": journal_entry_number,
         "errors": errors if errors else None
