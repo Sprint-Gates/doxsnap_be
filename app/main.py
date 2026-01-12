@@ -8,7 +8,7 @@ import os
 import logging
 import google.generativeai as genai
 
-from app.api import auth, images, otp, admin, document_types, technician_site_shifts, plans, companies, projects, operators, handheld_devices, assets, attendance, work_orders, warehouses, pm_checklists, pm_work_orders, dashboard, item_master, cycle_count, hhd_auth, users, sites, contracts, tickets, ticket_timeline, calendar, condition_reports, technician_evaluations, nps, petty_cash, docs, allocations, accounting, exchange_rates, purchase_requests, purchase_orders, goods_receipts, crm_leads, crm_opportunities, crm_activities, crm_campaigns, tools, disposals, business_units, address_book, supplier_invoices, supplier_payments, technicians, import_export, fleet, client_portal, client_admin, platform_admin
+from app.api import auth, images, otp, admin, document_types, technician_site_shifts, plans, companies, projects, operators, handheld_devices, assets, attendance, work_orders, warehouses, pm_checklists, pm_work_orders, dashboard, item_master, cycle_count, hhd_auth, users, sites, contracts, tickets, ticket_timeline, calendar, condition_reports, technician_evaluations, nps, petty_cash, docs, allocations, accounting, exchange_rates, purchase_requests, purchase_orders, goods_receipts, crm_leads, crm_opportunities, crm_activities, crm_campaigns, tools, disposals, business_units, address_book, supplier_invoices, supplier_payments, technicians, import_export, fleet, client_portal, client_admin, platform_admin, upgrade_requests
 from app.database import engine, get_db
 from app.models import Base, User, ProcessedImage, DocumentType, Warehouse, Plan, Company, Client, Project, Technician, HandHeldDevice, Floor, Room, Equipment, SubEquipment, TechnicianAttendance, SparePart, WorkOrder, WorkOrderSparePart, WorkOrderTimeEntry, PMSchedule, ItemCategory, ItemMaster, ItemStock, ItemLedger, ItemTransfer, ItemTransferLine, InvoiceItem, CycleCount, CycleCountItem, RefreshToken, Site, Building, Space, Scope, Contract, ContractScope, Ticket, CalendarSlot, WorkOrderSlotAssignment, CalendarTemplate, InvoiceAllocation, AllocationPeriod, RecognitionLog, AccountType, Account, FiscalPeriod, JournalEntry, JournalEntryLine, AccountBalance, DefaultAccountMapping, ExchangeRate, ExchangeRateLog, PurchaseRequest, PurchaseRequestLine, PurchaseOrder, PurchaseOrderLine, PurchaseOrderInvoice, GoodsReceipt, GoodsReceiptLine, LeadSource, PipelineStage, Lead, Opportunity, CRMActivity, Campaign, CampaignLead, ToolCategory, Tool, ToolPurchase, ToolPurchaseLine, ToolAllocationHistory, Disposal, DisposalToolLine, DisposalItemLine, BusinessUnit, AddressBook, AddressBookContact, SupplierInvoice, SupplierInvoiceLine, SupplierPayment, SupplierPaymentAllocation, DebitNote, DebitNoteLine, PurchaseOrderAmendment, Service, ClientUser, ClientRefreshToken
 from app.config import settings
@@ -314,6 +314,9 @@ app.include_router(client_admin.router, prefix="/api", tags=["Client Admin"])
 
 # Platform Admin Router (Super Admin for managing subscriptions)
 app.include_router(platform_admin.router, prefix="/api", tags=["Platform Admin"])
+
+# Upgrade Requests Router
+app.include_router(upgrade_requests.router, prefix="/api", tags=["Upgrade Requests"])
 
 @app.get("/")
 async def root():

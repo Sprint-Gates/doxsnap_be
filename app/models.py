@@ -278,6 +278,32 @@ class SuperAdminRefreshToken(Base):
     super_admin = relationship("SuperAdmin", backref="refresh_tokens")
 
 
+class UpgradeRequest(Base):
+    """Upgrade/subscription change requests from companies"""
+    __tablename__ = "upgrade_requests"
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+    requested_by_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    current_plan_id = Column(Integer, ForeignKey("plans.id"), nullable=True)
+    requested_plan_id = Column(Integer, ForeignKey("plans.id"), nullable=True)
+    request_type = Column(String, nullable=False)  # upgrade, downgrade, renewal, custom
+    status = Column(String, default="pending")  # pending, approved, rejected, completed
+    message = Column(Text, nullable=True)  # User's message/reason for upgrade
+    admin_notes = Column(Text, nullable=True)  # Platform admin notes
+    processed_by_id = Column(Integer, ForeignKey("super_admins.id"), nullable=True)
+    processed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    # Relationships
+    company = relationship("Company", backref="upgrade_requests")
+    requested_by = relationship("User", backref="upgrade_requests")
+    current_plan = relationship("Plan", foreign_keys=[current_plan_id])
+    requested_plan = relationship("Plan", foreign_keys=[requested_plan_id])
+    processed_by = relationship("SuperAdmin", backref="processed_upgrade_requests")
+
+
 class ProcessedImage(Base):
     __tablename__ = "processed_images"
 

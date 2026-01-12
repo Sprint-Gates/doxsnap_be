@@ -151,7 +151,8 @@ def device_to_response(device: HandHeldDevice, db: Session) -> dict:
         "assigned_technician": technician_data,
         "assigned_technicians": assigned_technicians_data,
         "assigned_at": device.assigned_at.isoformat() if device.assigned_at else None,
-        "mobile_pin_set": bool(device.mobile_pin),  # Indicates if PIN is configured (don't expose actual PIN)
+        "mobile_pin_set": bool(device.mobile_pin),
+        "mobile_pin": device.mobile_pin,  # Expose actual PIN for editing
         "status": device.status,
         "notes": device.notes,
         "is_active": device.is_active,
@@ -385,7 +386,7 @@ async def update_handheld_device(
                 )
 
     try:
-        update_data = data.dict(exclude_unset=True)
+        update_data = data.model_dump(exclude_unset=True)
         for field, value in update_data.items():
             setattr(device, field, value)
 
