@@ -541,6 +541,10 @@ class HandHeldDevice(Base):
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
 
+    # FCM Push Notifications
+    fcm_token = Column(String, nullable=True)  # Firebase Cloud Messaging token
+    fcm_token_updated_at = Column(DateTime, nullable=True)  # When token was last updated
+
     # Relationships
     company = relationship("Company")
     warehouse = relationship("Warehouse", backref="handheld_devices")

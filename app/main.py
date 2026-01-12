@@ -64,6 +64,9 @@ def run_migrations():
         ("tickets", "service_id", "ALTER TABLE tickets ADD COLUMN IF NOT EXISTS service_id INTEGER REFERENCES services(id)"),
         # Client Portal: Make tickets.requested_by nullable (for client portal submissions)
         ("tickets", "requested_by_nullable", "ALTER TABLE tickets ALTER COLUMN requested_by DROP NOT NULL"),
+        # FCM Push Notifications
+        ("handheld_devices", "fcm_token", "ALTER TABLE handheld_devices ADD COLUMN IF NOT EXISTS fcm_token VARCHAR"),
+        ("handheld_devices", "fcm_token_updated_at", "ALTER TABLE handheld_devices ADD COLUMN IF NOT EXISTS fcm_token_updated_at TIMESTAMP"),
     ]
 
     with engine.connect() as conn:

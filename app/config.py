@@ -49,7 +49,10 @@ class Settings(BaseSettings):
 
     # Frontend URL for email links
     frontend_url: str = "http://localhost:4200"
-    
+
+    # Firebase Cloud Messaging
+    firebase_service_account_path: Optional[str] = None  # Path to Firebase service account JSON
+
     @property
     def database_connection_url(self) -> str:
         """Build database URL from individual components or use direct URL"""

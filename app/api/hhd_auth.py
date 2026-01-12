@@ -10,7 +10,7 @@ import secrets
 import hashlib
 
 from app.database import get_db
-from app.models import HandHeldDevice, Technician, Company, AddressBook, handheld_device_technicians
+from app.models import HandHeldDevice, Technician, Company, AddressBook, handheld_device_technicians, handheld_device_technicians_ab
 from app.utils.security import create_access_token, verify_token
 from app.utils.rate_limiter import limiter, RateLimits
 
@@ -91,11 +91,19 @@ async def hhd_login(
             detail="Invalid device code or PIN"
         )
 
-    # Check if device has assigned employee (address_book) or legacy technician(s)
-    has_employee = device.address_book_id is not None
+    # Check for employee assignment via many-to-many table (handheld_device_technicians_ab)
+    employee_assignments = db.execute(
+        handheld_device_technicians_ab.select().where(
+            handheld_device_technicians_ab.c.handheld_device_id == device.id
+        )
+    ).fetchall()
+
+    # Check if device has assigned employee (via m2m or direct) or legacy technician(s)
+    has_employee_m2m = len(employee_assignments) > 0
+    has_employee_direct = device.address_book_id is not None
     has_legacy_technician = device.assigned_technician is not None or len(device.assigned_technicians) > 0
 
-    if not has_employee and not has_legacy_technician:
+    if not has_employee_m2m and not has_employee_direct and not has_legacy_technician:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Device has no assigned employee"
@@ -115,12 +123,31 @@ async def hhd_login(
             detail="Invalid device code or PIN"
         )
 
-    # Get assigned employee (address_book) - this is the new approach
-    assigned_employee = device.address_book if has_employee else None
+    # Get assigned employee - prefer many-to-many, then direct, then legacy
+    assigned_employee = None
+
+    # First try: employee from many-to-many table (new approach)
+    if has_employee_m2m:
+        # Find primary employee or take first one
+        primary_assignment = None
+        for assignment in employee_assignments:
+            if assignment.is_primary:
+                primary_assignment = assignment
+                break
+        if not primary_assignment:
+            primary_assignment = employee_assignments[0]
+
+        assigned_employee = db.query(AddressBook).filter(
+            AddressBook.id == primary_assignment.address_book_id
+        ).first()
+
+    # Second try: direct address_book_id on device
+    elif has_employee_direct:
+        assigned_employee = device.address_book
 
     # Get primary technician (legacy support)
     primary_tech = None
-    if not has_employee:
+    if not assigned_employee:
         primary_tech = device.assigned_technician
         if not primary_tech and device.assigned_technicians:
             # Find primary from many-to-many
@@ -171,12 +198,13 @@ async def hhd_login(
     technician_data = None
     if assigned_employee:
         # New approach: employee from address_book
+        # AddressBook uses alpha_name, phone_primary, and has specialization for employees
         technician_data = {
             "id": assigned_employee.id,
-            "name": assigned_employee.name,
+            "name": assigned_employee.alpha_name,
             "email": assigned_employee.email,
-            "phone": assigned_employee.phone,
-            "specialization": None  # AddressBook doesn't have specialization
+            "phone": assigned_employee.phone_primary,
+            "specialization": assigned_employee.specialization
         }
     elif primary_tech:
         # Legacy approach: technician
@@ -224,8 +252,33 @@ async def hhd_refresh_token(
             detail="Device not found or inactive"
         )
 
-    # Get assigned employee (new approach) or primary technician (legacy)
-    assigned_employee = device.address_book if device.address_book_id else None
+    # Get assigned employee - check many-to-many first, then direct, then legacy
+    assigned_employee = None
+
+    # Check many-to-many employee assignments
+    employee_assignments = db.execute(
+        handheld_device_technicians_ab.select().where(
+            handheld_device_technicians_ab.c.handheld_device_id == device.id
+        )
+    ).fetchall()
+
+    if employee_assignments:
+        # Find primary or take first
+        primary_assignment = None
+        for assignment in employee_assignments:
+            if assignment.is_primary:
+                primary_assignment = assignment
+                break
+        if not primary_assignment:
+            primary_assignment = employee_assignments[0]
+
+        assigned_employee = db.query(AddressBook).filter(
+            AddressBook.id == primary_assignment.address_book_id
+        ).first()
+    elif device.address_book_id:
+        assigned_employee = device.address_book
+
+    # Legacy technician support
     primary_tech = None
     if not assigned_employee:
         primary_tech = device.assigned_technician
@@ -273,3 +326,153 @@ async def hhd_logout(
         del hhd_refresh_tokens[data.refresh_token]
 
     return {"success": True, "message": "Logged out successfully"}
+
+
+class FCMTokenRequest(BaseModel):
+    fcm_token: str
+
+
+def get_device_id_from_token(request: Request) -> Optional[int]:
+    """Extract device_id from HHD JWT token"""
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        return None
+
+    token = auth_header.split(" ")[1]
+    token_data = verify_token(token)
+
+    if not token_data:
+        return None
+
+    # Token data contains device_id claim set during login
+    if isinstance(token_data, dict) and "device_id" in token_data:
+        return token_data["device_id"]
+
+    return None
+
+
+@router.post("/hhd/fcm-token")
+async def register_fcm_token(
+    request: Request,
+    data: FCMTokenRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Register FCM token for push notifications.
+    Must be called with valid HHD authentication.
+    """
+    device_id = get_device_id_from_token(request)
+
+    if not device_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing HHD token"
+        )
+
+    device = db.query(HandHeldDevice).filter(
+        HandHeldDevice.id == device_id,
+        HandHeldDevice.is_active == True
+    ).first()
+
+    if not device:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Device not found"
+        )
+
+    # Update FCM token
+    device.fcm_token = data.fcm_token
+    device.fcm_token_updated_at = datetime.utcnow()
+    db.commit()
+
+    return {"success": True, "message": "FCM token registered successfully"}
+
+
+@router.delete("/hhd/fcm-token")
+async def unregister_fcm_token(
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    """
+    Remove FCM token (e.g., on logout).
+    Must be called with valid HHD authentication.
+    """
+    device_id = get_device_id_from_token(request)
+
+    if not device_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing HHD token"
+        )
+
+    device = db.query(HandHeldDevice).filter(HandHeldDevice.id == device_id).first()
+
+    if device:
+        device.fcm_token = None
+        device.fcm_token_updated_at = datetime.utcnow()
+        db.commit()
+
+    return {"success": True, "message": "FCM token removed"}
+
+
+class TestNotificationRequest(BaseModel):
+    title: str = "Test Notification"
+    body: str = "This is a test push notification"
+    notification_type: str = "test"  # work_order_assignment, stock_transfer, or test
+
+
+@router.post("/hhd/test-notification")
+async def send_test_notification(
+    request: Request,
+    data: TestNotificationRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Send a test push notification to the authenticated HHD device.
+    Useful for testing FCM integration.
+    """
+    device_id = get_device_id_from_token(request)
+
+    if not device_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing HHD token"
+        )
+
+    device = db.query(HandHeldDevice).filter(
+        HandHeldDevice.id == device_id,
+        HandHeldDevice.is_active == True
+    ).first()
+
+    if not device:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Device not found"
+        )
+
+    if not device.fcm_token:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No FCM token registered for this device. Make sure push notifications are enabled."
+        )
+
+    try:
+        from app.services.push_notification import PushNotificationService
+
+        success = PushNotificationService.send_notification(
+            fcm_token=device.fcm_token,
+            title=data.title,
+            body=data.body,
+            notification_type=data.notification_type
+        )
+
+        if success:
+            return {"success": True, "message": "Test notification sent successfully"}
+        else:
+            return {"success": False, "message": "Failed to send notification. Check server logs."}
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error sending notification: {str(e)}"
+        )

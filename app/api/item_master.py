@@ -1489,6 +1489,25 @@ async def create_transfer(
         db.commit()
         db.refresh(transfer)
 
+        # Send push notification if transfer is to HHD
+        if transfer.to_hhd_id:
+            try:
+                from app.services.push_notification import PushNotificationService
+                from app.models import HandHeldDevice
+
+                hhd = db.query(HandHeldDevice).filter(HandHeldDevice.id == transfer.to_hhd_id).first()
+                if hhd and hhd.fcm_token:
+                    PushNotificationService.send_transfer_notification(
+                        fcm_token=hhd.fcm_token,
+                        transfer_number=transfer.transfer_number,
+                        item_count=len(transfer.lines),
+                        from_warehouse=warehouse.name if warehouse else "Warehouse"
+                    )
+            except Exception as notif_error:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.warning(f"Failed to send transfer notification: {notif_error}")
+
         return {"success": True, "transfer_id": transfer.id, "transfer_number": transfer.transfer_number}
     except Exception as e:
         db.rollback()

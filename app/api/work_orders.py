@@ -850,6 +850,21 @@ async def create_work_order(
         db.commit()
         db.refresh(wo)
 
+        # Send push notification if HHD is assigned
+        if wo.assigned_hhd_id:
+            try:
+                from app.services.push_notification import PushNotificationService
+                hhd = db.query(HandHeldDevice).filter(HandHeldDevice.id == wo.assigned_hhd_id).first()
+                if hhd and hhd.fcm_token:
+                    PushNotificationService.send_work_order_assignment_notification(
+                        fcm_token=hhd.fcm_token,
+                        wo_number=wo.wo_number,
+                        wo_title=wo.title or "Work Order",
+                        priority=wo.priority or "medium"
+                    )
+            except Exception as notif_error:
+                logger.warning(f"Failed to send WO assignment notification: {notif_error}")
+
         logger.info(f"Work order {wo.wo_number} created by {user.email}")
         return work_order_to_response(wo)
 
@@ -920,6 +935,9 @@ async def update_work_order(
             )
 
     try:
+        # Capture original HHD assignment for notification check
+        original_hhd_id = wo.assigned_hhd_id
+
         update_data = data.dict(exclude_unset=True)
 
         # Handle clearing HHD assignment
@@ -1017,6 +1035,21 @@ async def update_work_order(
 
         db.commit()
         db.refresh(wo)
+
+        # Send push notification if HHD assignment changed (new assignment)
+        if wo.assigned_hhd_id and wo.assigned_hhd_id != original_hhd_id:
+            try:
+                from app.services.push_notification import PushNotificationService
+                hhd = db.query(HandHeldDevice).filter(HandHeldDevice.id == wo.assigned_hhd_id).first()
+                if hhd and hhd.fcm_token:
+                    PushNotificationService.send_work_order_assignment_notification(
+                        fcm_token=hhd.fcm_token,
+                        wo_number=wo.wo_number,
+                        wo_title=wo.title or "Work Order",
+                        priority=wo.priority or "medium"
+                    )
+            except Exception as notif_error:
+                logger.warning(f"Failed to send WO reassignment notification: {notif_error}")
 
         # NOTE: Journal entries are now created ONLY during approval, not on completion.
         # This prevents duplicate entries. The approval endpoint handles:
