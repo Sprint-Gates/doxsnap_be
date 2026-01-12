@@ -54,7 +54,7 @@ def get_subscription_info(user, db: Session) -> dict:
         if 0 < delta.days <= 3:
             result["show_warning"] = True
             if company.subscription_status == "trial":
-                result["warning_message"] = f"Your trial expires in {delta.days} day{'s' if delta.days != 1 else ''}. Upgrade now to continue using DoxSnap."
+                result["warning_message"] = f"Your trial expires in {delta.days} day{'s' if delta.days != 1 else ''}. Upgrade now to continue using CoreSRP."
             else:
                 result["warning_message"] = f"Your subscription expires in {delta.days} day{'s' if delta.days != 1 else ''}. Renew now to avoid interruption."
 

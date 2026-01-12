@@ -82,7 +82,7 @@ This data was processed and sent by user: {user_email}
 Processing date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}
 
 Best regards,
-DoxSnap Team
+CoreSRP Team
 {self.support_email}
 """
             msg.attach(MIMEText(body, 'plain'))
@@ -143,7 +143,7 @@ The Excel file contains two sheets:
 - The attachment should appear as an Excel file that you can download and open
 
 Best regards,
-DoxSnap Team
+CoreSRP Team
 {self.support_email}
 """
             msg.attach(MIMEText(body, 'plain'))
@@ -347,13 +347,13 @@ DoxSnap Team
 <body>
     <div class="container">
         <div class="header">
-            <h1>DoxSnap</h1>
+            <h1>CoreSRP</h1>
         </div>
         <div class="content">
             {message}
         </div>
         <div class="footer">
-            <p>This email was sent from DoxSnap. For support, contact: {self.support_email}</p>
+            <p>This email was sent from CoreSRP. For support, contact: {self.support_email}</p>
         </div>
     </div>
 </body>
@@ -548,7 +548,7 @@ DoxSnap Team
 
         html += f"""
     <div class="footer">
-        <p>This email was generated automatically by DoxSnap invoice processing system.</p>
+        <p>This email was generated automatically by CoreSRP invoice processing system.</p>
         <p>For support, please contact: {self.support_email}</p>
     </div>
 </body>
@@ -628,7 +628,7 @@ Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}
 
         text += f"""
 ---
-This email was generated automatically by DoxSnap invoice processing system.
+This email was generated automatically by CoreSRP invoice processing system.
 For support, please contact: {self.support_email}
 """
 
