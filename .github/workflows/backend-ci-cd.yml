@@ -29,10 +29,14 @@ jobs:
       SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
       COMPANY_SUPPORT_EMAIL: ${{ secrets.COMPANY_SUPPORT_EMAIL }}
       PLATFORM_ADMIN_SETUP_SECRET: ${{ secrets.PLATFORM_ADMIN_SETUP_SECRET }}
+      FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Create Firebase service account file
+        run: echo '${{ secrets.FIREBASE_SERVICE_ACCOUNT }}' > firebase-service-account.json
 
       - name: Stop existing container
         run: docker rm -f doxsnap_be || true
@@ -66,4 +70,6 @@ jobs:
             -e SMTP_PASSWORD="${{ env.SMTP_PASSWORD }}" \
             -e PLATFORM_ADMIN_SETUP_SECRET="${{ env.PLATFORM_ADMIN_SETUP_SECRET }}" \
             -e COMPANY_SUPPORT_EMAIL="${{ env.COMPANY_SUPPORT_EMAIL }}" \
+            -e FIREBASE_SERVICE_ACCOUNT_PATH="/app/firebase-service-account.json" \
+            -v $(pwd)/firebase-service-account.json:/app/firebase-service-account.json:ro \
             doxsnap_be_img
