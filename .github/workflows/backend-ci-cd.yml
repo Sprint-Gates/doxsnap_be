@@ -28,6 +28,7 @@ jobs:
       SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
       SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
       COMPANY_SUPPORT_EMAIL: ${{ secrets.COMPANY_SUPPORT_EMAIL }}
+      PLATFORM_ADMIN_SETUP_SECRET: ${{ secrets.PLATFORM_ADMIN_SETUP_SECRET }}
 
     steps:
       - name: Checkout code
@@ -63,5 +64,6 @@ jobs:
             -e SMTP_PORT="${{ env.SMTP_PORT }}" \
             -e SMTP_USERNAME="${{ env.SMTP_USERNAME }}" \
             -e SMTP_PASSWORD="${{ env.SMTP_PASSWORD }}" \
+            -e PLATFORM_ADMIN_SETUP_SECRET="${{ env.PLATFORM_ADMIN_SETUP_SECRET }}" \
             -e COMPANY_SUPPORT_EMAIL="${{ env.COMPANY_SUPPORT_EMAIL }}" \
             doxsnap_be_img
