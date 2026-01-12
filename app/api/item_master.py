@@ -1738,6 +1738,9 @@ async def get_hhd_stock(
             reserved = decimal_to_float(stock.quantity_reserved) or 0
             available = on_hand - reserved
 
+            # Use average_cost from stock record, fallback to item unit_cost
+            cost = decimal_to_float(stock.average_cost) or decimal_to_float(stock.item.unit_cost)
+
             items.append({
                 "item_id": stock.item.id,
                 "item_number": stock.item.item_number,
@@ -1747,7 +1750,7 @@ async def get_hhd_stock(
                 "quantity_on_hand": on_hand,
                 "quantity_reserved": reserved,
                 "quantity_available": available,
-                "unit_cost": decimal_to_float(stock.item.unit_cost),
+                "unit_cost": cost,
                 "last_movement_date": stock.last_movement_date.isoformat() if stock.last_movement_date else None
             })
 
