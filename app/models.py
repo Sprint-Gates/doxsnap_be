@@ -86,6 +86,7 @@ class Company(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, nullable=False)
+    company_code = Column(String, unique=True, nullable=True, index=True)  # Unique code for mobile app login
     slug = Column(String, unique=True, nullable=False, index=True)
     email = Column(String, nullable=False)
     phone = Column(String, nullable=True)

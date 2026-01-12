@@ -67,6 +67,8 @@ def run_migrations():
         # FCM Push Notifications
         ("handheld_devices", "fcm_token", "ALTER TABLE handheld_devices ADD COLUMN IF NOT EXISTS fcm_token VARCHAR"),
         ("handheld_devices", "fcm_token_updated_at", "ALTER TABLE handheld_devices ADD COLUMN IF NOT EXISTS fcm_token_updated_at TIMESTAMP"),
+        # Company code for mobile app login
+        ("companies", "company_code", "ALTER TABLE companies ADD COLUMN IF NOT EXISTS company_code VARCHAR UNIQUE"),
     ]
 
     with engine.connect() as conn:
