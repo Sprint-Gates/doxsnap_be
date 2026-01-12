@@ -18,7 +18,6 @@ from app.services.dependency import require_permission
 router = APIRouter()
 security = HTTPBearer()
 
-
 def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security), db: Session = Depends(get_db)):
     """Get the current authenticated user"""
     token = credentials.credentials
