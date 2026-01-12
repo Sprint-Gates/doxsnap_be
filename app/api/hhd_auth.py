@@ -18,6 +18,7 @@ router = APIRouter()
 
 
 class HHDLoginRequest(BaseModel):
+    company_code: str  # Company code to identify the company
     device_code: str
     pin: str  # 4-6 digit PIN
 
@@ -74,14 +75,27 @@ async def hhd_login(
     db: Session = Depends(get_db)
 ):
     """
-    Authenticate a handheld device with device code and PIN.
+    Authenticate a handheld device with company code, device code and PIN.
 
     The PIN should be set on the device record in the admin portal.
     Returns tokens for authenticated API access.
     """
-    # Find device by code
+    # First, find the company by company_code
+    company = db.query(Company).filter(
+        Company.company_code == data.company_code.upper(),
+        Company.is_active == True
+    ).first()
+
+    if not company:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid company code"
+        )
+
+    # Find device by code within the company
     device = db.query(HandHeldDevice).filter(
         HandHeldDevice.device_code == data.device_code,
+        HandHeldDevice.company_id == company.id,
         HandHeldDevice.is_active == True
     ).first()
 
