@@ -1,12 +1,30 @@
 """
 Rate Limiting Configuration for CoreSRP API
 
-Uses slowapi for rate limiting with the following limits:
+This module provides rate limiting functionality to protect the API from:
+- Brute force attacks on login endpoints
+- OTP/verification code abuse
+- Password reset abuse
+- General API abuse/DDoS
+
+Uses slowapi for rate limiting with the following default limits:
 - Login: 5 attempts per minute per IP
 - OTP endpoints: 3 attempts per minute per IP
 - Forgot password: 3 attempts per minute per IP
 - HHD mobile login: 5 attempts per minute per IP
 - General API: 100 requests per minute per IP
+
+Usage:
+    from app.utils.rate_limiter import limiter, RateLimits
+
+    @router.post("/my-endpoint")
+    @limiter.limit(RateLimits.GENERAL)
+    async def my_endpoint(request: Request):
+        pass
+
+Note: The `request: Request` parameter is REQUIRED for rate-limited endpoints.
+
+For full documentation, see /docs/RATE_LIMITING.md
 """
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
