@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Response
+from fastapi import APIRouter, Depends, HTTPException, status, Response, Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 import os
@@ -6,13 +6,16 @@ import os
 from app.database import get_db
 from app.schemas import OTPRequest, OTPVerification, OTPResponse
 from app.services.otp import OTPService
+from app.utils.rate_limiter import limiter, RateLimits
 
 router = APIRouter()
 otp_service = OTPService()
 
 
 @router.post("/send", response_model=OTPResponse)
+@limiter.limit(RateLimits.OTP_SEND)
 async def send_otp(
+    request: Request,
     otp_request: OTPRequest,
     response: Response,
     db: Session = Depends(get_db)
@@ -58,7 +61,9 @@ async def send_otp(
 
 
 @router.post("/verify")
+@limiter.limit(RateLimits.OTP_VERIFY)
 async def verify_otp(
+    request: Request,
     otp_verification: OTPVerification,
     response: Response,
     db: Session = Depends(get_db)
@@ -159,17 +164,19 @@ async def get_otp_status(
 
 
 @router.post("/resend")
+@limiter.limit(RateLimits.OTP_RESEND)
 async def resend_otp(
+    request: Request,
     otp_request: OTPRequest,
     response: Response,
     db: Session = Depends(get_db)
 ):
     """Resend OTP code (invalidates previous OTP)"""
-    
+
     response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
-    
+
     # This is the same as send_otp since create_otp invalidates existing OTPs
-    return await send_otp(otp_request, response, db)
+    return await send_otp(request, otp_request, response, db)
 
 
 @router.get("/verify-page", response_class=HTMLResponse)
