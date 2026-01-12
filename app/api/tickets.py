@@ -196,7 +196,7 @@ async def get_ticket(
 async def create_ticket(
     ticket_data: TicketCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_permission("Service_request", "create"))
+    current_user: User = Depends(get_current_user)
 ):
     """Create a new ticket/service request"""
     # Validate category
@@ -283,7 +283,7 @@ async def update_ticket(
     ticket_id: int,
     ticket_data: TicketUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_permission("Service_request", "update"))
+    current_user: User = Depends(get_current_user)
 ):
     """Update a ticket"""
     ticket = db.query(Ticket).filter(
@@ -500,7 +500,7 @@ async def convert_ticket_to_work_order(
 async def delete_ticket(
     ticket_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_permission("Service_request", "delete"))
+    current_user: User = Depends(get_current_user)
 ):
     """Delete a ticket (admin only, only if not converted)"""
     # Check admin role

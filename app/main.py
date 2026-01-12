@@ -14,6 +14,7 @@ from app.models import Base, User, ProcessedImage, DocumentType, Warehouse, Plan
 from app.config import settings
 from app.utils.security import verify_token
 from sqlalchemy import text
+from app.middlewares.permission_middleware import PermissionMiddleware
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -103,6 +104,7 @@ google_api_valid = validate_google_api_key()
 
 app = FastAPI(title="Image Processor API", version="1.0.0", redirect_slashes=False)
 
+app.add_middleware(PermissionMiddleware)
 
 # Subscription enforcement middleware
 class SubscriptionEnforcementMiddleware(BaseHTTPMiddleware):

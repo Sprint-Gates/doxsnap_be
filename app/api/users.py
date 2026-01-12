@@ -170,7 +170,7 @@ async def get_user(
 @router.post("/users/", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 async def create_user(
     data: UserCreate,
-    current_user: User = Depends(require_permission("User", "create")),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """Create a new user in the company"""
@@ -272,7 +272,7 @@ async def create_user(
 async def update_user(
     user_id: int,
     data: UserUpdate,
-    user: User = Depends(require_permission("User", "update")),
+    user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """Update a user"""
