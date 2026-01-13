@@ -348,21 +348,37 @@ class FCMTokenRequest(BaseModel):
 
 def get_device_id_from_token(request: Request) -> Optional[int]:
     """Extract device_id from HHD JWT token"""
+    from jose import jwt, JWTError
+    from app.config import settings
+
     auth_header = request.headers.get("Authorization")
     if not auth_header or not auth_header.startswith("Bearer "):
         return None
 
     token = auth_header.split(" ")[1]
-    token_data = verify_token(token)
 
-    if not token_data:
+    try:
+        # Decode the full payload to get device_id claim
+        payload = jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm])
+
+        # Check if this is an HHD token
+        token_type = payload.get("type")
+        if token_type != "hhd":
+            return None
+
+        # Get device_id from the payload
+        device_id = payload.get("device_id")
+        if device_id:
+            return int(device_id)
+
+        # Fallback: extract from sub claim (format: "hhd:{device_id}")
+        sub = payload.get("sub", "")
+        if sub.startswith("hhd:"):
+            return int(sub.split(":")[1])
+
         return None
-
-    # Token data contains device_id claim set during login
-    if isinstance(token_data, dict) and "device_id" in token_data:
-        return token_data["device_id"]
-
-    return None
+    except (JWTError, ValueError, IndexError):
+        return None
 
 
 @router.post("/hhd/fcm-token")
