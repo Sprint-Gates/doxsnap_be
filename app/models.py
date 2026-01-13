@@ -3251,6 +3251,7 @@ class PurchaseRequest(Base):
     # Source linkage (optional)
     work_order_id = Column(Integer, ForeignKey("work_orders.id"), nullable=True)
     contract_id = Column(Integer, ForeignKey("contracts.id"), nullable=True)
+    rfq_id = Column(Integer, ForeignKey("request_for_quotations.id"), nullable=True)  # Link to source RFQ
 
     # Vendor - Address Book (search_type='V')
     address_book_id = Column(Integer, ForeignKey("address_book.id"), nullable=True)
@@ -3287,6 +3288,7 @@ class PurchaseRequest(Base):
     company = relationship("Company", backref="purchase_requests")
     work_order = relationship("WorkOrder", backref="purchase_requests")
     contract = relationship("Contract", backref="purchase_requests")
+    source_rfq = relationship("RFQ", back_populates="purchase_requests")
     address_book = relationship("AddressBook", backref="purchase_requests")
     creator = relationship("User", foreign_keys=[created_by], backref="created_purchase_requests")
     submitter = relationship("User", foreign_keys=[submitted_by])
@@ -5217,3 +5219,399 @@ class ClientRefreshToken(Base):
 
     # Relationships
     client_user = relationship("ClientUser", backref="refresh_tokens")
+
+
+# =============================================================================
+# RFQ (REQUEST FOR QUOTATION) MODELS
+# =============================================================================
+
+class RFQ(Base):
+    """
+    Request for Quotation - Request for vendor quotes before purchasing.
+
+    Workflow: draft → submitted → quote_pending → comparison → converted_to_pr → cancelled
+
+    Two types:
+    - spare_parts: Request for items/materials from vendors
+    - subcontractor_service: Request for services with site visits
+    """
+    __tablename__ = "request_for_quotations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+    rfq_number = Column(String(50), unique=True, index=True)  # RFQ-2026-00001
+
+    # Type and Status
+    rfq_type = Column(String(50), nullable=False)  # 'spare_parts' or 'subcontractor_service'
+    status = Column(String(50), default='draft')  # draft, submitted, quote_pending, comparison, converted_to_pr, cancelled
+    priority = Column(String(20), default='normal')  # low, normal, high, urgent
+
+    # Source linkage
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=True)
+    site_id = Column(Integer, ForeignKey("sites.id"), nullable=True)
+    work_order_id = Column(Integer, ForeignKey("work_orders.id"), nullable=True)
+
+    # Details
+    title = Column(String(255), nullable=False)
+    description = Column(Text, nullable=True)
+    required_date = Column(Date, nullable=True)  # When items/services are needed
+    currency = Column(String(3), default='USD')
+
+    # Budget estimation
+    estimated_budget = Column(Numeric(12, 2), nullable=True)
+
+    # Audit - Creation
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    # Audit - Submission
+    submitted_at = Column(DateTime, nullable=True)
+    submitted_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+
+    # Audit - Cancellation
+    cancelled_at = Column(DateTime, nullable=True)
+    cancelled_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    cancellation_reason = Column(Text, nullable=True)
+
+    # Conversion tracking
+    converted_to_pr_at = Column(DateTime, nullable=True)
+    converted_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+
+    # Soft delete
+    deleted_at = Column(DateTime, nullable=True)
+
+    notes = Column(Text, nullable=True)
+
+    # Relationships
+    company = relationship("Company", backref="rfqs")
+    project = relationship("Project", backref="rfqs")
+    site = relationship("Site", backref="rfqs")
+    work_order = relationship("WorkOrder", backref="rfqs")
+    creator = relationship("User", foreign_keys=[created_by], backref="created_rfqs")
+    submitter = relationship("User", foreign_keys=[submitted_by])
+    canceller = relationship("User", foreign_keys=[cancelled_by])
+    converter = relationship("User", foreign_keys=[converted_by])
+
+    # Child relationships
+    items = relationship("RFQItem", back_populates="rfq", cascade="all, delete-orphan")
+    vendors = relationship("RFQVendor", back_populates="rfq", cascade="all, delete-orphan")
+    quotes = relationship("RFQQuote", back_populates="rfq", cascade="all, delete-orphan")
+    audit_trail = relationship("RFQAuditTrail", back_populates="rfq", cascade="all, delete-orphan", order_by="desc(RFQAuditTrail.action_at)")
+    site_visit = relationship("RFQSiteVisit", back_populates="rfq", uselist=False, cascade="all, delete-orphan")
+    comparison = relationship("RFQComparison", back_populates="rfq", uselist=False, cascade="all, delete-orphan")
+    documents = relationship("RFQDocument", back_populates="rfq", cascade="all, delete-orphan")
+    purchase_requests = relationship("PurchaseRequest", back_populates="source_rfq")
+
+
+class RFQItem(Base):
+    """
+    RFQ Line Item - Individual items/services requested in an RFQ.
+    For spare_parts: links to item_master or manual description
+    For subcontractor_service: describes scope of work
+    """
+    __tablename__ = "rfq_items"
+
+    id = Column(Integer, primary_key=True, index=True)
+    rfq_id = Column(Integer, ForeignKey("request_for_quotations.id", ondelete="CASCADE"), nullable=False)
+
+    # Item reference (optional - can be free text)
+    item_id = Column(Integer, ForeignKey("item_master.id"), nullable=True)
+
+    # Item details
+    item_number = Column(String(100), nullable=True)  # From item master or manual
+    description = Column(String(500), nullable=False)
+
+    # Quantities
+    quantity_requested = Column(Numeric(10, 2), nullable=False)
+    unit = Column(String(20), default='EA')
+
+    # Budget estimation
+    estimated_unit_cost = Column(Numeric(12, 2), nullable=True)
+    estimated_total = Column(Numeric(12, 2), nullable=True)
+
+    # For subcontractor_service type
+    service_scope = Column(Text, nullable=True)  # Detailed scope of work
+    visit_date = Column(Date, nullable=True)  # Preferred visit date
+    visit_location = Column(String(255), nullable=True)  # Specific location at site
+
+    notes = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=func.now())
+
+    # Relationships
+    rfq = relationship("RFQ", back_populates="items")
+    item = relationship("ItemMaster")
+    quote_lines = relationship("RFQQuoteLine", back_populates="rfq_item")
+
+
+class RFQVendor(Base):
+    """
+    RFQ Vendor - Vendors to contact for quotes.
+    Links to Address Book (search_type='V')
+    """
+    __tablename__ = "rfq_vendors"
+
+    id = Column(Integer, primary_key=True, index=True)
+    rfq_id = Column(Integer, ForeignKey("request_for_quotations.id", ondelete="CASCADE"), nullable=False)
+    address_book_id = Column(Integer, ForeignKey("address_book.id"), nullable=False)
+
+    # Contact tracking
+    contact_method = Column(String(50), nullable=True)  # email, phone, in_person, portal
+    contact_date = Column(DateTime, nullable=True)
+    contacted_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    is_contacted = Column(Boolean, default=False)
+
+    # Selection
+    is_selected = Column(Boolean, default=False)  # Selected as winning vendor
+    selection_reason = Column(Text, nullable=True)
+
+    vendor_notes = Column(Text, nullable=True)  # Why selected, contact notes
+    created_at = Column(DateTime, default=func.now())
+
+    # Relationships
+    rfq = relationship("RFQ", back_populates="vendors")
+    address_book = relationship("AddressBook", backref="rfq_vendors")
+    contacted_by_user = relationship("User", foreign_keys=[contacted_by])
+    quotes = relationship("RFQQuote", back_populates="vendor")
+
+
+class RFQQuote(Base):
+    """
+    RFQ Quote - Vendor quote received for an RFQ.
+    Contains overall quote info and links to line items.
+    """
+    __tablename__ = "rfq_quotes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    rfq_id = Column(Integer, ForeignKey("request_for_quotations.id", ondelete="CASCADE"), nullable=False)
+    rfq_vendor_id = Column(Integer, ForeignKey("rfq_vendors.id", ondelete="CASCADE"), nullable=False)
+
+    # Quote details from vendor
+    vendor_quote_number = Column(String(100), nullable=True)  # Vendor's quote reference
+    quote_date = Column(Date, nullable=False)
+    validity_date = Column(Date, nullable=True)  # Quote expires on this date
+
+    # Totals
+    subtotal = Column(Numeric(12, 2), default=0)
+    tax_amount = Column(Numeric(12, 2), default=0)
+    quote_total = Column(Numeric(12, 2), nullable=False)
+    currency = Column(String(3), default='USD')
+
+    # Terms
+    delivery_days = Column(Integer, nullable=True)  # Days to deliver
+    delivery_date = Column(Date, nullable=True)  # Specific delivery date
+    payment_terms = Column(String(100), nullable=True)  # Net 30, etc.
+    warranty_terms = Column(String(255), nullable=True)
+
+    # Status
+    status = Column(String(50), default='received')  # received, under_review, selected, rejected
+    rejection_reason = Column(Text, nullable=True)
+
+    # Attached quote document
+    document_id = Column(Integer, ForeignKey("processed_images.id"), nullable=True)
+
+    # Evaluation score (0-100)
+    evaluation_score = Column(Numeric(5, 2), nullable=True)
+    evaluation_notes = Column(Text, nullable=True)
+
+    # Audit
+    received_at = Column(DateTime, default=func.now())
+    received_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    notes = Column(Text, nullable=True)
+
+    # Relationships
+    rfq = relationship("RFQ", back_populates="quotes")
+    vendor = relationship("RFQVendor", back_populates="quotes")
+    document = relationship("ProcessedImage")
+    receiver = relationship("User", foreign_keys=[received_by])
+    lines = relationship("RFQQuoteLine", back_populates="quote", cascade="all, delete-orphan")
+
+
+class RFQQuoteLine(Base):
+    """
+    RFQ Quote Line - Individual line items in a vendor quote.
+    Maps to RFQ items for comparison.
+    """
+    __tablename__ = "rfq_quote_lines"
+
+    id = Column(Integer, primary_key=True, index=True)
+    rfq_quote_id = Column(Integer, ForeignKey("rfq_quotes.id", ondelete="CASCADE"), nullable=False)
+    rfq_item_id = Column(Integer, ForeignKey("rfq_items.id"), nullable=True)  # Link to original RFQ item
+
+    # Item details (may differ from RFQ item)
+    item_description = Column(String(500), nullable=False)
+    quantity_quoted = Column(Numeric(10, 2), nullable=False)
+    unit = Column(String(20), default='EA')
+    unit_price = Column(Numeric(12, 2), nullable=False)
+    total_price = Column(Numeric(12, 2), nullable=False)
+
+    notes = Column(Text, nullable=True)
+
+    # Relationships
+    quote = relationship("RFQQuote", back_populates="lines")
+    rfq_item = relationship("RFQItem", back_populates="quote_lines")
+
+
+class RFQAuditTrail(Base):
+    """
+    RFQ Audit Trail - Complete history of all actions on an RFQ.
+    Provides full traceability for compliance.
+    """
+    __tablename__ = "rfq_audit_trail"
+
+    id = Column(Integer, primary_key=True, index=True)
+    rfq_id = Column(Integer, ForeignKey("request_for_quotations.id", ondelete="CASCADE"), nullable=False)
+
+    # What happened
+    action = Column(String(50), nullable=False)  # created, submitted, vendor_added, quote_received, etc.
+    action_category = Column(String(30), nullable=True)  # rfq, item, vendor, quote, status
+
+    # Who did it
+    action_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    action_at = Column(DateTime, default=func.now(), nullable=False)
+
+    # Change tracking
+    old_value = Column(Text, nullable=True)  # Previous value (JSON or plain text)
+    new_value = Column(Text, nullable=True)  # New value
+
+    # Additional context (JSON)
+    details = Column(Text, nullable=True)  # Structured metadata as JSON string
+
+    # For compliance
+    ip_address = Column(String(45), nullable=True)
+    user_agent = Column(String(255), nullable=True)
+
+    # Relationships
+    rfq = relationship("RFQ", back_populates="audit_trail")
+    user = relationship("User", backref="rfq_audit_actions")
+
+
+class RFQSiteVisit(Base):
+    """
+    RFQ Site Visit - For subcontractor_service type RFQs.
+    Tracks site visit scheduling and completion.
+    """
+    __tablename__ = "rfq_site_visits"
+
+    id = Column(Integer, primary_key=True, index=True)
+    rfq_id = Column(Integer, ForeignKey("request_for_quotations.id", ondelete="CASCADE"), nullable=False, unique=True)
+
+    # Scheduling
+    scheduled_date = Column(Date, nullable=True)
+    scheduled_time = Column(Time, nullable=True)
+    actual_date = Column(Date, nullable=True)
+    actual_time = Column(Time, nullable=True)
+
+    # Status
+    visit_status = Column(String(50), default='pending')  # pending, scheduled, completed, rescheduled, cancelled
+
+    # Site contact
+    site_contact_person = Column(String(255), nullable=True)
+    site_contact_phone = Column(String(50), nullable=True)
+    site_contact_email = Column(String(255), nullable=True)
+
+    # Visit details
+    visit_notes = Column(Text, nullable=True)
+    issues_identified = Column(Text, nullable=True)  # Problems found during visit
+    recommendations = Column(Text, nullable=True)
+
+    # Audit
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+    completed_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+
+    # Relationships
+    rfq = relationship("RFQ", back_populates="site_visit")
+    completer = relationship("User", foreign_keys=[completed_by])
+    photos = relationship("RFQSiteVisitPhoto", back_populates="site_visit", cascade="all, delete-orphan")
+
+
+class RFQSiteVisitPhoto(Base):
+    """
+    RFQ Site Visit Photo - Photos taken during site visit.
+    """
+    __tablename__ = "rfq_site_visit_photos"
+
+    id = Column(Integer, primary_key=True, index=True)
+    site_visit_id = Column(Integer, ForeignKey("rfq_site_visits.id", ondelete="CASCADE"), nullable=False)
+
+    # Photo reference
+    image_id = Column(Integer, ForeignKey("processed_images.id"), nullable=False)
+
+    caption = Column(String(255), nullable=True)
+    uploaded_at = Column(DateTime, default=func.now())
+    uploaded_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+
+    # Relationships
+    site_visit = relationship("RFQSiteVisit", back_populates="photos")
+    image = relationship("ProcessedImage")
+    uploader = relationship("User", foreign_keys=[uploaded_by])
+
+
+class RFQComparison(Base):
+    """
+    RFQ Comparison - Quote comparison and evaluation matrix.
+    One comparison per RFQ.
+    """
+    __tablename__ = "rfq_comparisons"
+
+    id = Column(Integer, primary_key=True, index=True)
+    rfq_id = Column(Integer, ForeignKey("request_for_quotations.id", ondelete="CASCADE"), nullable=False, unique=True)
+
+    # Status
+    comparison_status = Column(String(50), default='pending')  # pending, in_progress, complete
+
+    # Evaluation criteria (JSON array)
+    # e.g., [{"name": "Price", "weight": 40}, {"name": "Delivery", "weight": 20}, ...]
+    evaluation_criteria = Column(Text, nullable=True)
+
+    # Recommendation
+    recommended_vendor_id = Column(Integer, ForeignKey("rfq_vendors.id"), nullable=True)
+    recommendation_notes = Column(Text, nullable=True)
+
+    # Evaluator notes
+    evaluator_notes = Column(Text, nullable=True)
+
+    # Audit
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+    completed_at = Column(DateTime, nullable=True)
+    completed_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+
+    # Relationships
+    rfq = relationship("RFQ", back_populates="comparison")
+    recommended_vendor = relationship("RFQVendor")
+    creator = relationship("User", foreign_keys=[created_by])
+    completer = relationship("User", foreign_keys=[completed_by])
+
+
+class RFQDocument(Base):
+    """
+    RFQ Document - Documents attached to an RFQ.
+    Can be specs, drawings, requirements, etc.
+    """
+    __tablename__ = "rfq_documents"
+
+    id = Column(Integer, primary_key=True, index=True)
+    rfq_id = Column(Integer, ForeignKey("request_for_quotations.id", ondelete="CASCADE"), nullable=False)
+
+    # Document reference
+    image_id = Column(Integer, ForeignKey("processed_images.id"), nullable=False)
+
+    # Document type
+    document_type = Column(String(50), nullable=True)  # specification, drawing, requirement, other
+    title = Column(String(255), nullable=True)
+    description = Column(Text, nullable=True)
+
+    # Audit
+    uploaded_at = Column(DateTime, default=func.now())
+    uploaded_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+
+    # Relationships
+    rfq = relationship("RFQ", back_populates="documents")
+    image = relationship("ProcessedImage")
+    uploader = relationship("User", foreign_keys=[uploaded_by])

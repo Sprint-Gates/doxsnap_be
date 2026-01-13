@@ -2918,3 +2918,565 @@ class ClientWorkOrderList(BaseModel):
     total: int
     page: int
     size: int
+
+
+# =============================================================================
+# RFQ (Request for Quotation) Schemas
+# =============================================================================
+
+# --- RFQ Item Schemas ---
+
+class RFQItemCreate(BaseModel):
+    """Schema for creating an RFQ item"""
+    item_id: Optional[int] = None
+    item_number: Optional[str] = None
+    description: str
+    quantity_requested: float
+    unit: str = "EA"
+    estimated_unit_cost: Optional[float] = None
+    service_scope: Optional[str] = None  # For subcontractor type
+    visit_date: Optional[date] = None
+    visit_location: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class RFQItemUpdate(BaseModel):
+    """Schema for updating an RFQ item"""
+    item_id: Optional[int] = None
+    item_number: Optional[str] = None
+    description: Optional[str] = None
+    quantity_requested: Optional[float] = None
+    unit: Optional[str] = None
+    estimated_unit_cost: Optional[float] = None
+    service_scope: Optional[str] = None
+    visit_date: Optional[date] = None
+    visit_location: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class RFQItem(BaseModel):
+    """Schema for RFQ item response"""
+    id: int
+    rfq_id: int
+    item_id: Optional[int] = None
+    item_number: Optional[str] = None
+    description: str
+    quantity_requested: float
+    unit: str
+    estimated_unit_cost: Optional[float] = None
+    estimated_total: Optional[float] = None
+    service_scope: Optional[str] = None
+    visit_date: Optional[date] = None
+    visit_location: Optional[str] = None
+    notes: Optional[str] = None
+    created_at: Optional[datetime] = None
+    item_name: Optional[str] = None  # From item_master
+
+    class Config:
+        from_attributes = True
+
+
+# --- RFQ Vendor Schemas ---
+
+class RFQVendorCreate(BaseModel):
+    """Schema for adding a vendor to RFQ"""
+    address_book_id: int
+    vendor_notes: Optional[str] = None
+
+
+class RFQVendorUpdate(BaseModel):
+    """Schema for updating RFQ vendor"""
+    vendor_notes: Optional[str] = None
+    contact_method: Optional[str] = None
+
+
+class RFQVendorContact(BaseModel):
+    """Schema for marking vendor as contacted"""
+    contact_method: str  # email, phone, in_person, portal
+    contact_date: Optional[datetime] = None
+    notes: Optional[str] = None
+
+
+class RFQVendor(BaseModel):
+    """Schema for RFQ vendor response"""
+    id: int
+    rfq_id: int
+    address_book_id: int
+    vendor_name: Optional[str] = None  # From address_book
+    vendor_email: Optional[str] = None
+    vendor_phone: Optional[str] = None
+    contact_method: Optional[str] = None
+    contact_date: Optional[datetime] = None
+    contacted_by: Optional[int] = None
+    contacted_by_name: Optional[str] = None
+    is_contacted: bool
+    is_selected: bool
+    selection_reason: Optional[str] = None
+    vendor_notes: Optional[str] = None
+    created_at: Optional[datetime] = None
+    quote_count: int = 0
+
+    class Config:
+        from_attributes = True
+
+
+# --- RFQ Quote Line Schemas ---
+
+class RFQQuoteLineCreate(BaseModel):
+    """Schema for creating a quote line"""
+    rfq_item_id: Optional[int] = None
+    item_description: str
+    quantity_quoted: float
+    unit: str = "EA"
+    unit_price: float
+    notes: Optional[str] = None
+
+
+class RFQQuoteLineUpdate(BaseModel):
+    """Schema for updating a quote line"""
+    rfq_item_id: Optional[int] = None
+    item_description: Optional[str] = None
+    quantity_quoted: Optional[float] = None
+    unit: Optional[str] = None
+    unit_price: Optional[float] = None
+    notes: Optional[str] = None
+
+
+class RFQQuoteLine(BaseModel):
+    """Schema for quote line response"""
+    id: int
+    rfq_quote_id: int
+    rfq_item_id: Optional[int] = None
+    item_description: str
+    quantity_quoted: float
+    unit: str
+    unit_price: float
+    total_price: float
+    notes: Optional[str] = None
+    rfq_item_description: Optional[str] = None  # Original RFQ item description for comparison
+
+    class Config:
+        from_attributes = True
+
+
+# --- RFQ Quote Schemas ---
+
+class RFQQuoteCreate(BaseModel):
+    """Schema for creating/receiving a quote"""
+    rfq_vendor_id: int
+    vendor_quote_number: Optional[str] = None
+    quote_date: date
+    validity_date: Optional[date] = None
+    subtotal: float = 0
+    tax_amount: float = 0
+    quote_total: float
+    currency: str = "USD"
+    delivery_days: Optional[int] = None
+    delivery_date: Optional[date] = None
+    payment_terms: Optional[str] = None
+    warranty_terms: Optional[str] = None
+    notes: Optional[str] = None
+    lines: Optional[List[RFQQuoteLineCreate]] = None
+
+
+class RFQQuoteUpdate(BaseModel):
+    """Schema for updating a quote"""
+    vendor_quote_number: Optional[str] = None
+    quote_date: Optional[date] = None
+    validity_date: Optional[date] = None
+    subtotal: Optional[float] = None
+    tax_amount: Optional[float] = None
+    quote_total: Optional[float] = None
+    currency: Optional[str] = None
+    delivery_days: Optional[int] = None
+    delivery_date: Optional[date] = None
+    payment_terms: Optional[str] = None
+    warranty_terms: Optional[str] = None
+    evaluation_score: Optional[float] = None
+    evaluation_notes: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class RFQQuoteStatusUpdate(BaseModel):
+    """Schema for updating quote status"""
+    status: str  # received, under_review, selected, rejected
+    rejection_reason: Optional[str] = None
+
+
+class RFQQuote(BaseModel):
+    """Schema for quote response"""
+    id: int
+    rfq_id: int
+    rfq_vendor_id: int
+    vendor_name: Optional[str] = None
+    vendor_quote_number: Optional[str] = None
+    quote_date: date
+    validity_date: Optional[date] = None
+    subtotal: float
+    tax_amount: float
+    quote_total: float
+    currency: str
+    delivery_days: Optional[int] = None
+    delivery_date: Optional[date] = None
+    payment_terms: Optional[str] = None
+    warranty_terms: Optional[str] = None
+    status: str
+    rejection_reason: Optional[str] = None
+    document_id: Optional[int] = None
+    evaluation_score: Optional[float] = None
+    evaluation_notes: Optional[str] = None
+    received_at: datetime
+    received_by: int
+    received_by_name: Optional[str] = None
+    updated_at: Optional[datetime] = None
+    notes: Optional[str] = None
+    lines: List[RFQQuoteLine] = []
+
+    class Config:
+        from_attributes = True
+
+
+# --- RFQ Site Visit Schemas ---
+
+class RFQSiteVisitCreate(BaseModel):
+    """Schema for creating/scheduling site visit"""
+    scheduled_date: Optional[date] = None
+    scheduled_time: Optional[str] = None  # HH:MM format
+    site_contact_person: Optional[str] = None
+    site_contact_phone: Optional[str] = None
+    site_contact_email: Optional[str] = None
+    visit_notes: Optional[str] = None
+
+
+class RFQSiteVisitUpdate(BaseModel):
+    """Schema for updating site visit"""
+    scheduled_date: Optional[date] = None
+    scheduled_time: Optional[str] = None
+    actual_date: Optional[date] = None
+    actual_time: Optional[str] = None
+    visit_status: Optional[str] = None
+    site_contact_person: Optional[str] = None
+    site_contact_phone: Optional[str] = None
+    site_contact_email: Optional[str] = None
+    visit_notes: Optional[str] = None
+    issues_identified: Optional[str] = None
+    recommendations: Optional[str] = None
+
+
+class RFQSiteVisitComplete(BaseModel):
+    """Schema for completing site visit"""
+    actual_date: Optional[date] = None
+    actual_time: Optional[str] = None
+    visit_notes: Optional[str] = None
+    issues_identified: Optional[str] = None
+    recommendations: Optional[str] = None
+
+
+class RFQSiteVisitPhoto(BaseModel):
+    """Schema for site visit photo"""
+    id: int
+    site_visit_id: int
+    image_id: int
+    image_url: Optional[str] = None
+    caption: Optional[str] = None
+    uploaded_at: datetime
+    uploaded_by: int
+    uploaded_by_name: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class RFQSiteVisit(BaseModel):
+    """Schema for site visit response"""
+    id: int
+    rfq_id: int
+    scheduled_date: Optional[date] = None
+    scheduled_time: Optional[str] = None
+    actual_date: Optional[date] = None
+    actual_time: Optional[str] = None
+    visit_status: str
+    site_contact_person: Optional[str] = None
+    site_contact_phone: Optional[str] = None
+    site_contact_email: Optional[str] = None
+    visit_notes: Optional[str] = None
+    issues_identified: Optional[str] = None
+    recommendations: Optional[str] = None
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+    completed_by: Optional[int] = None
+    completed_by_name: Optional[str] = None
+    completed_at: Optional[datetime] = None
+    photos: List[RFQSiteVisitPhoto] = []
+
+    class Config:
+        from_attributes = True
+
+
+# --- RFQ Comparison Schemas ---
+
+class EvaluationCriterion(BaseModel):
+    """Schema for evaluation criterion"""
+    name: str
+    weight: float  # Percentage weight (e.g., 40 for 40%)
+    type: str = "numeric"  # numeric or text
+
+
+class RFQComparisonCreate(BaseModel):
+    """Schema for creating comparison"""
+    evaluation_criteria: Optional[List[EvaluationCriterion]] = None
+    evaluator_notes: Optional[str] = None
+
+
+class RFQComparisonUpdate(BaseModel):
+    """Schema for updating comparison"""
+    comparison_status: Optional[str] = None
+    evaluation_criteria: Optional[List[EvaluationCriterion]] = None
+    evaluator_notes: Optional[str] = None
+
+
+class RFQComparisonRecommend(BaseModel):
+    """Schema for recommending vendor"""
+    recommended_vendor_id: int
+    recommendation_notes: Optional[str] = None
+
+
+class RFQComparison(BaseModel):
+    """Schema for comparison response"""
+    id: int
+    rfq_id: int
+    comparison_status: str
+    evaluation_criteria: Optional[List[EvaluationCriterion]] = None
+    recommended_vendor_id: Optional[int] = None
+    recommended_vendor_name: Optional[str] = None
+    recommendation_notes: Optional[str] = None
+    evaluator_notes: Optional[str] = None
+    created_by: int
+    created_by_name: Optional[str] = None
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    completed_by: Optional[int] = None
+    completed_by_name: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+# --- RFQ Audit Trail Schemas ---
+
+class RFQAuditTrailEntry(BaseModel):
+    """Schema for audit trail entry"""
+    id: int
+    rfq_id: int
+    action: str
+    action_category: Optional[str] = None
+    action_by: int
+    action_by_name: Optional[str] = None
+    action_at: datetime
+    old_value: Optional[str] = None
+    new_value: Optional[str] = None
+    details: Optional[dict] = None
+
+    class Config:
+        from_attributes = True
+
+
+class RFQTimeline(BaseModel):
+    """Schema for timeline view"""
+    entries: List[RFQAuditTrailEntry]
+    total: int
+
+
+# --- RFQ Document Schemas ---
+
+class RFQDocumentCreate(BaseModel):
+    """Schema for uploading document"""
+    document_type: Optional[str] = None  # specification, drawing, requirement, other
+    title: Optional[str] = None
+    description: Optional[str] = None
+
+
+class RFQDocument(BaseModel):
+    """Schema for document response"""
+    id: int
+    rfq_id: int
+    image_id: int
+    image_url: Optional[str] = None
+    document_type: Optional[str] = None
+    title: Optional[str] = None
+    description: Optional[str] = None
+    uploaded_at: datetime
+    uploaded_by: int
+    uploaded_by_name: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+# --- Main RFQ Schemas ---
+
+class RFQCreate(BaseModel):
+    """Schema for creating an RFQ"""
+    rfq_type: str  # spare_parts or subcontractor_service
+    title: str
+    description: Optional[str] = None
+    project_id: Optional[int] = None
+    site_id: Optional[int] = None
+    work_order_id: Optional[int] = None
+    required_date: Optional[date] = None
+    priority: str = "normal"
+    currency: str = "USD"
+    estimated_budget: Optional[float] = None
+    notes: Optional[str] = None
+    items: Optional[List[RFQItemCreate]] = None
+    vendors: Optional[List[RFQVendorCreate]] = None
+
+
+class RFQUpdate(BaseModel):
+    """Schema for updating an RFQ"""
+    title: Optional[str] = None
+    description: Optional[str] = None
+    project_id: Optional[int] = None
+    site_id: Optional[int] = None
+    work_order_id: Optional[int] = None
+    required_date: Optional[date] = None
+    priority: Optional[str] = None
+    currency: Optional[str] = None
+    estimated_budget: Optional[float] = None
+    notes: Optional[str] = None
+
+
+class RFQSubmit(BaseModel):
+    """Schema for submitting an RFQ"""
+    notes: Optional[str] = None
+
+
+class RFQCancel(BaseModel):
+    """Schema for cancelling an RFQ"""
+    reason: str
+
+
+class RFQConvertToPR(BaseModel):
+    """Schema for converting RFQ to PR"""
+    selected_quote_id: int
+    additional_notes: Optional[str] = None
+
+
+class RFQConvertToPRResponse(BaseModel):
+    """Response after converting RFQ to PR"""
+    success: bool
+    pr_id: int
+    pr_number: str
+    rfq_number: str
+    message: str
+
+
+class RFQ(BaseModel):
+    """Schema for RFQ response"""
+    id: int
+    company_id: int
+    rfq_number: str
+    rfq_type: str
+    status: str
+    priority: str
+    project_id: Optional[int] = None
+    project_name: Optional[str] = None
+    site_id: Optional[int] = None
+    site_name: Optional[str] = None
+    work_order_id: Optional[int] = None
+    work_order_number: Optional[str] = None
+    title: str
+    description: Optional[str] = None
+    required_date: Optional[date] = None
+    currency: str
+    estimated_budget: Optional[float] = None
+    created_by: int
+    created_by_name: Optional[str] = None
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+    submitted_at: Optional[datetime] = None
+    submitted_by: Optional[int] = None
+    submitted_by_name: Optional[str] = None
+    cancelled_at: Optional[datetime] = None
+    cancelled_by: Optional[int] = None
+    cancellation_reason: Optional[str] = None
+    converted_to_pr_at: Optional[datetime] = None
+    converted_by: Optional[int] = None
+    notes: Optional[str] = None
+    items: List[RFQItem] = []
+    vendors: List[RFQVendor] = []
+    quotes: List[RFQQuote] = []
+    site_visit: Optional[RFQSiteVisit] = None
+    comparison: Optional[RFQComparison] = None
+    documents: List[RFQDocument] = []
+    item_count: int = 0
+    vendor_count: int = 0
+    quote_count: int = 0
+
+    class Config:
+        from_attributes = True
+
+
+class RFQList(BaseModel):
+    """Schema for RFQ list item"""
+    id: int
+    rfq_number: str
+    rfq_type: str
+    status: str
+    priority: str
+    title: str
+    project_name: Optional[str] = None
+    site_name: Optional[str] = None
+    work_order_number: Optional[str] = None
+    required_date: Optional[date] = None
+    estimated_budget: Optional[float] = None
+    currency: str
+    created_by_name: str
+    created_at: datetime
+    submitted_at: Optional[datetime] = None
+    item_count: int = 0
+    vendor_count: int = 0
+    quote_count: int = 0
+
+    class Config:
+        from_attributes = True
+
+
+class RFQListResponse(BaseModel):
+    """Paginated RFQ list response"""
+    rfqs: List[RFQList]
+    total: int
+    page: int
+    size: int
+
+
+class RFQStats(BaseModel):
+    """RFQ statistics for dashboard"""
+    total_rfqs: int
+    draft: int
+    submitted: int
+    quote_pending: int
+    comparison: int
+    converted_to_pr: int
+    cancelled: int
+    this_month: int
+    total_quotes_received: int
+
+
+class RFQComparisonMatrix(BaseModel):
+    """Schema for quote comparison matrix"""
+    rfq_id: int
+    rfq_number: str
+    items: List[RFQItem]
+    vendors: List[RFQVendor]
+    quotes: List[RFQQuote]
+    comparison: Optional[RFQComparison] = None
+    best_price_quote_id: Optional[int] = None
+    best_delivery_quote_id: Optional[int] = None
+    recommended_quote_id: Optional[int] = None
+
+
+class RFQAddNote(BaseModel):
+    """Schema for adding a note to audit trail"""
+    note: str
