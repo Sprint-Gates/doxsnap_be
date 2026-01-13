@@ -860,6 +860,7 @@ async def create_work_order(
                         fcm_token=hhd.fcm_token,
                         wo_number=wo.wo_number,
                         wo_title=wo.title or "Work Order",
+                        work_order_id=wo.id,
                         priority=wo.priority or "medium"
                     )
             except Exception as notif_error:
@@ -1046,6 +1047,7 @@ async def update_work_order(
                         fcm_token=hhd.fcm_token,
                         wo_number=wo.wo_number,
                         wo_title=wo.title or "Work Order",
+                        work_order_id=wo.id,
                         priority=wo.priority or "medium"
                     )
             except Exception as notif_error:

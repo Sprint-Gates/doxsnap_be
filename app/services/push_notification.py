@@ -125,6 +125,7 @@ class PushNotificationService:
         fcm_token: str,
         wo_number: str,
         wo_title: str,
+        work_order_id: int,
         priority: str = "medium"
     ) -> bool:
         """
@@ -134,6 +135,7 @@ class PushNotificationService:
             fcm_token: Device FCM token
             wo_number: Work order number (e.g., "WO-2026-00001")
             wo_title: Work order title/description
+            work_order_id: Work order database ID for deep linking
             priority: Work order priority (low, medium, high, critical)
 
         Returns:
@@ -145,6 +147,7 @@ class PushNotificationService:
             body=f"{wo_number}: {wo_title}",
             data={
                 "wo_number": wo_number,
+                "work_order_id": str(work_order_id),
                 "priority": priority,
             },
             notification_type="work_order_assignment"
@@ -154,6 +157,7 @@ class PushNotificationService:
     def send_transfer_notification(
         fcm_token: str,
         transfer_number: str,
+        transfer_id: int,
         item_count: int,
         from_warehouse: str
     ) -> bool:
@@ -163,6 +167,7 @@ class PushNotificationService:
         Args:
             fcm_token: Device FCM token
             transfer_number: Transfer number (e.g., "TRF-2026-00001")
+            transfer_id: Transfer database ID for deep linking
             item_count: Number of items in the transfer
             from_warehouse: Source warehouse name
 
@@ -175,6 +180,7 @@ class PushNotificationService:
             body=f"{transfer_number}: {item_count} item(s) from {from_warehouse}",
             data={
                 "transfer_number": transfer_number,
+                "transfer_id": str(transfer_id),
                 "item_count": str(item_count),
                 "from_warehouse": from_warehouse,
             },

@@ -1611,6 +1611,7 @@ async def create_transfer(
                     result = PushNotificationService.send_transfer_notification(
                         fcm_token=hhd.fcm_token,
                         transfer_number=transfer.transfer_number,
+                        transfer_id=transfer.id,
                         item_count=len(transfer.lines),
                         from_warehouse=warehouse.name if warehouse else "Warehouse"
                     )
