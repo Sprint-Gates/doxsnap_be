@@ -1743,6 +1743,57 @@ async def complete_transfer(
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
 
+class RejectTransferRequest(BaseModel):
+    reason: Optional[str] = None
+
+
+@router.post("/transfers/{transfer_id}/reject")
+async def reject_transfer(
+    transfer_id: int,
+    request_body: RejectTransferRequest = RejectTransferRequest(),
+    auth_context = Depends(get_current_user_or_hhd),
+    db: Session = Depends(get_db)
+):
+    """Reject a transfer (HHD can reject transfers assigned to them)"""
+    if not auth_context.company_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No company associated")
+
+    transfer = db.query(ItemTransfer).filter(
+        ItemTransfer.id == transfer_id,
+        ItemTransfer.company_id == auth_context.company_id
+    ).first()
+
+    if not transfer:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transfer not found")
+
+    # For HHD authentication, verify the transfer is to this HHD
+    if isinstance(auth_context, HHDContext):
+        if transfer.to_hhd_id != auth_context.device.id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Transfer not assigned to this device")
+
+    if transfer.status == "completed":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Cannot reject a completed transfer")
+
+    if transfer.status == "cancelled":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Transfer already cancelled")
+
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(f"Rejecting transfer {transfer.transfer_number} by {'HHD ' + auth_context.device.device_code if isinstance(auth_context, HHDContext) else 'user ' + str(auth_context.id)}")
+
+    try:
+        # Update transfer status to cancelled
+        transfer.status = "cancelled"
+        transfer.notes = (transfer.notes or "") + f"\n[Rejected: {request_body.reason or 'No reason provided'}]"
+
+        db.commit()
+
+        return {"success": True, "message": f"Transfer {transfer.transfer_number} rejected"}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+
 # ============ Warehouse Stock View ============
 
 @router.get("/warehouses/{warehouse_id}/stock")
