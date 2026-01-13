@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func, or_, and_
 
 from app.database import get_db
-from app.auth import require_admin, get_current_user
+from app.api.auth import require_admin, get_current_user
 from app.models import (
     User, Company, Project, Site, WorkOrder, AddressBook, ItemMaster,
     RFQ, RFQItem, RFQVendor, RFQQuote, RFQQuoteLine,
