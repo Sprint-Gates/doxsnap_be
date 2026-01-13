@@ -370,8 +370,11 @@ def update_stock_and_create_ledger(
         balance_after = stock.quantity_on_hand
 
     elif transaction_type == "TRANSFER_OUT":
-        # Deduct from source warehouse - average cost remains unchanged
-        stock = get_or_create_stock(db, company_id, item_id, warehouse_id=from_warehouse_id)
+        # Deduct from source (warehouse or HHD) - average cost remains unchanged
+        if from_warehouse_id:
+            stock = get_or_create_stock(db, company_id, item_id, warehouse_id=from_warehouse_id)
+        else:
+            stock = get_or_create_stock(db, company_id, item_id, hhd_id=from_hhd_id)
         stock.quantity_on_hand = float(stock.quantity_on_hand or 0) - abs(quantity)
         stock.last_movement_date = datetime.utcnow()
         balance_after = stock.quantity_on_hand
@@ -1758,7 +1761,10 @@ async def reject_transfer(
     if not auth_context.company_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No company associated")
 
-    transfer = db.query(ItemTransfer).filter(
+    # Load transfer with lines for potential stock reversal
+    transfer = db.query(ItemTransfer).options(
+        joinedload(ItemTransfer.lines)
+    ).filter(
         ItemTransfer.id == transfer_id,
         ItemTransfer.company_id == auth_context.company_id
     ).first()
@@ -1771,26 +1777,73 @@ async def reject_transfer(
         if transfer.to_hhd_id != auth_context.device.id:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Transfer not assigned to this device")
 
-    if transfer.status == "completed":
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Cannot reject a completed transfer")
-
     if transfer.status == "cancelled":
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Transfer already cancelled")
 
     import logging
     logger = logging.getLogger(__name__)
-    logger.info(f"Rejecting transfer {transfer.transfer_number} by {'HHD ' + auth_context.device.device_code if isinstance(auth_context, HHDContext) else 'user ' + str(auth_context.id)}")
+    logger.info(f"Rejecting transfer {transfer.transfer_number} (status: {transfer.status}) by {'HHD ' + auth_context.device.device_code if isinstance(auth_context, HHDContext) else 'user ' + str(auth_context.id)}")
 
     try:
+        # If transfer was already completed, reverse the stock movements
+        if transfer.status == "completed":
+            logger.info(f"Reversing stock for completed transfer {transfer.transfer_number}")
+            for line in transfer.lines:
+                if line.quantity_transferred and line.quantity_transferred > 0:
+                    # Reverse: Transfer back IN to source warehouse
+                    update_stock_and_create_ledger(
+                        db=db,
+                        company_id=auth_context.company_id,
+                        item_id=line.item_id,
+                        quantity=float(line.quantity_transferred),
+                        transaction_type="TRANSFER_IN",
+                        user_id=auth_context.id,
+                        to_warehouse_id=transfer.from_warehouse_id,
+                        transfer_id=transfer.id,
+                        unit_cost=float(line.unit_cost) if line.unit_cost else None,
+                        notes=f"Reversal: Transfer {transfer.transfer_number} cancelled"
+                    )
+
+                    # Reverse: Transfer OUT from destination (warehouse or HHD)
+                    update_stock_and_create_ledger(
+                        db=db,
+                        company_id=auth_context.company_id,
+                        item_id=line.item_id,
+                        quantity=float(line.quantity_transferred),
+                        transaction_type="TRANSFER_OUT",
+                        user_id=auth_context.id,
+                        from_warehouse_id=transfer.to_warehouse_id,
+                        from_hhd_id=transfer.to_hhd_id,
+                        transfer_id=transfer.id,
+                        unit_cost=float(line.unit_cost) if line.unit_cost else None,
+                        notes=f"Reversal: Transfer {transfer.transfer_number} cancelled"
+                    )
+
+                    # Reset the transferred quantity
+                    line.quantity_transferred = 0
+
+            logger.info(f"Stock reversal completed for transfer {transfer.transfer_number}")
+
         # Update transfer status to cancelled
         transfer.status = "cancelled"
         transfer.notes = (transfer.notes or "") + f"\n[Rejected: {request_body.reason or 'No reason provided'}]"
 
         db.commit()
 
+        # Invalidate caches
+        await cache_service.invalidate_warehouse_stock(auth_context.company_id, transfer.from_warehouse_id)
+        if transfer.to_warehouse_id:
+            await cache_service.invalidate_warehouse_stock(auth_context.company_id, transfer.to_warehouse_id)
+        if transfer.to_hhd_id:
+            await cache_service.invalidate_hhd_stock(auth_context.company_id, transfer.to_hhd_id)
+        await cache_service.invalidate_items(auth_context.company_id)
+        for line in transfer.lines:
+            await cache_service.invalidate_ledger(auth_context.company_id, line.item_id)
+
         return {"success": True, "message": f"Transfer {transfer.transfer_number} rejected"}
     except Exception as e:
         db.rollback()
+        logger.error(f"Error rejecting transfer: {e}", exc_info=True)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
 
