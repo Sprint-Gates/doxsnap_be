@@ -1,0 +1,8 @@
+Defaulting to user installation because normal site-packages is not writeable
+Collecting redis
+  Downloading redis-7.0.1-py3-none-any.whl (339 kB)
+Requirement already satisfied: async-timeout>=4.0.3 in /Users/mohamaditani/Library/Python/3.9/lib/python/site-packages (from redis) (5.0.1)
+Installing collected packages: redis
+Successfully installed redis-7.0.1
+WARNING: You are using pip version 21.2.4; however, version 25.3 is available.
+You should consider upgrading via the '/Applications/Xcode.app/Contents/Developer/usr/bin/python3 -m pip install --upgrade pip' command.

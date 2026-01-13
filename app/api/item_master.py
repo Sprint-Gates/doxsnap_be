@@ -14,6 +14,7 @@ import io
 import re
 
 from app.database import get_db
+from app.services.cache import cache_service, hash_filters
 from app.models import (
     User, ItemCategory, ItemMaster, ItemStock, ItemLedger,
     ItemTransfer, ItemTransferLine, InvoiceItem, ItemAlias,
@@ -692,6 +693,25 @@ async def get_items(
     if not user.company_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No company associated")
 
+    # Generate cache key from filters (skip cache for low_stock - complex filtering)
+    if not low_stock:
+        filters_hash = hash_filters(
+            category_id=category_id,
+            search=search,
+            include_inactive=include_inactive,
+            include_stock=include_stock
+        )
+
+        # Check cache first
+        cached = await cache_service.get_items_page(
+            user.company_id, page, page_size, filters_hash
+        )
+        if cached:
+            logger.info(f"Cache HIT: items page {page} for company {user.company_id}, filters={filters_hash}")
+            return cached
+
+        logger.info(f"Cache MISS: items page {page} for company {user.company_id}, filters={filters_hash}")
+
     # Base query
     query = db.query(ItemMaster).filter(ItemMaster.company_id == user.company_id)
 
@@ -767,13 +787,20 @@ async def get_items(
 
     result = [item_to_response(item, include_stock=include_stock) for item in items]
 
-    return {
+    response_data = {
         "items": result,
         "total": total,
         "page": page,
         "page_size": page_size,
         "total_pages": (total + page_size - 1) // page_size
     }
+
+    # Cache the result
+    await cache_service.set_items_page(
+        user.company_id, page, page_size, filters_hash, response_data
+    )
+
+    return response_data
 
 
 @router.get("/items/{item_id}")
@@ -836,6 +863,9 @@ async def create_item(
         db.commit()
         db.refresh(item)
 
+        # Invalidate item list cache
+        await cache_service.invalidate_items(user.company_id)
+
         logger.info(f"Item {item.item_number} created by {user.email}")
         return item_to_response(item)
     except Exception as e:
@@ -880,6 +910,9 @@ async def update_item(
         db.commit()
         db.refresh(item)
 
+        # Invalidate item caches
+        await cache_service.invalidate_item(user.company_id, item_id)
+
         logger.info(f"Item {item.item_number} updated by {user.email}")
         return item_to_response(item)
     except Exception as e:
@@ -918,6 +951,9 @@ async def delete_item(
 
     item.is_active = False
     db.commit()
+
+    # Invalidate item caches
+    await cache_service.invalidate_item(user.company_id, item_id)
 
     return {"success": True, "message": f"Item {item.item_number} deactivated"}
 
@@ -1083,6 +1119,24 @@ async def get_item_ledger(
     if not user.company_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No company associated")
 
+    # Generate cache key from filters
+    filters_hash = hash_filters(
+        transaction_type=transaction_type,
+        from_date=from_date.isoformat() if from_date else None,
+        to_date=to_date.isoformat() if to_date else None,
+        warehouse_id=warehouse_id,
+        hhd_id=hhd_id,
+        limit=limit
+    )
+
+    # Check cache first
+    cached = await cache_service.get_item_ledger(user.company_id, item_id, filters_hash)
+    if cached is not None:
+        logger.info(f"Cache HIT: item ledger for item {item_id}, company {user.company_id}")
+        return cached
+
+    logger.info(f"Cache MISS: item ledger for item {item_id}, company {user.company_id}")
+
     query = db.query(ItemLedger).filter(
         ItemLedger.company_id == user.company_id,
         ItemLedger.item_id == item_id
@@ -1111,7 +1165,7 @@ async def get_item_ledger(
 
     entries = query.order_by(ItemLedger.transaction_date.desc()).limit(limit).all()
 
-    return [
+    result = [
         {
             "id": e.id,
             "transaction_number": e.transaction_number,
@@ -1140,6 +1194,11 @@ async def get_item_ledger(
         for e in entries
     ]
 
+    # Cache the result (15 min TTL - append-only data)
+    await cache_service.set_item_ledger(user.company_id, item_id, filters_hash, result)
+
+    return result
+
 
 # ============ All Ledger Entries Endpoint ============
 
@@ -1161,29 +1220,44 @@ async def get_all_ledger_entries(
     if not user.company_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No company associated")
 
-    query = db.query(ItemLedger).options(
-        joinedload(ItemLedger.item),
-        joinedload(ItemLedger.from_warehouse),
-        joinedload(ItemLedger.to_warehouse),
-        joinedload(ItemLedger.from_hhd),
-        joinedload(ItemLedger.to_hhd),
-        joinedload(ItemLedger.creator)
-    ).filter(ItemLedger.company_id == user.company_id)
+    # Generate cache key from all filters
+    filters_hash = hash_filters(
+        item_id=item_id,
+        transaction_type=transaction_type,
+        from_date=from_date.isoformat() if from_date else None,
+        to_date=to_date.isoformat() if to_date else None,
+        warehouse_id=warehouse_id,
+        hhd_id=hhd_id,
+        search=search,
+        limit=limit,
+        offset=offset
+    )
+
+    # Check cache first
+    cached = await cache_service.get_ledger_list(user.company_id, filters_hash)
+    if cached is not None:
+        logger.info(f"Cache HIT: all ledger entries for company {user.company_id}, filters={filters_hash}")
+        return cached
+
+    logger.info(f"Cache MISS: all ledger entries for company {user.company_id}, filters={filters_hash}")
+
+    # Build base query WITHOUT eager loading for count (faster)
+    base_query = db.query(ItemLedger).filter(ItemLedger.company_id == user.company_id)
 
     if item_id:
-        query = query.filter(ItemLedger.item_id == item_id)
+        base_query = base_query.filter(ItemLedger.item_id == item_id)
 
     if transaction_type:
-        query = query.filter(ItemLedger.transaction_type == transaction_type)
+        base_query = base_query.filter(ItemLedger.transaction_type == transaction_type)
 
     if from_date:
-        query = query.filter(ItemLedger.transaction_date >= from_date)
+        base_query = base_query.filter(ItemLedger.transaction_date >= from_date)
 
     if to_date:
-        query = query.filter(ItemLedger.transaction_date <= to_date)
+        base_query = base_query.filter(ItemLedger.transaction_date <= to_date)
 
     if warehouse_id:
-        query = query.filter(
+        base_query = base_query.filter(
             or_(
                 ItemLedger.from_warehouse_id == warehouse_id,
                 ItemLedger.to_warehouse_id == warehouse_id
@@ -1191,7 +1265,7 @@ async def get_all_ledger_entries(
         )
 
     if hhd_id:
-        query = query.filter(
+        base_query = base_query.filter(
             or_(
                 ItemLedger.from_hhd_id == hhd_id,
                 ItemLedger.to_hhd_id == hhd_id
@@ -1200,7 +1274,7 @@ async def get_all_ledger_entries(
 
     if search:
         search_term = f"%{search}%"
-        query = query.join(ItemLedger.item).filter(
+        base_query = base_query.join(ItemLedger.item).filter(
             or_(
                 ItemMaster.item_number.ilike(search_term),
                 ItemMaster.description.ilike(search_term),
@@ -1208,13 +1282,24 @@ async def get_all_ledger_entries(
             )
         )
 
-    # Get total count for pagination
-    total_count = query.count()
+    # Get total count using optimized count query (no joins for related data)
+    from sqlalchemy import func
+    total_count = base_query.with_entities(func.count(ItemLedger.id)).scalar()
+
+    # Now add eager loading only for the paginated results
+    query = base_query.options(
+        joinedload(ItemLedger.item),
+        joinedload(ItemLedger.from_warehouse),
+        joinedload(ItemLedger.to_warehouse),
+        joinedload(ItemLedger.from_hhd),
+        joinedload(ItemLedger.to_hhd),
+        joinedload(ItemLedger.creator)
+    )
 
     # Get paginated results
     entries = query.order_by(ItemLedger.transaction_date.desc(), ItemLedger.id.desc()).offset(offset).limit(limit).all()
 
-    return {
+    result = {
         "total": total_count,
         "limit": limit,
         "offset": offset,
@@ -1250,6 +1335,11 @@ async def get_all_ledger_entries(
             for e in entries
         ]
     }
+
+    # Cache the result (10 min TTL)
+    await cache_service.set_ledger_list(user.company_id, filters_hash, result)
+
+    return result
 
 
 # ============ Stock Adjustment Endpoints ============
@@ -1310,6 +1400,15 @@ async def adjust_stock(
             logger.warning(f"Failed to auto-post journal entry for stock adjustment: {e}")
 
         db.commit()
+
+        # Invalidate stock caches
+        if data.warehouse_id:
+            await cache_service.invalidate_warehouse_stock(user.company_id, data.warehouse_id)
+        if data.hhd_id:
+            await cache_service.invalidate_hhd_stock(user.company_id, data.hhd_id)
+        await cache_service.invalidate_items(user.company_id)
+        # Invalidate ledger cache for this item
+        await cache_service.invalidate_ledger(user.company_id, data.item_id)
 
         return {
             "success": True,
@@ -1622,6 +1721,18 @@ async def complete_transfer(
 
         db.commit()
 
+        # Invalidate stock caches for affected locations
+        await cache_service.invalidate_warehouse_stock(auth_context.company_id, transfer.from_warehouse_id)
+        if transfer.to_warehouse_id:
+            await cache_service.invalidate_warehouse_stock(auth_context.company_id, transfer.to_warehouse_id)
+        if transfer.to_hhd_id:
+            await cache_service.invalidate_hhd_stock(auth_context.company_id, transfer.to_hhd_id)
+        # Also invalidate item caches (stock levels may be included)
+        await cache_service.invalidate_items(auth_context.company_id)
+        # Invalidate ledger caches for all items in the transfer
+        for line in transfer.lines:
+            await cache_service.invalidate_ledger(auth_context.company_id, line.item_id)
+
         return {"success": True, "message": f"Transfer {transfer.transfer_number} completed"}
     except HTTPException:
         db.rollback()
@@ -1644,6 +1755,12 @@ async def get_warehouse_stock(
     """Get all stock levels for a warehouse"""
     if not user.company_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No company associated")
+
+    # Check cache first (only for unfiltered requests - most common case)
+    if not search and not category_id:
+        cached = await cache_service.get_warehouse_stock(user.company_id, warehouse_id)
+        if cached:
+            return cached
 
     warehouse = db.query(Warehouse).filter(
         Warehouse.id == warehouse_id,
@@ -1692,7 +1809,7 @@ async def get_warehouse_stock(
             "is_low_stock": decimal_to_float(stock.quantity_on_hand) <= (item.minimum_stock_level or 0)
         })
 
-    return {
+    response_data = {
         "warehouse": {
             "id": warehouse.id,
             "name": warehouse.name,
@@ -1701,6 +1818,12 @@ async def get_warehouse_stock(
         "items": result,
         "total_items": len(result)
     }
+
+    # Cache only unfiltered results
+    if not search and not category_id:
+        await cache_service.set_warehouse_stock(user.company_id, warehouse_id, response_data)
+
+    return response_data
 
 
 # ============ HHD Stock View ============
@@ -2415,9 +2538,18 @@ async def get_item_suggestions_for_invoice_item(
 ):
     """
     Get Item Master suggestions for an unlinked invoice item based on fuzzy matching.
+    Uses the original algorithm with caching for performance.
     """
     if not user.company_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No company associated")
+
+    # Check cache first
+    cached = await cache_service.get_invoice_suggestions(user.company_id, invoice_item_id)
+    if cached is not None:
+        logger.info(f"Cache HIT: invoice suggestions for item {invoice_item_id}, company {user.company_id}")
+        return cached
+
+    logger.info(f"Cache MISS: invoice suggestions for item {invoice_item_id}, company {user.company_id}")
 
     # Get the invoice item
     invoice_item = db.query(InvoiceItem).filter(
@@ -2440,20 +2572,26 @@ async def get_item_suggestions_for_invoice_item(
             "suggestions": []
         }
 
-    # Get all active items for the company
-    items = db.query(ItemMaster).filter(
+    # Get all active items for the company (original approach - cached result makes this OK)
+    items = db.query(ItemMaster).options(
+        joinedload(ItemMaster.category),
+        joinedload(ItemMaster.stock_levels),
+        joinedload(ItemMaster.aliases)
+    ).filter(
         ItemMaster.company_id == user.company_id,
         ItemMaster.is_active == True
     ).all()
 
     if not items:
-        return {
+        result = {
             "invoice_item_id": invoice_item_id,
             "already_linked": False,
             "suggestions": []
         }
+        await cache_service.set_invoice_suggestions(user.company_id, invoice_item_id, result)
+        return result
 
-    # Calculate similarity for each item
+    # Calculate similarity for each item (original algorithm)
     description = invoice_item.item_description or ""
     item_code = invoice_item.item_number or ""
 
@@ -2519,20 +2657,25 @@ async def get_item_suggestions_for_invoice_item(
                 "uom": item.unit,
                 "category": category_name,
                 "quantity_on_hand": total_stock,
-                "confidence": round(best_similarity, 2),  # Return as decimal 0-1
+                "confidence": round(best_similarity, 2),
                 "match_reason": match_reason
             })
 
     # Sort by confidence descending
     suggestions.sort(key=lambda x: x["confidence"], reverse=True)
 
-    return {
+    result = {
         "invoice_item_id": invoice_item_id,
         "invoice_item_description": description,
         "invoice_item_number": item_code,
         "already_linked": False,
         "suggestions": suggestions[:10]  # Top 10 suggestions
     }
+
+    # Cache the result (5 min TTL) - makes subsequent requests instant
+    await cache_service.set_invoice_suggestions(user.company_id, invoice_item_id, result)
+
+    return result
 
 
 @router.get("/invoices/{invoice_id}/unlinked-items")

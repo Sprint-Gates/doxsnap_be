@@ -350,9 +350,26 @@ async def root():
 
 @app.get("/api/health")
 async def health_check():
+    from app.services.cache import cache_service
     return {
         "status": "healthy",
         "services": {
-            "google_ai": google_api_valid
+            "google_ai": google_api_valid,
+            "redis_cache": cache_service.is_connected
         }
     }
+
+
+# Redis Cache Lifecycle Events
+@app.on_event("startup")
+async def startup_event():
+    """Initialize Redis cache connection on app startup"""
+    from app.services.cache import cache_service
+    await cache_service.connect()
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Close Redis cache connection on app shutdown"""
+    from app.services.cache import cache_service
+    await cache_service.disconnect()
