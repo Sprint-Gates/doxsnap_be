@@ -181,6 +181,9 @@ async def create_operator(
     # Check plan limits
     enforce_user_limit(db, user.company_id)
 
+    # Get company for plan info
+    company = db.query(Company).filter(Company.id == user.company_id).first()
+
     # Validate site_ids if provided
     sites = []
     if data.site_ids:
