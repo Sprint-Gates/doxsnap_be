@@ -78,6 +78,10 @@ class PushNotificationService:
             payload_data["notification_type"] = notification_type
             payload_data["click_action"] = "FLUTTER_NOTIFICATION_CLICK"
 
+            # Include title and body in data payload for client-side handling
+            payload_data["title"] = title
+            payload_data["body"] = body
+
             message = messaging.Message(
                 notification=messaging.Notification(
                     title=title,
@@ -102,7 +106,8 @@ class PushNotificationService:
                                 body=body
                             ),
                             sound="default",
-                            badge=1
+                            badge=1,
+                            content_available=True
                         )
                     )
                 )
