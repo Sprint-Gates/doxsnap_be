@@ -11,20 +11,105 @@ import uuid
 import os
 from datetime import datetime
 from typing import Optional, List
-from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Request, status
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import or_
 from pydantic import BaseModel
+from jose import jwt, JWTError
 
 from app.database import get_db
+from app.config import settings
 from app.models import (
     HandHeldDevice, ItemMaster, RFQ, RFQItem, RFQDocument, ProcessedImage, AddressBook
 )
 from app.services.rfq_service import generate_rfq_number, log_rfq_created
-from app.api.item_master import get_current_user_or_hhd, HHDContext
 from app.services.s3 import upload_to_s3
 
 router = APIRouter()
+
+
+# =============================================================================
+# HHD Authentication Helper (same approach as hhd_auth.py)
+# =============================================================================
+
+class HHDContext:
+    """Context object for HHD authentication"""
+    def __init__(self, device: HandHeldDevice, technician_id: Optional[int] = None, employee_id: Optional[int] = None):
+        self.device = device
+        self.company_id = device.company_id
+        self.id = employee_id or technician_id  # For created_by fields
+        self.technician_id = technician_id
+        self.employee_id = employee_id
+        self.email = f"hhd:{device.device_code}"
+        self.name = device.device_name
+        self.role = "technician"
+
+
+def get_hhd_auth(request: Request, db: Session = Depends(get_db)) -> HHDContext:
+    """
+    Extract and validate HHD token from request.
+    Uses the same approach as hhd_auth.py for consistency.
+    """
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing or invalid authorization header"
+        )
+
+    token = auth_header.split(" ")[1]
+
+    try:
+        payload = jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm])
+    except JWTError as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Could not validate credentials: {str(e)}"
+        )
+
+    # Check if this is an HHD token
+    token_type = payload.get("type")
+    sub = payload.get("sub", "")
+
+    if token_type != "hhd" and not sub.startswith("hhd:"):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="This endpoint requires HHD authentication"
+        )
+
+    # Get device_id from payload
+    device_id = payload.get("device_id")
+    if not device_id and sub.startswith("hhd:"):
+        try:
+            device_id = int(sub.split(":")[1])
+        except (ValueError, IndexError):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid HHD token format"
+            )
+
+    if not device_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing device_id in token"
+        )
+
+    # Verify device exists and is active
+    device = db.query(HandHeldDevice).filter(
+        HandHeldDevice.id == device_id,
+        HandHeldDevice.is_active == True
+    ).first()
+
+    if not device:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Device not found or inactive"
+        )
+
+    technician_id = payload.get("technician_id")
+    employee_id = payload.get("employee_id")
+
+    return HHDContext(device, technician_id, employee_id)
 
 
 # =============================================================================
@@ -92,35 +177,6 @@ class ItemSearchResult(BaseModel):
     unit: str
 
 
-# =============================================================================
-# Helper Functions
-# =============================================================================
-
-def require_hhd_auth(auth_context=Depends(get_current_user_or_hhd)):
-    """Require HHD authentication (reject regular user tokens)"""
-    if not isinstance(auth_context, HHDContext):
-        raise HTTPException(
-            status_code=403,
-            detail="This endpoint is only accessible from mobile devices"
-        )
-    return auth_context
-
-
-def get_hhd_context(auth_context=Depends(get_current_user_or_hhd)) -> HHDContext:
-    """Get HHD context, allowing both HHD and admin users for flexibility"""
-    if isinstance(auth_context, HHDContext):
-        return auth_context
-    # For regular users, create a pseudo HHD context
-    # This allows testing from the admin portal if needed
-    class PseudoHHDContext:
-        def __init__(self, user):
-            self.device = None
-            self.company_id = user.company_id
-            self.id = user.id
-            self.email = user.email
-            self.name = user.name
-            self.role = user.role
-    return PseudoHHDContext(auth_context)
 
 
 # =============================================================================
@@ -132,7 +188,7 @@ async def search_items(
     q: str = Query(..., min_length=2, description="Search query"),
     limit: int = Query(20, ge=1, le=50),
     db: Session = Depends(get_db),
-    hhd: HHDContext = Depends(get_hhd_context)
+    hhd: HHDContext = Depends(get_hhd_auth)
 ):
     """
     Search item catalog for mobile app.
@@ -169,7 +225,7 @@ async def search_items(
 async def upload_rfq_image(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
-    hhd: HHDContext = Depends(get_hhd_context)
+    hhd: HHDContext = Depends(get_hhd_auth)
 ):
     """
     Upload an image for RFQ from mobile.
@@ -263,7 +319,7 @@ async def list_my_rfqs(
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=50),
     db: Session = Depends(get_db),
-    hhd: HHDContext = Depends(get_hhd_context)
+    hhd: HHDContext = Depends(get_hhd_auth)
 ):
     """
     List RFQs created by the current HHD/technician.
@@ -326,7 +382,7 @@ async def list_my_rfqs(
 async def get_rfq_detail(
     rfq_id: int,
     db: Session = Depends(get_db),
-    hhd: HHDContext = Depends(get_hhd_context)
+    hhd: HHDContext = Depends(get_hhd_auth)
 ):
     """
     Get detailed view of an RFQ for mobile.
@@ -398,7 +454,7 @@ async def get_rfq_detail(
 async def create_rfq(
     rfq_data: MobileRFQCreate,
     db: Session = Depends(get_db),
-    hhd: HHDContext = Depends(get_hhd_context)
+    hhd: HHDContext = Depends(get_hhd_auth)
 ):
     """
     Create a new RFQ (parts request) from mobile.
