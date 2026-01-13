@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func, or_, and_
 
 from app.database import get_db
-from app.api.auth import require_admin, get_current_user
+from app.api.auth import get_current_user
 from app.models import (
     User, Company, Project, Site, WorkOrder, AddressBook, ItemMaster,
     RFQ, RFQItem, RFQVendor, RFQQuote, RFQQuoteLine,
@@ -48,6 +48,20 @@ from app.services.rfq_service import (
 )
 
 router = APIRouter()
+
+
+# =============================================================================
+# Auth Helpers
+# =============================================================================
+
+def require_admin(user: User = Depends(get_current_user)):
+    """Require user to be admin or accounting role"""
+    if user.role not in ["admin", "accounting"]:
+        raise HTTPException(
+            status_code=403,
+            detail="Admin or accounting role required"
+        )
+    return user
 
 
 # =============================================================================
