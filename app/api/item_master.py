@@ -1339,7 +1339,12 @@ async def get_transfers(
     if isinstance(auth_context, HHDContext):
         to_hhd_id = auth_context.device.id
 
-    query = db.query(ItemTransfer).filter(ItemTransfer.company_id == auth_context.company_id)
+    query = db.query(ItemTransfer).options(
+        joinedload(ItemTransfer.from_warehouse),
+        joinedload(ItemTransfer.to_warehouse),
+        joinedload(ItemTransfer.to_hhd),
+        joinedload(ItemTransfer.lines)
+    ).filter(ItemTransfer.company_id == auth_context.company_id)
 
     if status_filter:
         query = query.filter(ItemTransfer.status == status_filter)
