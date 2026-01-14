@@ -126,7 +126,7 @@ class LeadConvertRequest(BaseModel):
 # LEAD SOURCES ENDPOINTS
 # =============================================================================
 
-@router.get("/crm-leads/lead-sources")
+@router.get("/crm/lead-sources")
 async def get_lead_sources(
     include_inactive: bool = False,
     user: User = Depends(get_current_user),
@@ -153,7 +153,7 @@ async def get_lead_sources(
     } for s in sources]
 
 
-@router.post("/crm-leads/lead-sources")
+@router.post("/crm/lead-sources")
 async def create_lead_source(
     data: LeadSourceCreate,
     user: User = Depends(get_current_user),
@@ -177,7 +177,7 @@ async def create_lead_source(
     return {"id": source.id, "name": source.name, "message": "Lead source created"}
 
 
-@router.put("/crm-leads/lead-sources/{source_id}")
+@router.put("/crm/lead-sources/{source_id}")
 async def update_lead_source(
     source_id: int,
     data: LeadSourceUpdate,
@@ -200,7 +200,7 @@ async def update_lead_source(
     return {"message": "Lead source updated"}
 
 
-@router.delete("/crm-leads/lead-sources/{source_id}")
+@router.delete("/crm/lead-sources/{source_id}")
 async def delete_lead_source(
     source_id: int,
     user: User = Depends(get_current_user),
@@ -264,7 +264,7 @@ def lead_to_response(lead: Lead, db: Session) -> dict:
     }
 
 
-@router.get("/crm-leads/crm-leads")
+@router.get("/crm/leads")
 async def get_leads(
     status: Optional[str] = None,
     rating: Optional[str] = None,
@@ -313,7 +313,7 @@ async def get_leads(
     return [lead_to_response(lead, db) for lead in leads]
 
 
-@router.get("/crm-leads/crm-leads/stats")
+@router.get("/crm/leads/stats")
 async def get_lead_stats(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
@@ -369,7 +369,7 @@ async def get_lead_stats(
     }
 
 
-@router.get("/crm-leads/crm-leads/{lead_id}")
+@router.get("/crm/leads/{lead_id}")
 async def get_lead(
     lead_id: int,
     user: User = Depends(get_current_user),
@@ -387,7 +387,7 @@ async def get_lead(
     return lead_to_response(lead, db)
 
 
-@router.post("/crm-leads/crm-leads")
+@router.post("/crm/leads")
 async def create_lead(
     data: LeadCreate,
     user: User = Depends(get_current_user),
@@ -431,7 +431,7 @@ async def create_lead(
     return {"id": lead.id, "message": "Lead created successfully"}
 
 
-@router.put("/crm-leads/crm-leads/{lead_id}")
+@router.put("/crm/leads/{lead_id}")
 async def update_lead(
     lead_id: int,
     data: LeadUpdate,

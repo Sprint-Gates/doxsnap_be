@@ -109,8 +109,6 @@ PUBLIC_PATHS = (
     "/api/docs",
     "/api/health",
     "/api/plans",
-    "/api/roles/roles",
-    "/api/roles/permissions",
     "/api/companies/register"
 )
 

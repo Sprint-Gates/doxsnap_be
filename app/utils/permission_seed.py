@@ -55,7 +55,7 @@ PERMISSIONS_DICTIONARY = {
         "toggle_status": "Toggle branch status",
     },
 
-    "business_units": {
+    "business-units": {
         "view": "View business units",
         "create": "Create business units",
         "update": "Edit business units",
@@ -264,6 +264,23 @@ PERMISSIONS_DICTIONARY = {
         "calculate_depreciation": "Calculate tool depreciation",
     },
 
+    "tool-categories": {
+        "view": "View tools categories",
+        "create": "Create tools categories",
+        "update": "Edit tools categories",
+        "delete": "Delete tools categories",
+    },
+
+    "tool-purchases": {
+        "view": "View tools purchases",
+        "create": "Create tools purchases",
+        "update": "Edit tools purchases",
+        "delete": "Delete tools purchases",
+        "approve": "Approve tools purchases",
+        "cancel": "Cancel tools purchases",
+        "receive": "Receive tools purchases",
+    },
+
     "disposals": {
         "view": "View disposals",
         "create": "Create disposals",
@@ -397,6 +414,9 @@ PERMISSIONS_DICTIONARY = {
         "update": "Edit CRM leads",
         "delete": "Delete CRM leads",
         "convert": "Convert CRM leads",
+        "close": "Close CRM leads",
+        "complete": "complete CRM activity",
+        "cancel": "cancel CRM activity",
     },
 
     "crm_opportunities": {
@@ -491,6 +511,28 @@ PERMISSIONS_DICTIONARY = {
         "update": "Edit NPS surveys",
         "delete": "Delete NPS surveys",
         "follow_up": "Follow up on NPS surveys",
+    },
+
+    # =============================================================================
+    # ROLES & PERMISSIONS MANAGEMENT
+    # =============================================================================
+    "roles": {
+        "view": "View roles",
+        "create": "Create roles",
+        "update": "Edit roles",
+        "delete": "Delete roles",
+        "assign_permissions": "Assign permissions to roles",
+        "remove_permissions": "Remove permissions from roles",
+        "assign_users": "Assign users to roles",
+        "remove_users": "Remove users from roles",
+    },
+
+    "permissions": {
+        "view": "View permissions",
+        "create": "Create permissions",
+        "update": "Edit permissions",
+        "delete": "Delete permissions",
+        "seed": "Seed system permissions",
     },
 }
 

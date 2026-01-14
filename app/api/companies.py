@@ -281,6 +281,35 @@ async def register_company(data: CompanyRegister, db: Session = Depends(get_db))
         except Exception as perm_error:
             logger.warning(f"Failed to seed permissions: {perm_error}")
 
+        # Assign all permissions to the Admin role
+        try:
+            from app.models import Permission, RolePermission
+
+            # Get all permissions
+            all_permissions = db.query(Permission).all()
+
+            # Get existing role permissions for this admin role
+            existing_perms = db.query(RolePermission).filter(
+                RolePermission.role_id == admin_role.id
+            ).all()
+            existing_perm_ids = {rp.permission_id for rp in existing_perms}
+
+            # Assign any missing permissions to the admin role
+            permissions_added = 0
+            for permission in all_permissions:
+                if permission.id not in existing_perm_ids:
+                    role_permission = RolePermission(
+                        role_id=admin_role.id,
+                        permission_id=permission.id
+                    )
+                    db.add(role_permission)
+                    permissions_added += 1
+
+            db.commit()
+            logger.info(f"Assigned {permissions_added} permissions to Admin role for company {company.id}")
+        except Exception as role_perm_error:
+            logger.warning(f"Failed to assign permissions to Admin role: {role_perm_error}")
+
         # Create default petty cash fund for admin user
         try:
             from app.models import PettyCashFund
