@@ -180,9 +180,9 @@ async def login(request: Request, user_credentials: UserLogin, db: Session = Dep
         data={"sub": user.email}, expires_delta=access_token_expires
     )
 
-    # Create refresh token
+    # Create refresh token with extended expiry if remember_me is True
     refresh_token_str = generate_refresh_token()
-    refresh_token_expiry = get_refresh_token_expiry()
+    refresh_token_expiry = get_refresh_token_expiry(remember_me=user_credentials.remember_me)
 
     # Store refresh token in database
     db_refresh_token = RefreshToken(

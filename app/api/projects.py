@@ -224,6 +224,8 @@ async def create_project(
         Client.company_id == user.company_id
     ).first()
 
+    print(site)
+
     if not site:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

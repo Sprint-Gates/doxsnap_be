@@ -115,6 +115,15 @@ def require_admin(user: User = Depends(get_current_user)):
         )
     return user
 
+def require_roles(*allowed_roles: str):
+    def role_checker(user: User = Depends(get_current_user)):
+        if user.role not in allowed_roles and user.role != "admin":
+            raise HTTPException(
+                status_code=403,
+                detail=f"Access requires one of the roles: {', '.join(allowed_roles)} or admin"
+            )
+        return user
+    return role_checker
 
 def can_approve_pr(user: User, pr_amount: Decimal) -> tuple[bool, str]:
     """
@@ -196,7 +205,6 @@ def calculate_pr_total(lines: list) -> Decimal:
 # ============================================================================
 # Purchase Request CRUD
 # ============================================================================
-
 @router.get("/", response_model=List[PurchaseRequestList])
 async def list_purchase_requests(
     status_filter: Optional[str] = Query(None, alias="status"),
@@ -210,7 +218,8 @@ async def list_purchase_requests(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """List all purchase requests for the company"""
+    """List all purchase requests for the company with role-based visibility"""
+
     query = db.query(PurchaseRequest).filter(
         PurchaseRequest.company_id == current_user.company_id
     ).options(
@@ -221,27 +230,56 @@ async def list_purchase_requests(
         joinedload(PurchaseRequest.lines)
     )
 
+    # -------------------------
+    # Role-based visibility
+    # -------------------------
+    if current_user.role == "warehouse_manager":
+        # Can only see PRs they created
+        query = query.filter(PurchaseRequest.created_by == current_user.id)
+
+    elif current_user.role == "procurement_manager":
+        # Can only see submitted PRs
+        query = query.filter(PurchaseRequest.status == "submitted")
+
+    elif current_user.role == "purchase_officer":
+        # Can only see approved PRs
+        query = query.filter(PurchaseRequest.status == "approved")
+
+    # Admin sees everything (no filter)
+
+    # -------------------------
+    # User-applied filters
+    # -------------------------
     if status_filter:
         query = query.filter(PurchaseRequest.status == status_filter)
+
     if priority:
         query = query.filter(PurchaseRequest.priority == priority)
+
     if vendor_id:
         query = query.filter(PurchaseRequest.address_book_id == vendor_id)
     if work_order_id:
         query = query.filter(PurchaseRequest.work_order_id == work_order_id)
+
     if contract_id:
         query = query.filter(PurchaseRequest.contract_id == contract_id)
+
     if search:
         query = query.filter(
             (PurchaseRequest.pr_number.ilike(f"%{search}%")) |
             (PurchaseRequest.title.ilike(f"%{search}%"))
         )
 
-    prs = query.order_by(PurchaseRequest.created_at.desc()).offset(offset).limit(limit).all()
+    prs = (
+        query
+        .order_by(PurchaseRequest.created_at.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
 
-    result = []
-    for pr in prs:
-        result.append(PurchaseRequestList(
+    result = [
+        PurchaseRequestList(
             id=pr.id,
             pr_number=pr.pr_number,
             status=pr.status,
@@ -256,7 +294,9 @@ async def list_purchase_requests(
             created_by_name=pr.creator.name if pr.creator else "Unknown",
             created_at=pr.created_at,
             line_count=len(pr.lines)
-        ))
+        )
+        for pr in prs
+    ]
 
     return result
 
@@ -265,7 +305,7 @@ async def list_purchase_requests(
 async def create_purchase_request(
     pr_data: PurchaseRequestCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin)
+    current_user: User = Depends(require_roles("warehouse_manager"))
 ):
     """Create a new purchase request (admin only)"""
     # Generate PR number
@@ -378,7 +418,7 @@ async def update_purchase_request(
     pr_id: int,
     pr_data: PurchaseRequestUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin)
+    current_user: User = Depends(require_roles("warehouse_manager"))
 ):
     """Update a purchase request (only if draft)"""
     pr = db.query(PurchaseRequest).filter(
@@ -413,7 +453,7 @@ async def update_purchase_request(
 async def delete_purchase_request(
     pr_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin)
+    current_user: User = Depends(require_roles("warehouse_manager"))
 ):
     """Delete a purchase request (only if draft)"""
     pr = db.query(PurchaseRequest).filter(
@@ -442,7 +482,7 @@ async def add_pr_line(
     pr_id: int,
     line_data: PurchaseRequestLineCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin)
+    current_user: User = Depends(require_roles("warehouse_manager"))
 ):
     """Add a line item to a purchase request"""
     pr = db.query(PurchaseRequest).filter(
@@ -491,7 +531,7 @@ async def update_pr_line(
     line_id: int,
     line_data: PurchaseRequestLineUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin)
+    current_user: User = Depends(require_roles("warehouse_manager"))
 ):
     """Update a line item in a purchase request"""
     pr = db.query(PurchaseRequest).filter(
@@ -538,7 +578,7 @@ async def delete_pr_line(
     pr_id: int,
     line_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin)
+    current_user: User = Depends(require_roles("warehouse_manager"))
 ):
     """Delete a line item from a purchase request"""
     pr = db.query(PurchaseRequest).filter(
@@ -577,7 +617,7 @@ async def delete_pr_line(
 async def submit_purchase_request(
     pr_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin)
+    current_user: User = Depends(require_roles("warehouse_manager"))
 ):
     """Submit a purchase request for approval"""
     pr = db.query(PurchaseRequest).filter(
@@ -819,7 +859,7 @@ async def convert_pr_to_po(
 async def cancel_purchase_request(
     pr_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin)
+    current_user: User = Depends(get_current_user)
 ):
     """Cancel a purchase request"""
     pr = db.query(PurchaseRequest).filter(

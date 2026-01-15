@@ -6,11 +6,12 @@ from sqlalchemy import text
 from typing import Optional, List
 from datetime import datetime, timedelta
 from app.database import get_db
-from app.models import Company, User, Plan
+from app.models import Company, User, Plan, Role
 from app.utils.security import get_password_hash, create_access_token, verify_token
 from app.utils.pm_seed import seed_pm_checklists_for_company
 from app.utils.company_seed import seed_company_defaults
 from app.utils.crm_seed import seed_crm_defaults
+from app.utils.permission_seed import seed_permissions
 import re
 import logging
 import os
@@ -43,6 +44,29 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
 
     return user
 
+def get_or_create_admin_role(db: Session, company_id: int) -> Role:
+    """
+    Ensure an Admin role exists for the given company.
+    Returns the Admin role (existing or newly created).
+    """
+
+    admin_role = db.query(Role).filter(
+        Role.company_id == company_id,
+        Role.name == "Admin"
+    ).first()
+
+    if admin_role:
+        return admin_role
+
+    admin_role = Role(
+        company_id=company_id,
+        name="Admin",
+        description="Company administrator"
+    )
+    db.add(admin_role)
+    db.flush()  # ensures admin_role.id is available
+
+    return admin_role
 
 def require_admin(user: User = Depends(get_current_user)):
     """Require admin role"""
@@ -188,6 +212,7 @@ async def register_company(data: CompanyRegister, db: Session = Depends(get_db))
         db.add(company)
         db.flush()  # Get company ID before creating user
 
+        admin_role = get_or_create_admin_role(db, company.id)
         # Create admin user
         admin_user = User(
             email=data.admin_email,
@@ -196,6 +221,7 @@ async def register_company(data: CompanyRegister, db: Session = Depends(get_db))
             phone=data.admin_phone,
             company_id=company.id,
             role="admin",
+            role_id=admin_role.id,
             is_active=True,
             remaining_documents=plan.documents_max  # Set based on plan
         )
@@ -248,6 +274,42 @@ async def register_company(data: CompanyRegister, db: Session = Depends(get_db))
         except Exception as crm_error:
             logger.warning(f"Failed to seed CRM defaults for company {company.id}: {crm_error}")
             # Don't fail company registration if CRM seed fails
+        # Seed global permissions
+        try:
+            seed_permissions(db)
+            db.commit()
+            logger.info(f"Permissions seeded for company {company.id}")
+        except Exception as perm_error:
+            logger.warning(f"Failed to seed permissions: {perm_error}")
+
+        # Assign all permissions to the Admin role
+        try:
+            from app.models import Permission, RolePermission
+
+            # Get all permissions
+            all_permissions = db.query(Permission).all()
+
+            # Get existing role permissions for this admin role
+            existing_perms = db.query(RolePermission).filter(
+                RolePermission.role_id == admin_role.id
+            ).all()
+            existing_perm_ids = {rp.permission_id for rp in existing_perms}
+
+            # Assign any missing permissions to the admin role
+            permissions_added = 0
+            for permission in all_permissions:
+                if permission.id not in existing_perm_ids:
+                    role_permission = RolePermission(
+                        role_id=admin_role.id,
+                        permission_id=permission.id
+                    )
+                    db.add(role_permission)
+                    permissions_added += 1
+
+            db.commit()
+            logger.info(f"Assigned {permissions_added} permissions to Admin role for company {company.id}")
+        except Exception as role_perm_error:
+            logger.warning(f"Failed to assign permissions to Admin role: {role_perm_error}")
 
         # Create default petty cash fund for admin user
         try:

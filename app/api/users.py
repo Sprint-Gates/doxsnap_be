@@ -4,18 +4,19 @@ User Management API - for managing company users
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, field_validator
 from typing import Optional, List
 from datetime import datetime
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.database import get_db
-from app.models import User
+from app.models import User, Client, Site, ExternalUserClient, Warehouse, Role
 from app.utils.security import get_password_hash, verify_token
 from app.utils.limits import check_user_limit, enforce_user_limit
+from app.services.dependency import require_permission
 
 router = APIRouter()
 security = HTTPBearer()
-
 
 def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security), db: Session = Depends(get_db)):
     """Get the current authenticated user"""
@@ -38,20 +39,50 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
 
     return user
 
+def validate_role_for_company(role_id: int, company_id: int, db: Session) -> Role:
+    """
+    Validate that a role exists and belongs to the given company.
+    Returns the Role object if valid, raises HTTPException if invalid.
+    """
+    role = db.query(Role).filter(
+        Role.id == role_id,
+        Role.company_id == company_id
+    ).first()
+
+    if not role:
+        raise HTTPException(status_code=400, detail="Invalid role for this company")
+
+    return role
+
+def normalize_role_name(name: str) -> str:
+    return (
+        name.strip()
+        .lower()
+        .replace(" ", "_")
+        .replace("-", "_")
+    )
 
 class UserCreate(BaseModel):
     email: EmailStr
     password: str
     name: str
-    role: str = "operator"  # admin, operator, accounting, procurement, general_manager
+   # role: str = "operator" # admin, operator, accounting, procurement, general_manager, external-user
     phone: Optional[str] = None
+    role_id: int
+
+    # External user only
+    client_id: Optional[int] = None
+    site_ids: Optional[List[int]] = None
+
+    #Warehouse manager only
+    warehouse_ids: Optional[List[int]] = None
 
 
 class UserUpdate(BaseModel):
     name: Optional[str] = None
     email: Optional[EmailStr] = None
-    role: Optional[str] = None
     phone: Optional[str] = None
+    role_id: Optional[int] = None
     is_active: Optional[bool] = None
     # PR Approval permissions
     can_approve_pr: Optional[bool] = None
@@ -65,8 +96,8 @@ class UserResponse(BaseModel):
     id: int
     email: str
     name: str
-    role: str
     phone: Optional[str]
+    role_id: int
     is_active: bool
     created_at: datetime
     updated_at: Optional[datetime]
@@ -132,57 +163,115 @@ async def get_user(
     if not target_user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    return target_user
+    return target_user 
 
 
 @router.post("/users/", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 async def create_user(
     data: UserCreate,
-    user: User = Depends(require_admin),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """Create a new user in the company"""
     # Check user limit before creating
-    enforce_user_limit(db, user.company_id)
+    enforce_user_limit(db, current_user.company_id)
 
-    # Validate role
-    valid_roles = ["admin", "operator", "accounting", "procurement", "general_manager"]
-    if data.role not in valid_roles:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid role. Must be one of: {valid_roles}"
+    # Validate role_id belongs to the company
+    role = validate_role_for_company(data.role_id, current_user.company_id, db)
+    role_key = normalize_role_name(role.name)
+
+    # Check email uniqueness
+    if db.query(User).filter(User.email == data.email).first():
+        raise HTTPException(status_code=400, detail="A user with this email already exists")
+
+    # Role-specific validation
+    if role_key != "warehouse_manager" and data.warehouse_ids:
+        raise HTTPException(status_code=400, detail="Only warehouse managers can be assigned to warehouses")
+
+    if role_key != "external_user" and (data.client_id or data.site_ids):
+        raise HTTPException(status_code=400, detail="client_id and site_ids are only allowed for external users")
+
+    # Create User object
+    try:
+        new_user = User(
+            email=data.email.strip(),
+            hashed_password=get_password_hash(data.password),
+            name=data.name.strip(),
+            phone=data.phone.strip() if data.phone else None,
+            company_id=current_user.company_id,
+            role_id=role.id,
+            is_active=True,
         )
+        db.add(new_user)
+        db.flush()  
 
-    # Check if email already exists
-    existing = db.query(User).filter(User.email == data.email).first()
-    if existing:
-        raise HTTPException(
-            status_code=400,
-            detail="A user with this email already exists"
+        # Handle external-user
+        if role_key == "external_user":
+            if not data.client_id or not data.site_ids:
+                raise HTTPException(status_code=400, detail="client_id and at least one site are required for external users")
+
+            client = db.query(Client).filter(
+                Client.id == data.client_id,
+                Client.company_id == current_user.company_id
+            ).first()
+            if not client:
+                raise HTTPException(status_code=400, detail="Invalid client")
+
+            sites = db.query(Site).filter(
+                Site.id.in_(data.site_ids),
+                Site.client_id == client.id
+            ).all()
+            if len(sites) != len(data.site_ids):
+                raise HTTPException(status_code=400, detail="One or more sites do not belong to the selected client")
+
+            euc = ExternalUserClient(
+                user=new_user,
+                client=client,
+                company_id=current_user.company_id
+            )
+            euc.sites = sites
+            db.add(euc)
+
+        # Handle warehouse_manager
+        if role_key == "warehouse_manager":
+            if not data.warehouse_ids:
+                raise HTTPException(status_code=400, detail="At least one warehouse is required for warehouse managers")
+
+            warehouses = db.query(Warehouse).filter(
+                Warehouse.id.in_(data.warehouse_ids),
+                Warehouse.company_id == current_user.company_id,
+                Warehouse.is_active.is_(True)
+            ).all()
+            if len(warehouses) != len(data.warehouse_ids):
+                raise HTTPException(status_code=400, detail="One or more warehouses are invalid or do not belong to your company")
+
+            new_user.warehouses = warehouses
+
+        db.commit()
+        db.refresh(new_user)
+
+        # Return response with role_name
+        response = UserResponse(
+            id=new_user.id,
+            email=new_user.email,
+            name=new_user.name,
+            role_id=new_user.role_id,
+            phone=new_user.phone,
+            is_active=new_user.is_active,
+            created_at=new_user.created_at,
+            updated_at=new_user.updated_at
         )
+        return response
 
-    new_user = User(
-        email=data.email,
-        hashed_password=get_password_hash(data.password),
-        name=data.name,
-        role=data.role,
-        phone=data.phone,
-        company_id=user.company_id,
-        is_active=True
-    )
-
-    db.add(new_user)
-    db.commit()
-    db.refresh(new_user)
-
-    return new_user
-
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Failed to create user")
 
 @router.put("/users/{user_id}", response_model=UserResponse)
 async def update_user(
     user_id: int,
     data: UserUpdate,
-    user: User = Depends(require_admin),
+    user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """Update a user"""
@@ -206,13 +295,11 @@ async def update_user(
         enforce_user_limit(db, user.company_id)
 
     # Validate role if provided
-    if data.role:
-        valid_roles = ["admin", "operator", "accounting", "procurement", "general_manager"]
-        if data.role not in valid_roles:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid role. Must be one of: {valid_roles}"
-            )
+    if data.role_id is not None:
+        # Validate role_id belongs to company
+        role = validate_role_for_company(data.role_id, user.company_id, db)
+        target_user.role_id = role.id
+        role_name = role.name 
 
     # Check email uniqueness if changed
     if data.email and data.email != target_user.email:
@@ -228,8 +315,8 @@ async def update_user(
         target_user.name = data.name
     if data.email is not None:
         target_user.email = data.email
-    if data.role is not None:
-        target_user.role = data.role
+    if data.role_id is not None:
+        target_user.role_id = data.role_id
     if data.phone is not None:
         target_user.phone = data.phone
     if data.is_active is not None:

@@ -30,6 +30,100 @@ logger = logging.getLogger(__name__)
 
 
 # =============================================================================
+# PYDANTIC MODELS
+# =============================================================================
+
+# Tool Category Models
+class ToolCategoryCreateInput(BaseModel):
+    name: str
+    asset_type: str
+    code: Optional[str] = None
+    useful_life_months: Optional[int] = None
+    depreciation_method: Optional[str] = "straight_line"
+    salvage_value_percentage: Optional[float] = None
+    asset_account_id: Optional[int] = None
+    expense_account_id: Optional[int] = None
+    accumulated_depreciation_account_id: Optional[int] = None
+    depreciation_expense_account_id: Optional[int] = None
+
+
+class ToolCategoryUpdateInput(BaseModel):
+    name: Optional[str] = None
+    code: Optional[str] = None
+    asset_type: Optional[str] = None
+    useful_life_months: Optional[int] = None
+    depreciation_method: Optional[str] = None
+    salvage_value_percentage: Optional[float] = None
+    asset_account_id: Optional[int] = None
+    expense_account_id: Optional[int] = None
+    accumulated_depreciation_account_id: Optional[int] = None
+    depreciation_expense_account_id: Optional[int] = None
+    is_active: Optional[bool] = None
+
+
+# Tool Models
+class ToolCreateInput(BaseModel):
+    category_id: int
+    name: str
+    serial_number: Optional[str] = None
+    barcode: Optional[str] = None
+    manufacturer: Optional[str] = None
+    model: Optional[str] = None
+    specifications: Optional[str] = None
+    photo_url: Optional[str] = None
+    purchase_date: Optional[date] = None
+    purchase_cost: Optional[float] = None
+    vendor_id: Optional[int] = None
+    useful_life_months: Optional[int] = None
+    salvage_value: Optional[float] = None
+    warranty_expiry: Optional[date] = None
+    warranty_notes: Optional[str] = None
+    status: str = "available"
+    condition: str = "good"
+    assigned_site_id: Optional[int] = None
+    assigned_technician_id: Optional[int] = None
+    assigned_warehouse_id: Optional[int] = None
+    notes: Optional[str] = None
+
+
+class ToolUpdateInput(BaseModel):
+    name: Optional[str] = None
+    serial_number: Optional[str] = None
+    barcode: Optional[str] = None
+    manufacturer: Optional[str] = None
+    model: Optional[str] = None
+    specifications: Optional[str] = None
+    photo_url: Optional[str] = None
+    useful_life_months: Optional[int] = None
+    salvage_value: Optional[float] = None
+    warranty_expiry: Optional[date] = None
+    warranty_notes: Optional[str] = None
+    status: Optional[str] = None
+    condition: Optional[str] = None
+    notes: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
+class ToolAllocationInput(BaseModel):
+    assigned_site_id: Optional[int] = None
+    assigned_technician_id: Optional[int] = None
+    assigned_warehouse_id: Optional[int] = None
+    reason: Optional[str] = "reassignment"
+    notes: Optional[str] = None
+
+
+# Tool Purchase Models
+class ToolPurchaseUpdateInput(BaseModel):
+    purchase_date: Optional[date] = None
+    vendor_id: Optional[int] = None
+    currency: Optional[str] = None
+    initial_warehouse_id: Optional[int] = None
+    tax_amount: Optional[float] = None
+    reference: Optional[str] = None
+    notes: Optional[str] = None
+
+
+# =============================================================================
 # HELPER FUNCTIONS
 # =============================================================================
 
@@ -245,16 +339,7 @@ async def list_tool_categories(
 
 @router.post("/tool-categories", response_model=dict)
 async def create_tool_category(
-    name: str,
-    asset_type: str,
-    code: Optional[str] = None,
-    useful_life_months: Optional[int] = None,
-    depreciation_method: Optional[str] = "straight_line",
-    salvage_value_percentage: Optional[float] = None,
-    asset_account_id: Optional[int] = None,
-    expense_account_id: Optional[int] = None,
-    accumulated_depreciation_account_id: Optional[int] = None,
-    depreciation_expense_account_id: Optional[int] = None,
+    data: ToolCategoryCreateInput,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -262,13 +347,13 @@ async def create_tool_category(
     if not current_user.company_id:
         raise HTTPException(status_code=400, detail="User must be associated with a company")
 
-    if asset_type not in ["fixed_asset", "consumable"]:
+    if data.asset_type not in ["fixed_asset", "consumable"]:
         raise HTTPException(status_code=400, detail="asset_type must be 'fixed_asset' or 'consumable'")
 
     # Check for duplicate name
     existing = db.query(ToolCategory).filter(
         ToolCategory.company_id == current_user.company_id,
-        ToolCategory.name == name
+        ToolCategory.name == data.name
     ).first()
 
     if existing:
@@ -276,16 +361,16 @@ async def create_tool_category(
 
     category = ToolCategory(
         company_id=current_user.company_id,
-        name=name,
-        code=code,
-        asset_type=asset_type,
-        useful_life_months=useful_life_months,
-        depreciation_method=depreciation_method,
-        salvage_value_percentage=salvage_value_percentage,
-        asset_account_id=asset_account_id,
-        expense_account_id=expense_account_id,
-        accumulated_depreciation_account_id=accumulated_depreciation_account_id,
-        depreciation_expense_account_id=depreciation_expense_account_id
+        name=data.name,
+        code=data.code,
+        asset_type=data.asset_type,
+        useful_life_months=data.useful_life_months,
+        depreciation_method=data.depreciation_method,
+        salvage_value_percentage=data.salvage_value_percentage,
+        asset_account_id=data.asset_account_id,
+        expense_account_id=data.expense_account_id,
+        accumulated_depreciation_account_id=data.accumulated_depreciation_account_id,
+        depreciation_expense_account_id=data.depreciation_expense_account_id
     )
 
     db.add(category)
@@ -341,17 +426,7 @@ async def get_tool_category(
 @router.put("/tool-categories/{category_id}", response_model=dict)
 async def update_tool_category(
     category_id: int,
-    name: Optional[str] = None,
-    code: Optional[str] = None,
-    asset_type: Optional[str] = None,
-    useful_life_months: Optional[int] = None,
-    depreciation_method: Optional[str] = None,
-    salvage_value_percentage: Optional[float] = None,
-    asset_account_id: Optional[int] = None,
-    expense_account_id: Optional[int] = None,
-    accumulated_depreciation_account_id: Optional[int] = None,
-    depreciation_expense_account_id: Optional[int] = None,
-    is_active: Optional[bool] = None,
+    data: ToolCategoryUpdateInput,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -364,30 +439,30 @@ async def update_tool_category(
     if not category:
         raise HTTPException(status_code=404, detail="Tool category not found")
 
-    if name is not None:
-        category.name = name
-    if code is not None:
-        category.code = code
-    if asset_type is not None:
-        if asset_type not in ["fixed_asset", "consumable"]:
+    if data.name is not None:
+        category.name = data.name
+    if data.code is not None:
+        category.code = data.code
+    if data.asset_type is not None:
+        if data.asset_type not in ["fixed_asset", "consumable"]:
             raise HTTPException(status_code=400, detail="asset_type must be 'fixed_asset' or 'consumable'")
-        category.asset_type = asset_type
-    if useful_life_months is not None:
-        category.useful_life_months = useful_life_months
-    if depreciation_method is not None:
-        category.depreciation_method = depreciation_method
-    if salvage_value_percentage is not None:
-        category.salvage_value_percentage = salvage_value_percentage
-    if asset_account_id is not None:
-        category.asset_account_id = asset_account_id
-    if expense_account_id is not None:
-        category.expense_account_id = expense_account_id
-    if accumulated_depreciation_account_id is not None:
-        category.accumulated_depreciation_account_id = accumulated_depreciation_account_id
-    if depreciation_expense_account_id is not None:
-        category.depreciation_expense_account_id = depreciation_expense_account_id
-    if is_active is not None:
-        category.is_active = is_active
+        category.asset_type = data.asset_type
+    if data.useful_life_months is not None:
+        category.useful_life_months = data.useful_life_months
+    if data.depreciation_method is not None:
+        category.depreciation_method = data.depreciation_method
+    if data.salvage_value_percentage is not None:
+        category.salvage_value_percentage = data.salvage_value_percentage
+    if data.asset_account_id is not None:
+        category.asset_account_id = data.asset_account_id
+    if data.expense_account_id is not None:
+        category.expense_account_id = data.expense_account_id
+    if data.accumulated_depreciation_account_id is not None:
+        category.accumulated_depreciation_account_id = data.accumulated_depreciation_account_id
+    if data.depreciation_expense_account_id is not None:
+        category.depreciation_expense_account_id = data.depreciation_expense_account_id
+    if data.is_active is not None:
+        category.is_active = data.is_active
 
     category.updated_at = datetime.utcnow()
 
@@ -503,27 +578,7 @@ async def list_tools(
 
 @router.post("/tools", response_model=dict)
 async def create_tool(
-    category_id: int,
-    name: str,
-    serial_number: Optional[str] = None,
-    barcode: Optional[str] = None,
-    manufacturer: Optional[str] = None,
-    model: Optional[str] = None,
-    specifications: Optional[str] = None,
-    photo_url: Optional[str] = None,
-    purchase_date: Optional[date] = None,
-    purchase_cost: Optional[float] = None,
-    vendor_id: Optional[int] = None,
-    useful_life_months: Optional[int] = None,
-    salvage_value: Optional[float] = None,
-    warranty_expiry: Optional[date] = None,
-    warranty_notes: Optional[str] = None,
-    status: str = "available",
-    condition: str = "good",
-    assigned_site_id: Optional[int] = None,
-    assigned_technician_id: Optional[int] = None,
-    assigned_warehouse_id: Optional[int] = None,
-    notes: Optional[str] = None,
+    data: ToolCreateInput,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -533,7 +588,7 @@ async def create_tool(
 
     # Validate category
     category = db.query(ToolCategory).filter(
-        ToolCategory.id == category_id,
+        ToolCategory.id == data.category_id,
         ToolCategory.company_id == current_user.company_id
     ).first()
 
@@ -541,7 +596,7 @@ async def create_tool(
         raise HTTPException(status_code=404, detail="Tool category not found")
 
     # Validate single assignment
-    if not validate_single_assignment(assigned_site_id, assigned_technician_id, assigned_warehouse_id):
+    if not validate_single_assignment(data.assigned_site_id, data.assigned_technician_id, data.assigned_warehouse_id):
         raise HTTPException(
             status_code=400,
             detail="Tool can only be assigned to ONE of: Site, Technician, or Warehouse"
@@ -551,43 +606,45 @@ async def create_tool(
     tool_number = generate_tool_number(db, current_user.company_id)
 
     # Use category defaults if not provided
+    useful_life_months = data.useful_life_months
     if useful_life_months is None and category.useful_life_months:
         useful_life_months = category.useful_life_months
 
     # Calculate salvage value from percentage if not provided
-    if salvage_value is None and purchase_cost and category.salvage_value_percentage:
-        salvage_value = float(purchase_cost) * float(category.salvage_value_percentage) / 100
+    salvage_value = data.salvage_value
+    if salvage_value is None and data.purchase_cost and category.salvage_value_percentage:
+        salvage_value = float(data.purchase_cost) * float(category.salvage_value_percentage) / 100
 
     # Calculate initial net book value
-    net_book_value = purchase_cost if purchase_cost else None
+    net_book_value = data.purchase_cost if data.purchase_cost else None
 
     tool = Tool(
         company_id=current_user.company_id,
-        category_id=category_id,
+        category_id=data.category_id,
         tool_number=tool_number,
-        name=name,
-        serial_number=serial_number,
-        barcode=barcode,
-        manufacturer=manufacturer,
-        model=model,
-        specifications=specifications,
-        photo_url=photo_url,
-        purchase_date=purchase_date,
-        purchase_cost=purchase_cost,
-        vendor_address_book_id=vendor_id,
-        capitalization_date=purchase_date if category.asset_type == "fixed_asset" else None,
+        name=data.name,
+        serial_number=data.serial_number,
+        barcode=data.barcode,
+        manufacturer=data.manufacturer,
+        model=data.model,
+        specifications=data.specifications,
+        photo_url=data.photo_url,
+        purchase_date=data.purchase_date,
+        purchase_cost=data.purchase_cost,
+        vendor_address_book_id=data.vendor_id,
+        capitalization_date=data.purchase_date if category.asset_type == "fixed_asset" else None,
         useful_life_months=useful_life_months,
         salvage_value=salvage_value,
         net_book_value=net_book_value,
-        warranty_expiry=warranty_expiry,
-        warranty_notes=warranty_notes,
-        status=status,
-        condition=condition,
-        assigned_site_id=assigned_site_id,
-        assigned_technician_id=assigned_technician_id,
-        assigned_warehouse_id=assigned_warehouse_id,
-        assigned_at=datetime.utcnow() if any([assigned_site_id, assigned_technician_id, assigned_warehouse_id]) else None,
-        notes=notes,
+        warranty_expiry=data.warranty_expiry,
+        warranty_notes=data.warranty_notes,
+        status=data.status,
+        condition=data.condition,
+        assigned_site_id=data.assigned_site_id,
+        assigned_technician_id=data.assigned_technician_id,
+        assigned_warehouse_id=data.assigned_warehouse_id,
+        assigned_at=datetime.utcnow() if any([data.assigned_site_id, data.assigned_technician_id, data.assigned_warehouse_id]) else None,
+        notes=data.notes,
         created_by=current_user.id
     )
 
@@ -595,13 +652,13 @@ async def create_tool(
     db.flush()
 
     # Create initial allocation history if assigned
-    if any([assigned_site_id, assigned_technician_id, assigned_warehouse_id]):
+    if any([data.assigned_site_id, data.assigned_technician_id, data.assigned_warehouse_id]):
         history = ToolAllocationHistory(
             tool_id=tool.id,
             transfer_date=datetime.utcnow(),
-            to_site_id=assigned_site_id,
-            to_technician_id=assigned_technician_id,
-            to_warehouse_id=assigned_warehouse_id,
+            to_site_id=data.assigned_site_id,
+            to_technician_id=data.assigned_technician_id,
+            to_warehouse_id=data.assigned_warehouse_id,
             reason="initial_assignment",
             notes="Initial assignment on tool creation",
             transferred_by=current_user.id
@@ -651,21 +708,7 @@ async def get_tool(
 @router.put("/tools/{tool_id}", response_model=dict)
 async def update_tool(
     tool_id: int,
-    name: Optional[str] = None,
-    serial_number: Optional[str] = None,
-    barcode: Optional[str] = None,
-    manufacturer: Optional[str] = None,
-    model: Optional[str] = None,
-    specifications: Optional[str] = None,
-    photo_url: Optional[str] = None,
-    useful_life_months: Optional[int] = None,
-    salvage_value: Optional[float] = None,
-    warranty_expiry: Optional[date] = None,
-    warranty_notes: Optional[str] = None,
-    status: Optional[str] = None,
-    condition: Optional[str] = None,
-    notes: Optional[str] = None,
-    is_active: Optional[bool] = None,
+    data: ToolUpdateInput,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -678,36 +721,36 @@ async def update_tool(
     if not tool:
         raise HTTPException(status_code=404, detail="Tool not found")
 
-    if name is not None:
-        tool.name = name
-    if serial_number is not None:
-        tool.serial_number = serial_number
-    if barcode is not None:
-        tool.barcode = barcode
-    if manufacturer is not None:
-        tool.manufacturer = manufacturer
-    if model is not None:
-        tool.model = model
-    if specifications is not None:
-        tool.specifications = specifications
-    if photo_url is not None:
-        tool.photo_url = photo_url
-    if useful_life_months is not None:
-        tool.useful_life_months = useful_life_months
-    if salvage_value is not None:
-        tool.salvage_value = salvage_value
-    if warranty_expiry is not None:
-        tool.warranty_expiry = warranty_expiry
-    if warranty_notes is not None:
-        tool.warranty_notes = warranty_notes
-    if status is not None:
-        tool.status = status
-    if condition is not None:
-        tool.condition = condition
-    if notes is not None:
-        tool.notes = notes
-    if is_active is not None:
-        tool.is_active = is_active
+    if data.name is not None:
+        tool.name = data.name
+    if data.serial_number is not None:
+        tool.serial_number = data.serial_number
+    if data.barcode is not None:
+        tool.barcode = data.barcode
+    if data.manufacturer is not None:
+        tool.manufacturer = data.manufacturer
+    if data.model is not None:
+        tool.model = data.model
+    if data.specifications is not None:
+        tool.specifications = data.specifications
+    if data.photo_url is not None:
+        tool.photo_url = data.photo_url
+    if data.useful_life_months is not None:
+        tool.useful_life_months = data.useful_life_months
+    if data.salvage_value is not None:
+        tool.salvage_value = data.salvage_value
+    if data.warranty_expiry is not None:
+        tool.warranty_expiry = data.warranty_expiry
+    if data.warranty_notes is not None:
+        tool.warranty_notes = data.warranty_notes
+    if data.status is not None:
+        tool.status = data.status
+    if data.condition is not None:
+        tool.condition = data.condition
+    if data.notes is not None:
+        tool.notes = data.notes
+    if data.is_active is not None:
+        tool.is_active = data.is_active
 
     tool.updated_at = datetime.utcnow()
 
@@ -729,11 +772,7 @@ async def update_tool(
 @router.post("/tools/{tool_id}/allocate", response_model=dict)
 async def allocate_tool(
     tool_id: int,
-    assigned_site_id: Optional[int] = None,
-    assigned_technician_id: Optional[int] = None,
-    assigned_warehouse_id: Optional[int] = None,
-    reason: Optional[str] = "reassignment",
-    notes: Optional[str] = None,
+    data: ToolAllocationInput,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -755,7 +794,7 @@ async def allocate_tool(
         raise HTTPException(status_code=404, detail="Tool not found")
 
     # Validate single assignment
-    if not validate_single_assignment(assigned_site_id, assigned_technician_id, assigned_warehouse_id):
+    if not validate_single_assignment(data.assigned_site_id, data.assigned_technician_id, data.assigned_warehouse_id):
         raise HTTPException(
             status_code=400,
             detail="Tool can only be assigned to ONE of: Site, Technician, or Warehouse"
@@ -763,30 +802,29 @@ async def allocate_tool(
 
     # Validate reason
     valid_reasons = ["initial_assignment", "reassignment", "return", "maintenance"]
-    if reason not in valid_reasons:
-        reason = "reassignment"
+    reason = data.reason if data.reason in valid_reasons else "reassignment"
 
     # Validate target entities exist
-    if assigned_site_id:
+    if data.assigned_site_id:
         # Site is linked to company through Client
         site = db.query(Site).join(Client, Site.client_id == Client.id).filter(
-            Site.id == assigned_site_id,
+            Site.id == data.assigned_site_id,
             Client.company_id == current_user.company_id
         ).first()
         if not site:
             raise HTTPException(status_code=404, detail="Site not found")
 
-    if assigned_technician_id:
+    if data.assigned_technician_id:
         technician = db.query(Technician).filter(
-            Technician.id == assigned_technician_id,
+            Technician.id == data.assigned_technician_id,
             Technician.company_id == current_user.company_id
         ).first()
         if not technician:
             raise HTTPException(status_code=404, detail="Technician not found")
 
-    if assigned_warehouse_id:
+    if data.assigned_warehouse_id:
         warehouse = db.query(Warehouse).filter(
-            Warehouse.id == assigned_warehouse_id,
+            Warehouse.id == data.assigned_warehouse_id,
             Warehouse.company_id == current_user.company_id
         ).first()
         if not warehouse:
@@ -799,25 +837,25 @@ async def allocate_tool(
         from_site_id=tool.assigned_site_id,
         from_technician_id=tool.assigned_technician_id,
         from_warehouse_id=tool.assigned_warehouse_id,
-        to_site_id=assigned_site_id,
-        to_technician_id=assigned_technician_id,
-        to_warehouse_id=assigned_warehouse_id,
+        to_site_id=data.assigned_site_id,
+        to_technician_id=data.assigned_technician_id,
+        to_warehouse_id=data.assigned_warehouse_id,
         reason=reason,
-        notes=notes,
+        notes=data.notes,
         transferred_by=current_user.id
     )
     db.add(history)
 
     # Update tool assignment
-    tool.assigned_site_id = assigned_site_id
-    tool.assigned_technician_id = assigned_technician_id
-    tool.assigned_warehouse_id = assigned_warehouse_id
+    tool.assigned_site_id = data.assigned_site_id
+    tool.assigned_technician_id = data.assigned_technician_id
+    tool.assigned_warehouse_id = data.assigned_warehouse_id
     tool.assigned_at = datetime.utcnow()
 
     # Update status based on assignment
-    if assigned_technician_id or assigned_site_id:
+    if data.assigned_technician_id or data.assigned_site_id:
         tool.status = "in_use"
-    elif assigned_warehouse_id:
+    elif data.assigned_warehouse_id:
         tool.status = "available"
     else:
         tool.status = "available"
@@ -1105,13 +1143,7 @@ async def get_tool_purchase(
 @router.put("/tool-purchases/{purchase_id}", response_model=dict)
 async def update_tool_purchase(
     purchase_id: int,
-    purchase_date: Optional[date] = None,
-    vendor_id: Optional[int] = None,
-    currency: Optional[str] = None,
-    initial_warehouse_id: Optional[int] = None,
-    tax_amount: Optional[float] = None,
-    reference: Optional[str] = None,
-    notes: Optional[str] = None,
+    data: ToolPurchaseUpdateInput,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -1127,21 +1159,21 @@ async def update_tool_purchase(
     if purchase.status != "draft":
         raise HTTPException(status_code=400, detail="Can only update draft purchases")
 
-    if purchase_date is not None:
-        purchase.purchase_date = purchase_date
-    if vendor_id is not None:
-        purchase.address_book_id = vendor_id
-    if currency is not None:
-        purchase.currency = currency
-    if initial_warehouse_id is not None:
-        purchase.initial_warehouse_id = initial_warehouse_id
-    if tax_amount is not None:
-        purchase.tax_amount = tax_amount
-        purchase.total_amount = float(purchase.subtotal or 0) + tax_amount
-    if reference is not None:
-        purchase.reference = reference
-    if notes is not None:
-        purchase.notes = notes
+    if data.purchase_date is not None:
+        purchase.purchase_date = data.purchase_date
+    if data.vendor_id is not None:
+        purchase.address_book_id = data.vendor_id
+    if data.currency is not None:
+        purchase.currency = data.currency
+    if data.initial_warehouse_id is not None:
+        purchase.initial_warehouse_id = data.initial_warehouse_id
+    if data.tax_amount is not None:
+        purchase.tax_amount = data.tax_amount
+        purchase.total_amount = float(purchase.subtotal or 0) + data.tax_amount
+    if data.reference is not None:
+        purchase.reference = data.reference
+    if data.notes is not None:
+        purchase.notes = data.notes
 
     purchase.updated_at = datetime.utcnow()
 

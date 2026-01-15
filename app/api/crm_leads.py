@@ -11,7 +11,7 @@ from sqlalchemy import or_, func
 from typing import Optional, List
 from datetime import datetime
 from app.database import get_db
-from app.models import Lead, LeadSource, Client, Opportunity, PipelineStage, User
+from app.models import Lead, LeadSource, Client, Opportunity, PipelineStage, User, AddressBook
 from app.utils.security import verify_token
 import logging
 
@@ -503,23 +503,72 @@ async def convert_lead(
 
     # Create client if requested
     client_id = None
+    address_book_id = None
     if data.create_client:
+        # Generate next address number for Address Book
+        entries = db.query(AddressBook.address_number).filter(
+            AddressBook.company_id == user.company_id
+        ).all()
+
+        max_num = 0
+        for (addr_num,) in entries:
+            try:
+                num = int(addr_num)
+                if num > max_num:
+                    max_num = num
+            except (ValueError, TypeError):
+                pass
+
+        address_number = str(max_num + 1).zfill(8)
+
+        # Create Address Book entry with search_type='C' (Customer)
+        # This will automatically create a Client record through the address_book.py logic
+        address_book_entry = AddressBook(
+            company_id=user.company_id,
+            address_number=address_number,
+            search_type='C',  # Customer type - this makes it appear in client lists
+            alpha_name=lead.company_name or f"{lead.first_name} {lead.last_name or ''}".strip(),
+            mailing_name=f"{lead.first_name} {lead.last_name or ''}".strip() if lead.first_name else None,
+            email=lead.email,
+            phone_primary=lead.phone,
+            address_line_1=lead.address,
+            city=lead.city,
+            state=lead.state,
+            country=lead.country,
+            postal_code=lead.postal_code,
+            website=lead.website,
+            notes=f"Converted from lead on {datetime.utcnow().strftime('%Y-%m-%d')}\n{lead.notes or ''}",
+            is_active=True,
+            created_by=user.id
+        )
+        db.add(address_book_entry)
+        db.flush()
+        address_book_id = address_book_entry.id
+
+        # Create Client record linked to Address Book
         client = Client(
             company_id=user.company_id,
             name=lead.company_name or f"{lead.first_name} {lead.last_name or ''}".strip(),
+            code=address_number,
             email=lead.email,
             phone=lead.phone,
             address=lead.address,
             city=lead.city,
             country=lead.country,
             contact_person=f"{lead.first_name} {lead.last_name or ''}".strip(),
-            notes=f"Converted from lead on {datetime.utcnow().strftime('%Y-%m-%d')}\n{lead.notes or ''}"
+            notes=f"Converted from lead on {datetime.utcnow().strftime('%Y-%m-%d')}\n{lead.notes or ''}",
+            address_book_id=address_book_id,  # Link to Address Book
+            is_active=True
         )
         db.add(client)
         db.flush()
         client_id = client.id
+
+        # Update lead with both conversion IDs
         lead.converted_to_client_id = client_id
+        lead.converted_to_address_book_id = address_book_id
         result["client_id"] = client_id
+        result["address_book_id"] = address_book_id
 
     # Create opportunity if requested
     if data.create_opportunity:

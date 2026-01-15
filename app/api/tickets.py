@@ -17,10 +17,11 @@ from app.schemas import (
     TicketCreate, TicketUpdate, Ticket as TicketSchema,
     TicketList, TicketStatusUpdate, TicketConvertToWorkOrder
 )
+from app.schemas import CancelTicketRequest
 from app.api.auth import get_current_user
+from app.services.dependency import require_permission
 
 router = APIRouter(prefix="/tickets", tags=["Tickets"])
-
 
 def generate_ticket_number(db: Session, company_id: int) -> str:
     """Generate a unique ticket number in format TKT-YYYYMMDD-XXXX"""
@@ -521,3 +522,47 @@ async def delete_ticket(
     db.commit()
 
     return {"message": "Ticket deleted successfully"}
+
+@router.post("/{ticket_id}/cancel")
+async def cancel_ticket(
+    ticket_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Cancel a ticket by setting its status to 'cancelled'.
+    """
+    if not current_user.company_id:
+        raise HTTPException(status_code=404, detail="No company associated")
+
+    ticket = db.query(Ticket).filter(
+        Ticket.id == ticket_id,
+        Ticket.company_id == current_user.company_id
+    ).first()
+
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+
+    if ticket.status == "cancelled":
+        raise HTTPException(status_code=400, detail="Ticket is already cancelled")
+
+    try:
+        ticket.status = "cancelled"
+        ticket.updated_at = datetime.utcnow()
+
+        db.commit()
+        db.refresh(ticket)
+
+        return {
+            "success": True,
+            "message": f"Ticket {ticket.ticket_number} has been cancelled",
+            "ticket": ticket
+        }
+
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error cancelling ticket: {str(e)}"
+        )
+

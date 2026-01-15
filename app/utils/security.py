@@ -9,6 +9,7 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # Refresh token settings
 REFRESH_TOKEN_EXPIRE_DAYS = 7
+REFRESH_TOKEN_EXPIRE_DAYS_REMEMBER_ME = 30  # Extended expiry for "remember me"
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
@@ -46,6 +47,11 @@ def generate_refresh_token() -> str:
     return secrets.token_urlsafe(64)
 
 
-def get_refresh_token_expiry() -> datetime:
-    """Get the expiry datetime for a refresh token"""
-    return datetime.utcnow() + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
+def get_refresh_token_expiry(remember_me: bool = False) -> datetime:
+    """Get the expiry datetime for a refresh token
+
+    Args:
+        remember_me: If True, returns extended expiry (30 days), otherwise normal expiry (7 days)
+    """
+    days = REFRESH_TOKEN_EXPIRE_DAYS_REMEMBER_ME if remember_me else REFRESH_TOKEN_EXPIRE_DAYS
+    return datetime.utcnow() + timedelta(days=days)

@@ -17,6 +17,7 @@ class UserCreate(UserBase):
 class UserLogin(BaseModel):
     email: EmailStr
     password: str
+    remember_me: bool = False
 
 
 class PasswordReset(BaseModel):
@@ -2918,6 +2919,9 @@ class ClientWorkOrderList(BaseModel):
     total: int
     page: int
     size: int
+    
+class CancelTicketRequest(BaseModel):
+    reason: Optional[str] = None
 
 
 # =============================================================================

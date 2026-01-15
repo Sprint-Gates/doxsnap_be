@@ -53,6 +53,20 @@ contract_sites = Table(
     Column('created_at', DateTime, default=func.now())
 )
 
+user_warehouses = Table(
+    "user_warehouses",
+    Base.metadata,
+    Column("user_id", Integer, ForeignKey("users.id"), primary_key=True),
+    Column("warehouse_id", Integer, ForeignKey("warehouses.id"), primary_key=True)
+)
+
+# Secondary table for many-to-many relationship: ExternalUserClient ↔ Sites
+external_user_client_sites = Table(
+    "external_user_client_sites",
+    Base.metadata,
+    Column("external_user_client_id", Integer, ForeignKey("external_user_clients.id"), primary_key=True),
+    Column("site_id", Integer, ForeignKey("sites.id"), primary_key=True)
+)
 
 class Plan(Base):
     """Subscription plans for document management"""
@@ -123,7 +137,12 @@ class Company(Base):
     plan = relationship("Plan", back_populates="companies")
     users = relationship("User", back_populates="company")
     clients = relationship("Client", back_populates="company")
-
+    external_user_clients = relationship("ExternalUserClient", back_populates="company")
+    roles = relationship(
+        "Role",
+        back_populates="company",
+        cascade="all, delete-orphan"
+    )
 
 class Client(Base):
     """Client/Customer of a company - linked to Address Book for master data"""
@@ -153,6 +172,8 @@ class Client(Base):
     # DEPRECATED: branches relationship - use Sites instead
     # branches = relationship("Branch", back_populates="client")
     address_book = relationship("AddressBook", backref="client")
+    external_user_clients = relationship("ExternalUserClient", back_populates="client", cascade="all, delete-orphan"
+    )
 
 
 # DEPRECATED: Branch model - Use Site model instead
@@ -238,6 +259,7 @@ class User(Base):
     # Link to Address Book employee record (search_type='E')
     # This allows users to have associated petty cash funds, attendance, etc.
     address_book_id = Column(Integer, ForeignKey("address_book.id"), nullable=True)
+    role_id = Column(Integer, ForeignKey("roles.id"), nullable=False) 
 
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
@@ -248,7 +270,88 @@ class User(Base):
     # DEPRECATED: Use assigned_sites via operator_sites table instead
     # assigned_branches = relationship("Branch", secondary=operator_branches, back_populates="operators")
     address_book = relationship("AddressBook", foreign_keys=[address_book_id], backref="user_account")
+    external_user_clients = relationship(
+        "ExternalUserClient",
+        back_populates="user",
+        cascade="all, delete-orphan"
+    )
+    warehouses = relationship(
+    "Warehouse",
+    secondary=user_warehouses,
+    back_populates="managers"
+    )
+    role_obj = relationship("Role", back_populates="users")
 
+class Role(Base):
+    __tablename__ = "roles"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+
+    name = Column(String, nullable=False)  # e.g. "Procurement Manager"
+    description = Column(Text, nullable=True)
+
+    # Relationships
+    company = relationship("Company", back_populates="roles")
+    users = relationship("User", back_populates="role_obj")
+    permissions = relationship(
+        "RolePermission",
+        back_populates="role",
+        cascade="all, delete-orphan"
+    )
+    __table_args__ = (
+        UniqueConstraint("company_id", "name", name="uq_company_role_name"),
+    )
+
+class Permission(Base):
+    __tablename__ = "permissions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    module = Column(String, nullable=False)  # e.g., "Purchase Request"
+    action = Column(String, nullable=False)  # e.g., "approve", "create"
+
+    # Unique constraint to prevent duplicates
+    __table_args__ = (
+        UniqueConstraint("module", "action", name="uq_module_action"),
+    )
+
+    # Relationships
+    roles = relationship("RolePermission", back_populates="permission")
+
+class RolePermission(Base):
+    __tablename__ = "role_permissions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    role_id = Column(Integer, ForeignKey("roles.id", ondelete="CASCADE"), nullable=False)
+    permission_id = Column(Integer, ForeignKey("permissions.id", ondelete="CASCADE"), nullable=False)
+
+    # Relationships
+    role = relationship("Role", back_populates="permissions")
+    permission = relationship("Permission", back_populates="roles")
+
+    __table_args__ = (
+        UniqueConstraint("role_id", "permission_id", name="uq_role_permission"),
+    )
+
+
+class ExternalUserClient(Base):
+    __tablename__ = "external_user_clients"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    client_id = Column(Integer, ForeignKey("clients.id"), nullable=False)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+
+    # Relationships
+    user = relationship("User", back_populates="external_user_clients")
+    client = relationship("Client", back_populates="external_user_clients")
+    company = relationship("Company", back_populates="external_user_clients")
+    sites = relationship(
+        "Site",
+        secondary=external_user_client_sites,
+        back_populates="external_user_clients"
+    )
 
 class SuperAdmin(Base):
     """Platform super admin for managing all companies and subscriptions"""
@@ -398,6 +501,11 @@ class Warehouse(Base):
     # Relationships
     company = relationship("Company", backref="warehouses")
     business_unit = relationship("BusinessUnit", backref="warehouses")
+    managers = relationship(
+        "User",
+        secondary=user_warehouses,
+        back_populates="warehouses"
+    )
 
 
 class OTPCode(Base):
@@ -1755,8 +1863,12 @@ class Site(Base):
     operators = relationship("User", secondary=operator_sites, backref="assigned_sites")
     contracts = relationship("Contract", secondary=contract_sites, back_populates="sites")
     projects = relationship("Project", back_populates="site", cascade="all, delete-orphan")
-    technician_shifts = relationship("TechnicianSiteShift", back_populates="site", cascade="all, delete-orphan"
-)
+    technician_shifts = relationship("TechnicianSiteShift", back_populates="site", cascade="all, delete-orphan")
+    external_user_clients = relationship(
+        "ExternalUserClient",
+        secondary=external_user_client_sites,
+        back_populates="sites"
+    )
 
 
 
@@ -2485,7 +2597,6 @@ class NPSSurvey(Base):
     site = relationship("Site", backref="nps_surveys")
     collector = relationship("User", foreign_keys=[collected_by], backref="collected_nps_surveys")
     follow_up_user = relationship("User", foreign_keys=[followed_up_by], backref="followed_up_nps_surveys")
-
 
 # ============================================================================
 # Petty Cash Models
