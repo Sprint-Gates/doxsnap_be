@@ -4,7 +4,7 @@ from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
 from typing import Optional, List
 from app.database import get_db
-from app.models import User, Company, Site, AddressBook, operator_sites
+from app.models import User, Company, Site, AddressBook, operator_sites, Role
 from app.utils.security import verify_token, get_password_hash
 from app.utils.limits import enforce_user_limit
 import logging
@@ -13,6 +13,30 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 security = HTTPBearer()
+
+
+def get_or_create_operator_role(db: Session, company_id: int) -> Role:
+    """
+    Ensure an Operator role exists for the given company.
+    Returns the Operator role (existing or newly created).
+    """
+    operator_role = db.query(Role).filter(
+        Role.company_id == company_id,
+        Role.name == "Operator"
+    ).first()
+
+    if operator_role:
+        return operator_role
+
+    operator_role = Role(
+        company_id=company_id,
+        name="Operator",
+        description="Site operator with limited access"
+    )
+    db.add(operator_role)
+    db.flush()
+
+    return operator_role
 
 
 def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security), db: Session = Depends(get_db)):
@@ -209,6 +233,9 @@ async def create_operator(
             sites.append(site)
 
     try:
+        # Get or create the Operator role for this company
+        operator_role = get_or_create_operator_role(db, user.company_id)
+
         operator = User(
             email=data.email,
             name=data.name,
@@ -216,6 +243,7 @@ async def create_operator(
             phone=data.phone,
             company_id=user.company_id,
             role="operator",
+            role_id=operator_role.id,
             is_active=True,
             remaining_documents=company.plan.documents_max if company and company.plan else 100
         )
