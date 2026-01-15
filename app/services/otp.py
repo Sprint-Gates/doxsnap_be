@@ -123,12 +123,12 @@ class OTPService:
         """Send OTP via email"""
         
         subject_map = {
-            "email_verification": "Verify Your Email - DoxSnap",
-            "password_reset": "Password Reset Code - DoxSnap", 
-            "login": "Login Verification Code - DoxSnap"
+            "email_verification": "Verify Your Email - CoreSRP",
+            "password_reset": "Password Reset Code - CoreSRP",
+            "login": "Login Verification Code - CoreSRP"
         }
-        
-        subject = subject_map.get(purpose, "Verification Code - DoxSnap")
+
+        subject = subject_map.get(purpose, "Verification Code - CoreSRP")
         
         # Email content
         if purpose == "email_verification":

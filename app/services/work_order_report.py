@@ -628,7 +628,7 @@ class WorkOrderReportService:
             </div>
         </div>
         <div class="footer">
-            DoxSnap CAFM • {datetime.now().strftime('%b %d, %Y')}
+            CoreSRP CAFM • {datetime.now().strftime('%b %d, %Y')}
         </div>
     </div>
 </body>

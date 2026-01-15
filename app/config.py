@@ -49,7 +49,38 @@ class Settings(BaseSettings):
 
     # Frontend URL for email links
     frontend_url: str = "http://localhost:4200"
-    
+
+    # Firebase Cloud Messaging
+    firebase_service_account_path: Optional[str] = None  # Path to Firebase service account JSON
+
+    # Redis Cache Configuration (supports both local Redis and Upstash)
+    redis_url: str = "redis://localhost:6379/0"  # For local Redis
+    upstash_redis_rest_url: Optional[str] = None  # For Upstash
+    upstash_redis_rest_token: Optional[str] = None  # For Upstash
+    cache_enabled: bool = True
+    cache_default_ttl: int = 300  # 5 minutes default TTL
+
+    @field_validator('cache_enabled', mode='before')
+    @classmethod
+    def parse_cache_enabled(cls, v):
+        if v is None or v == '':
+            return True
+        if isinstance(v, str):
+            return v.lower() in ('true', '1', 'yes')
+        return bool(v)
+
+    @field_validator('cache_default_ttl', mode='before')
+    @classmethod
+    def parse_cache_ttl(cls, v):
+        if v is None or v == '':
+            return 300
+        return int(v)
+
+    @property
+    def use_upstash(self) -> bool:
+        """Check if Upstash credentials are configured"""
+        return bool(self.upstash_redis_rest_url and self.upstash_redis_rest_token)
+
     @property
     def database_connection_url(self) -> str:
         """Build database URL from individual components or use direct URL"""

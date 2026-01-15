@@ -66,6 +66,8 @@ tmp/
 *.key
 credentials.json
 secrets.json
+firebase-service-account.json
+*-firebase-adminsdk-*.json
 
 # Misc
 *.bak

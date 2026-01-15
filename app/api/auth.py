@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta
-from fastapi import APIRouter, Depends, HTTPException, status, Response
+from fastapi import APIRouter, Depends, HTTPException, status, Response, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
@@ -9,6 +9,7 @@ from app.database import get_db
 from app.schemas import UserCreate, UserLogin, Token, User as UserSchema, PasswordReset, PasswordResetConfirm, UserUpdate, RefreshTokenRequest
 from app.services.auth import create_user, authenticate_user, get_user_by_email, get_user_by_id, update_user_profile
 from app.utils.security import create_access_token, verify_token, get_password_hash, generate_refresh_token, get_refresh_token_expiry
+from app.utils.rate_limiter import limiter, RateLimits
 from app.config import settings
 from app.services.otp import OTPService
 from app.models import RefreshToken, Company
@@ -54,7 +55,7 @@ def get_subscription_info(user, db: Session) -> dict:
         if 0 < delta.days <= 3:
             result["show_warning"] = True
             if company.subscription_status == "trial":
-                result["warning_message"] = f"Your trial expires in {delta.days} day{'s' if delta.days != 1 else ''}. Upgrade now to continue using DoxSnap."
+                result["warning_message"] = f"Your trial expires in {delta.days} day{'s' if delta.days != 1 else ''}. Upgrade now to continue using CoreSRP."
             else:
                 result["warning_message"] = f"Your subscription expires in {delta.days} day{'s' if delta.days != 1 else ''}. Renew now to avoid interruption."
 
@@ -148,7 +149,8 @@ async def get_current_active_user(
 
 
 @router.post("/register", response_model=UserSchema)
-async def register(user: UserCreate, db: Session = Depends(get_db)):
+@limiter.limit(RateLimits.REGISTER)
+async def register(request: Request, user: UserCreate, db: Session = Depends(get_db)):
     try:
         db_user = create_user(db=db, user=user)
         return db_user
@@ -162,7 +164,8 @@ async def register(user: UserCreate, db: Session = Depends(get_db)):
 
 
 @router.post("/login", response_model=Token)
-async def login(user_credentials: UserLogin, db: Session = Depends(get_db)):
+@limiter.limit(RateLimits.LOGIN)
+async def login(request: Request, user_credentials: UserLogin, db: Session = Depends(get_db)):
     user = authenticate_user(db, user_credentials.email, user_credentials.password)
     if not user:
         raise HTTPException(
@@ -369,7 +372,8 @@ async def update_profile(
 
 
 @router.post("/forgot-password")
-async def forgot_password(password_reset: PasswordReset, db: Session = Depends(get_db)):
+@limiter.limit(RateLimits.FORGOT_PASSWORD)
+async def forgot_password(request: Request, password_reset: PasswordReset, db: Session = Depends(get_db)):
     """
     Request a password reset OTP.
     Sends an OTP code to the user's email if it exists.

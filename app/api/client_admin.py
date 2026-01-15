@@ -27,7 +27,7 @@ router = APIRouter(prefix="/admin/client-users", tags=["Client Admin"])
 logger = logging.getLogger(__name__)
 
 
-def send_client_invitation_email(client: ClientUser, invitation_url: str, company_name: str = "DoxSnap") -> bool:
+def send_client_invitation_email(client: ClientUser, invitation_url: str, company_name: str = "CoreSRP") -> bool:
     """
     Send invitation email to client user.
     Returns True if sent successfully, False otherwise.
@@ -220,10 +220,10 @@ async def invite_client_user(
 
     # Get company name for the email
     company = db.query(Company).filter(Company.id == current_user.company_id).first()
-    company_name = company.name if company else "DoxSnap"
+    company_name = company.name if company else "CoreSRP"
 
     # Build invitation URL (frontend will handle this)
-    # The actual URL will be something like: https://app.doxsnap.com/client/accept-invite?token=xxx
+    # The actual URL will be something like: https://app.coresrp.com/client/accept-invite?token=xxx
     invitation_url = f"/client/accept-invite?token={invitation_token}"
 
     # Send invitation email
@@ -452,7 +452,7 @@ async def resend_invitation(
 
     # Get company name for the email
     company = db.query(Company).filter(Company.id == current_user.company_id).first()
-    company_name = company.name if company else "DoxSnap"
+    company_name = company.name if company else "CoreSRP"
 
     # Build invitation URL
     invitation_url = f"/client/accept-invite?token={new_token}"

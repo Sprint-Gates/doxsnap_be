@@ -12,7 +12,7 @@ from typing import Optional, List
 import secrets
 
 from app.database import get_db
-from app.models import SuperAdmin, SuperAdminRefreshToken, Company, Plan, User
+from app.models import SuperAdmin, SuperAdminRefreshToken, Company, Plan, User, UpgradeRequest
 from app.utils.security import get_password_hash, verify_password, create_access_token, verify_token, generate_refresh_token, get_refresh_token_expiry
 
 router = APIRouter()
@@ -923,3 +923,182 @@ async def setup_super_admin(
     logger.info(f"[SECURITY] Super admin created successfully: {data.email}")
 
     return SuperAdminResponse.model_validate(super_admin)
+
+
+# ============================================================================
+# Upgrade Request Management
+# ============================================================================
+
+class UpgradeRequestAdminResponse(BaseModel):
+    id: int
+    company_id: int
+    company_name: str
+    company_email: str
+    requested_by_id: int
+    requested_by_name: str
+    requested_by_email: str
+    current_plan_id: Optional[int]
+    current_plan_name: Optional[str]
+    requested_plan_id: Optional[int]
+    requested_plan_name: Optional[str]
+    request_type: str
+    status: str
+    message: Optional[str]
+    admin_notes: Optional[str]
+    created_at: datetime
+    processed_at: Optional[datetime]
+
+    class Config:
+        from_attributes = True
+
+
+class UpgradeRequestProcess(BaseModel):
+    status: str  # approved, rejected, completed
+    admin_notes: Optional[str] = None
+    new_plan_id: Optional[int] = None  # For upgrading company to new plan
+    extend_days: Optional[int] = None  # For extending subscription
+
+
+@router.get("/platform-admin/upgrade-requests", response_model=List[UpgradeRequestAdminResponse])
+async def get_all_upgrade_requests(
+    status_filter: Optional[str] = None,
+    db: Session = Depends(get_db),
+    super_admin: SuperAdmin = Depends(get_current_super_admin)
+):
+    """Get all upgrade requests, optionally filtered by status"""
+    query = db.query(UpgradeRequest)
+
+    if status_filter:
+        query = query.filter(UpgradeRequest.status == status_filter)
+
+    requests = query.order_by(UpgradeRequest.created_at.desc()).all()
+
+    result = []
+    for req in requests:
+        company = db.query(Company).filter(Company.id == req.company_id).first()
+        user = db.query(User).filter(User.id == req.requested_by_id).first()
+        current_plan = db.query(Plan).filter(Plan.id == req.current_plan_id).first() if req.current_plan_id else None
+        requested_plan = db.query(Plan).filter(Plan.id == req.requested_plan_id).first() if req.requested_plan_id else None
+
+        result.append(UpgradeRequestAdminResponse(
+            id=req.id,
+            company_id=req.company_id,
+            company_name=company.name if company else "Unknown",
+            company_email=company.email if company else "",
+            requested_by_id=req.requested_by_id,
+            requested_by_name=user.name if user else "Unknown",
+            requested_by_email=user.email if user else "",
+            current_plan_id=req.current_plan_id,
+            current_plan_name=current_plan.name if current_plan else None,
+            requested_plan_id=req.requested_plan_id,
+            requested_plan_name=requested_plan.name if requested_plan else None,
+            request_type=req.request_type,
+            status=req.status,
+            message=req.message,
+            admin_notes=req.admin_notes,
+            created_at=req.created_at,
+            processed_at=req.processed_at
+        ))
+
+    return result
+
+
+@router.get("/platform-admin/upgrade-requests/{request_id}", response_model=UpgradeRequestAdminResponse)
+async def get_upgrade_request(
+    request_id: int,
+    db: Session = Depends(get_db),
+    super_admin: SuperAdmin = Depends(get_current_super_admin)
+):
+    """Get a specific upgrade request"""
+    req = db.query(UpgradeRequest).filter(UpgradeRequest.id == request_id).first()
+    if not req:
+        raise HTTPException(status_code=404, detail="Upgrade request not found")
+
+    company = db.query(Company).filter(Company.id == req.company_id).first()
+    user = db.query(User).filter(User.id == req.requested_by_id).first()
+    current_plan = db.query(Plan).filter(Plan.id == req.current_plan_id).first() if req.current_plan_id else None
+    requested_plan = db.query(Plan).filter(Plan.id == req.requested_plan_id).first() if req.requested_plan_id else None
+
+    return UpgradeRequestAdminResponse(
+        id=req.id,
+        company_id=req.company_id,
+        company_name=company.name if company else "Unknown",
+        company_email=company.email if company else "",
+        requested_by_id=req.requested_by_id,
+        requested_by_name=user.name if user else "Unknown",
+        requested_by_email=user.email if user else "",
+        current_plan_id=req.current_plan_id,
+        current_plan_name=current_plan.name if current_plan else None,
+        requested_plan_id=req.requested_plan_id,
+        requested_plan_name=requested_plan.name if requested_plan else None,
+        request_type=req.request_type,
+        status=req.status,
+        message=req.message,
+        admin_notes=req.admin_notes,
+        created_at=req.created_at,
+        processed_at=req.processed_at
+    )
+
+
+@router.put("/platform-admin/upgrade-requests/{request_id}/process")
+async def process_upgrade_request(
+    request_id: int,
+    data: UpgradeRequestProcess,
+    db: Session = Depends(get_db),
+    super_admin: SuperAdmin = Depends(get_current_super_admin)
+):
+    """Process an upgrade request (approve, reject, or complete)"""
+    import logging
+    logger = logging.getLogger(__name__)
+
+    req = db.query(UpgradeRequest).filter(UpgradeRequest.id == request_id).first()
+    if not req:
+        raise HTTPException(status_code=404, detail="Upgrade request not found")
+
+    if req.status != "pending":
+        raise HTTPException(status_code=400, detail="Only pending requests can be processed")
+
+    valid_statuses = ["approved", "rejected", "completed"]
+    if data.status not in valid_statuses:
+        raise HTTPException(status_code=400, detail=f"Invalid status. Must be one of: {valid_statuses}")
+
+    company = db.query(Company).filter(Company.id == req.company_id).first()
+    if not company:
+        raise HTTPException(status_code=404, detail="Company not found")
+
+    # Update the request
+    req.status = data.status
+    req.admin_notes = data.admin_notes
+    req.processed_by_id = super_admin.id
+    req.processed_at = datetime.utcnow()
+
+    # If approved/completed and a new plan is specified, update the company
+    if data.status in ["approved", "completed"]:
+        if data.new_plan_id:
+            new_plan = db.query(Plan).filter(Plan.id == data.new_plan_id).first()
+            if not new_plan:
+                raise HTTPException(status_code=404, detail="New plan not found")
+            company.plan_id = new_plan.id
+            logger.info(f"Company {company.name} upgraded to plan {new_plan.name}")
+
+        # Extend subscription if specified
+        if data.extend_days:
+            if company.subscription_end:
+                company.subscription_end = company.subscription_end + timedelta(days=data.extend_days)
+            else:
+                company.subscription_end = datetime.utcnow() + timedelta(days=data.extend_days)
+
+            # Update status from trial to active if extending
+            if company.subscription_status == "trial":
+                company.subscription_status = "active"
+
+            logger.info(f"Company {company.name} subscription extended by {data.extend_days} days")
+
+    db.commit()
+    logger.info(f"Upgrade request {request_id} processed: status={data.status}, by={super_admin.email}")
+
+    return {
+        "success": True,
+        "message": f"Upgrade request {data.status}",
+        "request_id": request_id
+    }

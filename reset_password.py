@@ -11,7 +11,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from app.database import SessionLocal, engine, Base
-from app.models import User
+from app.models import User, SuperAdmin
 from app.utils.security import get_password_hash
 
 def list_users():
@@ -73,18 +73,53 @@ def create_admin(email: str, password: str, name: str = "Admin"):
     finally:
         db.close()
 
+def list_platform_admins():
+    """List all platform admins (super admins) in the database"""
+    db = SessionLocal()
+    try:
+        admins = db.query(SuperAdmin).all()
+        if not admins:
+            print("\nNo platform admins found in database.")
+            return []
+
+        print("\n=== Platform Admins (Super Admins) ===")
+        for admin in admins:
+            print(f"  ID: {admin.id}, Email: {admin.email}, Name: {admin.name}, Active: {admin.is_active}")
+        return admins
+    finally:
+        db.close()
+
+def reset_platform_admin_password(email: str, new_password: str):
+    """Reset password for a platform admin (super admin)"""
+    db = SessionLocal()
+    try:
+        admin = db.query(SuperAdmin).filter(SuperAdmin.email == email).first()
+        if not admin:
+            print(f"\nError: Platform admin with email '{email}' not found.")
+            return False
+
+        admin.hashed_password = get_password_hash(new_password)
+        admin.is_active = True  # Ensure admin is active
+        db.commit()
+        print(f"\nSuccess! Password reset for platform admin: {email}")
+        return True
+    finally:
+        db.close()
+
 def main():
     print("\n=== DoxSnap User Management ===")
 
-    # First, list existing users
+    # First, list existing users and platform admins
     users = list_users()
+    platform_admins = list_platform_admins()
 
     print("\nOptions:")
     print("  1. Reset password for existing user")
     print("  2. Create new admin user")
-    print("  3. Exit")
+    print("  3. Reset password for Platform Admin (Super Admin)")
+    print("  4. Exit")
 
-    choice = input("\nEnter choice (1/2/3): ").strip()
+    choice = input("\nEnter choice (1/2/3/4): ").strip()
 
     if choice == "1":
         if not users:
@@ -108,6 +143,17 @@ def main():
             print("Email and password are required.")
 
     if choice == "3":
+        if not platform_admins:
+            print("No platform admins found in database.")
+        else:
+            email = input("Enter platform admin email: ").strip()
+            new_password = input("Enter new password: ").strip()
+            if email and new_password:
+                reset_platform_admin_password(email, new_password)
+            else:
+                print("Email and password are required.")
+
+    if choice == "4":
         print("Goodbye!")
 
 if __name__ == "__main__":

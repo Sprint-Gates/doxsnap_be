@@ -122,6 +122,7 @@ class CompanyResponse(BaseModel):
 
 class CompanyUpdate(BaseModel):
     name: Optional[str] = None
+    company_code: Optional[str] = None  # Unique code for mobile app login
     email: Optional[EmailStr] = None
     phone: Optional[str] = None
     address: Optional[str] = None
@@ -404,6 +405,7 @@ async def get_my_company(user: User = Depends(get_current_user), db: Session = D
     return {
         "id": company.id,
         "name": company.name,
+        "company_code": company.company_code,
         "slug": company.slug,
         "email": company.email,
         "phone": company.phone,
@@ -459,6 +461,9 @@ async def update_my_company(
         update_data = data.dict(exclude_unset=True)
         for field, value in update_data.items():
             if value is not None:
+                # Convert company_code to uppercase
+                if field == 'company_code' and isinstance(value, str):
+                    value = value.upper().strip()
                 setattr(company, field, value)
 
         db.commit()

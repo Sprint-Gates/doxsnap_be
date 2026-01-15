@@ -3,16 +3,19 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 from datetime import datetime
 import os
 import logging
 import google.generativeai as genai
 
-from app.api import auth, images, otp, admin, document_types, technician_site_shifts, plans, companies, projects, operators, handheld_devices, assets, attendance, work_orders, warehouses, pm_checklists, pm_work_orders, dashboard, item_master, cycle_count, hhd_auth, users, sites, contracts, tickets, ticket_timeline, calendar, condition_reports, technician_evaluations, nps, petty_cash, docs, allocations, accounting, exchange_rates, purchase_requests, purchase_orders, goods_receipts, crm_leads, crm_opportunities, crm_activities, crm_campaigns, tools, disposals, business_units, address_book, supplier_invoices, supplier_payments, technicians, import_export, fleet, client_portal, client_admin, platform_admin, roles
+from app.api import auth, images, otp, admin, document_types, technician_site_shifts, plans, companies, projects, operators, handheld_devices, assets, attendance, work_orders, warehouses, pm_checklists, pm_work_orders, dashboard, item_master, cycle_count, hhd_auth, users, sites, contracts, tickets, ticket_timeline, calendar, condition_reports, technician_evaluations, nps, petty_cash, docs, allocations, accounting, exchange_rates, purchase_requests, purchase_orders, goods_receipts, crm_leads, crm_opportunities, crm_activities, crm_campaigns, tools, disposals, business_units, address_book, supplier_invoices, supplier_payments, technicians, import_export, fleet, client_portal, client_admin, platform_admin, upgrade_requests, rfq, hhd_rfq, roles
 from app.database import engine, get_db
-from app.models import Base, User, ProcessedImage, DocumentType, Warehouse, Plan, Company, Client, Project, Technician, HandHeldDevice, Floor, Room, Equipment, SubEquipment, TechnicianAttendance, SparePart, WorkOrder, WorkOrderSparePart, WorkOrderTimeEntry, PMSchedule, ItemCategory, ItemMaster, ItemStock, ItemLedger, ItemTransfer, ItemTransferLine, InvoiceItem, CycleCount, CycleCountItem, RefreshToken, Site, Building, Space, Scope, Contract, ContractScope, Ticket, CalendarSlot, WorkOrderSlotAssignment, CalendarTemplate, InvoiceAllocation, AllocationPeriod, RecognitionLog, AccountType, Account, FiscalPeriod, JournalEntry, JournalEntryLine, AccountBalance, DefaultAccountMapping, ExchangeRate, ExchangeRateLog, PurchaseRequest, PurchaseRequestLine, PurchaseOrder, PurchaseOrderLine, PurchaseOrderInvoice, GoodsReceipt, GoodsReceiptLine, LeadSource, PipelineStage, Lead, Opportunity, CRMActivity, Campaign, CampaignLead, ToolCategory, Tool, ToolPurchase, ToolPurchaseLine, ToolAllocationHistory, Disposal, DisposalToolLine, DisposalItemLine, BusinessUnit, AddressBook, AddressBookContact, SupplierInvoice, SupplierInvoiceLine, SupplierPayment, SupplierPaymentAllocation, DebitNote, DebitNoteLine, PurchaseOrderAmendment, Service, ClientUser, ClientRefreshToken
+from app.models import Base, User, ProcessedImage, DocumentType, Warehouse, Plan, Company, Client, Project, Technician, HandHeldDevice, Floor, Room, Equipment, SubEquipment, TechnicianAttendance, SparePart, WorkOrder, WorkOrderSparePart, WorkOrderTimeEntry, PMSchedule, ItemCategory, ItemMaster, ItemStock, ItemLedger, ItemTransfer, ItemTransferLine, InvoiceItem, CycleCount, CycleCountItem, RefreshToken, Site, Building, Space, Scope, Contract, ContractScope, Ticket, CalendarSlot, WorkOrderSlotAssignment, CalendarTemplate, InvoiceAllocation, AllocationPeriod, RecognitionLog, AccountType, Account, FiscalPeriod, JournalEntry, JournalEntryLine, AccountBalance, DefaultAccountMapping, ExchangeRate, ExchangeRateLog, PurchaseRequest, PurchaseRequestLine, PurchaseOrder, PurchaseOrderLine, PurchaseOrderInvoice, GoodsReceipt, GoodsReceiptLine, LeadSource, PipelineStage, Lead, Opportunity, CRMActivity, Campaign, CampaignLead, ToolCategory, Tool, ToolPurchase, ToolPurchaseLine, ToolAllocationHistory, Disposal, DisposalToolLine, DisposalItemLine, BusinessUnit, AddressBook, AddressBookContact, SupplierInvoice, SupplierInvoiceLine, SupplierPayment, SupplierPaymentAllocation, DebitNote, DebitNoteLine, PurchaseOrderAmendment, Service, ClientUser, ClientRefreshToken, RFQ, RFQItem, RFQVendor, RFQQuote, RFQQuoteLine, RFQAuditTrail, RFQSiteVisit, RFQSiteVisitPhoto, RFQComparison, RFQDocument
 from app.config import settings
 from app.utils.security import verify_token
+from app.utils.rate_limiter import limiter, rate_limit_exceeded_handler
 from sqlalchemy import text
 from app.middlewares.permission_middleware import PermissionMiddleware
 
@@ -62,6 +65,11 @@ def run_migrations():
         ("tickets", "service_id", "ALTER TABLE tickets ADD COLUMN IF NOT EXISTS service_id INTEGER REFERENCES services(id)"),
         # Client Portal: Make tickets.requested_by nullable (for client portal submissions)
         ("tickets", "requested_by_nullable", "ALTER TABLE tickets ALTER COLUMN requested_by DROP NOT NULL"),
+        # FCM Push Notifications
+        ("handheld_devices", "fcm_token", "ALTER TABLE handheld_devices ADD COLUMN IF NOT EXISTS fcm_token VARCHAR"),
+        ("handheld_devices", "fcm_token_updated_at", "ALTER TABLE handheld_devices ADD COLUMN IF NOT EXISTS fcm_token_updated_at TIMESTAMP"),
+        # Company code for mobile app login
+        ("companies", "company_code", "ALTER TABLE companies ADD COLUMN IF NOT EXISTS company_code VARCHAR UNIQUE"),
     ]
 
     with engine.connect() as conn:
@@ -105,6 +113,10 @@ google_api_valid = validate_google_api_key()
 app = FastAPI(title="Image Processor API", version="1.0.0", redirect_slashes=False)
 
 app.add_middleware(PermissionMiddleware)
+# Add rate limiter to app state and register exception handler
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
+
 
 # Subscription enforcement middleware
 class SubscriptionEnforcementMiddleware(BaseHTTPMiddleware):
@@ -224,7 +236,18 @@ app.add_middleware(SubscriptionEnforcementMiddleware)
 # CORS middleware - must be added after all other middlewares
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:4200","http://localhost:4201", "http://127.0.0.1:4200", "http://localhost:8100", "http://127.0.0.1:8100"],
+    allow_origins=[
+        "http://localhost:4200",
+        "http://localhost:4201",
+        "http://127.0.0.1:4200",
+        "http://localhost:8100",
+        "http://127.0.0.1:8100",
+        "https://coresrp.com",
+        "http://coresrp.com",
+        "capacitor://localhost",  # iOS Capacitor
+        "ionic://localhost",  # iOS Ionic
+        "http://localhost",  # Android Capacitor
+    ],
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
     allow_headers=["*"],
@@ -280,6 +303,10 @@ app.include_router(exchange_rates.router, prefix="/api", tags=["Exchange Rates"]
 app.include_router(purchase_requests.router, prefix="/api/purchase-requests", tags=["Purchase Requests"])
 app.include_router(purchase_orders.router, prefix="/api/purchase-orders", tags=["Purchase Orders"])
 app.include_router(goods_receipts.router, prefix="/api/goods-receipts", tags=["Goods Receipts"])
+app.include_router(rfq.router, prefix="/api/rfqs", tags=["RFQ - Request for Quotation"])
+
+# Mobile HHD RFQ (Parts Requests for Technicians)
+app.include_router(hhd_rfq.router, prefix="/api/hhd", tags=["HHD - Mobile Parts Requests"])
 
 # CRM Routers
 app.include_router(crm_leads.router, prefix="/api", tags=["CRM - Leads"])
@@ -318,6 +345,9 @@ app.include_router(client_admin.router, prefix="/api", tags=["Client Admin"])
 # Platform Admin Router (Super Admin for managing subscriptions)
 app.include_router(platform_admin.router, prefix="/api", tags=["Platform Admin"])
 
+# Upgrade Requests Router
+app.include_router(upgrade_requests.router, prefix="/api", tags=["Upgrade Requests"])
+
 @app.get("/")
 async def root():
     return {
@@ -327,9 +357,26 @@ async def root():
 
 @app.get("/api/health")
 async def health_check():
+    from app.services.cache import cache_service
     return {
         "status": "healthy",
         "services": {
-            "google_ai": google_api_valid
+            "google_ai": google_api_valid,
+            "redis_cache": cache_service.is_connected
         }
     }
+
+
+# Redis Cache Lifecycle Events
+@app.on_event("startup")
+async def startup_event():
+    """Initialize Redis cache connection on app startup"""
+    from app.services.cache import cache_service
+    await cache_service.connect()
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Close Redis cache connection on app shutdown"""
+    from app.services.cache import cache_service
+    await cache_service.disconnect()

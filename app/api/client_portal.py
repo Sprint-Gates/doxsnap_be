@@ -8,7 +8,7 @@ These endpoints use separate authentication from the admin portal.
 from datetime import datetime
 from typing import Optional, List
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status, Request
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import desc, func, or_
 
@@ -32,6 +32,7 @@ from app.api.client_auth import (
     generate_client_refresh_token, get_client_refresh_token_expiry
 )
 from app.utils.security import get_password_hash, verify_password
+from app.utils.rate_limiter import limiter, RateLimits
 from app.config import settings
 
 router = APIRouter(prefix="/client", tags=["Client Portal"])
@@ -42,7 +43,9 @@ router = APIRouter(prefix="/client", tags=["Client Portal"])
 # =============================================================================
 
 @router.post("/login", response_model=ClientToken)
+@limiter.limit(RateLimits.CLIENT_LOGIN)
 async def client_login(
+    request: Request,
     credentials: ClientUserLogin,
     db: Session = Depends(get_db)
 ):
