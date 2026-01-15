@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from sqlalchemy import func, case
+from sqlalchemy import func, case, or_
 from typing import Optional, List
 from datetime import date
 from decimal import Decimal
@@ -145,8 +145,16 @@ async def get_projects(
         site_ids = [s.id for s in user.assigned_sites]
         query = db.query(Project).filter(Project.site_id.in_(site_ids))
     else:
-        # Admins see all projects from company's clients
-        query = db.query(Project).join(Site).join(Client).filter(Client.company_id == user.company_id)
+        # Admins see all projects from company's sites (via client_id or address_book_id)
+        client_site_ids = db.query(Site.id).join(Client).filter(
+            Client.company_id == user.company_id
+        ).subquery()
+        ab_site_ids = db.query(Site.id).join(AddressBook, Site.address_book_id == AddressBook.id).filter(
+            AddressBook.company_id == user.company_id
+        ).subquery()
+        query = db.query(Project).filter(
+            or_(Project.site_id.in_(client_site_ids), Project.site_id.in_(ab_site_ids))
+        )
 
     if site_id:
         query = query.filter(Project.site_id == site_id)
@@ -218,13 +226,8 @@ async def create_project(
             detail="No company associated with this user"
         )
 
-    # Verify site belongs to company
-    site = db.query(Site).join(Client).filter(
-        Site.id == data.site_id,
-        Client.company_id == user.company_id
-    ).first()
-
-    print(site)
+    # Verify site belongs to company (supports both client_id and address_book_id paths)
+    site = db.query(Site).filter(Site.id == data.site_id).first()
 
     if not site:
         raise HTTPException(
@@ -232,11 +235,36 @@ async def create_project(
             detail="Site not found"
         )
 
-    # Check plan limits
+    # Check access via client_id (legacy) or address_book_id (new)
+    has_access = False
+    if site.client_id:
+        client = db.query(Client).filter(Client.id == site.client_id).first()
+        if client and client.company_id == user.company_id:
+            has_access = True
+    if not has_access and site.address_book_id:
+        ab_entry = db.query(AddressBook).filter(AddressBook.id == site.address_book_id).first()
+        if ab_entry and ab_entry.company_id == user.company_id:
+            has_access = True
+
+    if not has_access:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied to this site"
+        )
+
+    # Check plan limits (count projects from both client_id and address_book_id paths)
     company = db.query(Company).filter(Company.id == user.company_id).first()
     if company and company.plan:
-        current_count = db.query(Project).join(Site).join(Client).filter(
+        # Get all site IDs accessible to this company
+        client_site_ids = db.query(Site.id).join(Client).filter(
             Client.company_id == user.company_id
+        ).subquery()
+        ab_site_ids = db.query(Site.id).join(AddressBook, Site.address_book_id == AddressBook.id).filter(
+            AddressBook.company_id == user.company_id
+        ).subquery()
+
+        current_count = db.query(Project).filter(
+            (Project.site_id.in_(client_site_ids)) | (Project.site_id.in_(ab_site_ids))
         ).count()
         if current_count >= company.plan.max_projects:
             raise HTTPException(

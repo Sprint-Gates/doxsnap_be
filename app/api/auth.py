@@ -107,24 +107,24 @@ async def get_current_user(
 
     # Check if credentials were provided (auto_error=False means this can be None)
     if credentials is None:
-        logger.error("[get_current_user] No credentials provided - credentials is None")
+        #logger.error("[get_current_user] No credentials provided - credentials is None")
         raise credentials_exception
 
-    logger.info(f"[get_current_user] Credentials scheme: {credentials.scheme}, token length: {len(credentials.credentials) if credentials.credentials else 0}")
+    #logger.info(f"[get_current_user] Credentials scheme: {credentials.scheme}, token length: {len(credentials.credentials) if credentials.credentials else 0}")
 
     email = verify_token(credentials.credentials)
     if email is None:
-        logger.error("[get_current_user] Token verification failed - email is None")
+        #logger.error("[get_current_user] Token verification failed - email is None")
         raise credentials_exception
 
-    logger.info(f"[get_current_user] Token verified for email: {email}")
+    #logger.info(f"[get_current_user] Token verified for email: {email}")
 
     user = get_user_by_email(db, email=email)
     if user is None:
-        logger.error(f"[get_current_user] User not found for email: {email}")
+        #logger.error(f"[get_current_user] User not found for email: {email}")
         raise credentials_exception
 
-    logger.info(f"[get_current_user] User found: {user.email}")
+    #logger.info(f"[get_current_user] User found: {user.email}")
     return user
 
 

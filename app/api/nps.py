@@ -5,7 +5,7 @@ from sqlalchemy import func, and_, extract
 from typing import Optional, List
 from datetime import datetime, date
 from app.database import get_db
-from app.models import NPSSurvey, User, Client, Site, WorkOrder
+from app.models import NPSSurvey, User, Client, Site, WorkOrder, AddressBook
 from app.api.auth import get_current_user
 import logging
 
@@ -23,7 +23,8 @@ VALID_FOLLOW_UP_STATUSES = ["pending", "in_progress", "completed", "not_required
 # ============================================================================
 
 class NPSSurveyCreate(BaseModel):
-    client_id: int
+    client_id: Optional[int] = None  # Legacy client reference
+    address_book_id: Optional[int] = None  # New Address Book customer reference
     survey_date: date
     survey_type: Optional[str] = "general"
     score: int  # 0-10
@@ -57,7 +58,8 @@ class NPSSurveyUpdate(BaseModel):
 class NPSSurveyResponse(BaseModel):
     id: int
     company_id: int
-    client_id: int
+    client_id: Optional[int]
+    address_book_id: Optional[int]
     client_name: Optional[str]
     survey_date: str
     survey_type: str
@@ -139,11 +141,19 @@ def calculate_nps(promoters: int, detractors: int, total: int) -> float:
 
 def survey_to_response(survey: NPSSurvey) -> NPSSurveyResponse:
     """Convert NPSSurvey to response"""
+    # Get client name from address_book (preferred) or legacy client
+    client_name = None
+    if survey.address_book and survey.address_book.alpha_name:
+        client_name = survey.address_book.alpha_name
+    elif survey.client:
+        client_name = survey.client.name
+
     return NPSSurveyResponse(
         id=survey.id,
         company_id=survey.company_id,
         client_id=survey.client_id,
-        client_name=survey.client.name if survey.client else None,
+        address_book_id=survey.address_book_id,
+        client_name=client_name,
         survey_date=survey.survey_date.isoformat() if survey.survey_date else "",
         survey_type=survey.survey_type or "general",
         score=survey.score,
@@ -190,6 +200,7 @@ async def get_nps_surveys(
     """Get all NPS surveys with optional filtering"""
     query = db.query(NPSSurvey).options(
         joinedload(NPSSurvey.client),
+        joinedload(NPSSurvey.address_book),
         joinedload(NPSSurvey.site),
         joinedload(NPSSurvey.work_order),
         joinedload(NPSSurvey.collector),
@@ -378,27 +389,37 @@ async def get_client_nps_scores(
 ):
     """Get NPS scores for all clients"""
     surveys = db.query(NPSSurvey).options(
-        joinedload(NPSSurvey.client)
+        joinedload(NPSSurvey.client),
+        joinedload(NPSSurvey.address_book)
     ).filter(
         NPSSurvey.company_id == current_user.company_id
     ).all()
 
-    # Group by client
+    # Group by client (use address_book_id as primary key, fall back to client_id)
     client_data = {}
     for survey in surveys:
-        if survey.client_id not in client_data:
-            client_data[survey.client_id] = {
-                "client_id": survey.client_id,
-                "client_name": survey.client.name if survey.client else "Unknown",
+        # Use address_book_id as the key if available, otherwise client_id
+        key = survey.address_book_id or survey.client_id
+        if key not in client_data:
+            # Get client name from address_book or legacy client
+            client_name = "Unknown"
+            if survey.address_book and survey.address_book.alpha_name:
+                client_name = survey.address_book.alpha_name
+            elif survey.client:
+                client_name = survey.client.name
+
+            client_data[key] = {
+                "client_id": key,
+                "client_name": client_name,
                 "surveys": [],
                 "promoters": 0,
                 "detractors": 0
             }
-        client_data[survey.client_id]["surveys"].append(survey)
+        client_data[key]["surveys"].append(survey)
         if survey.category == "promoter":
-            client_data[survey.client_id]["promoters"] += 1
+            client_data[key]["promoters"] += 1
         elif survey.category == "detractor":
-            client_data[survey.client_id]["detractors"] += 1
+            client_data[key]["detractors"] += 1
 
     results = []
     for client_id, data in client_data.items():
@@ -427,6 +448,7 @@ async def get_nps_survey(
     """Get a single NPS survey by ID"""
     survey = db.query(NPSSurvey).options(
         joinedload(NPSSurvey.client),
+        joinedload(NPSSurvey.address_book),
         joinedload(NPSSurvey.site),
         joinedload(NPSSurvey.work_order),
         joinedload(NPSSurvey.collector),
@@ -460,13 +482,32 @@ async def create_nps_survey(
             detail=f"Invalid survey type. Must be one of: {', '.join(VALID_SURVEY_TYPES)}"
         )
 
-    # Verify client exists
-    client = db.query(Client).filter(
-        Client.id == data.client_id,
-        Client.company_id == current_user.company_id
-    ).first()
-    if not client:
-        raise HTTPException(status_code=404, detail="Client not found")
+    # Verify client exists (via address_book_id - preferred, or legacy client_id)
+    if not data.client_id and not data.address_book_id:
+        raise HTTPException(status_code=400, detail="Either client_id or address_book_id is required")
+
+    client_id = None
+    address_book_id = None
+
+    # Prioritize address_book_id lookup (new system)
+    if data.address_book_id:
+        ab_entry = db.query(AddressBook).filter(
+            AddressBook.id == data.address_book_id,
+            AddressBook.company_id == current_user.company_id,
+            AddressBook.search_type == 'C'  # Must be a Customer
+        ).first()
+        if not ab_entry:
+            raise HTTPException(status_code=404, detail="Address Book customer not found")
+        address_book_id = data.address_book_id
+    elif data.client_id:
+        # Legacy client_id lookup - only if address_book_id not provided
+        client = db.query(Client).filter(
+            Client.id == data.client_id,
+            Client.company_id == current_user.company_id
+        ).first()
+        if not client:
+            raise HTTPException(status_code=404, detail="Client not found")
+        client_id = data.client_id
 
     # Determine category from score
     category = get_category_from_score(data.score)
@@ -476,7 +517,8 @@ async def create_nps_survey(
 
     survey = NPSSurvey(
         company_id=current_user.company_id,
-        client_id=data.client_id,
+        client_id=client_id,
+        address_book_id=address_book_id,
         survey_date=data.survey_date,
         survey_type=data.survey_type or "general",
         score=data.score,
@@ -501,13 +543,14 @@ async def create_nps_survey(
     # Reload with relationships
     survey = db.query(NPSSurvey).options(
         joinedload(NPSSurvey.client),
+        joinedload(NPSSurvey.address_book),
         joinedload(NPSSurvey.site),
         joinedload(NPSSurvey.work_order),
         joinedload(NPSSurvey.collector),
         joinedload(NPSSurvey.follow_up_user)
     ).filter(NPSSurvey.id == survey.id).first()
 
-    logger.info(f"Created NPS survey {survey.id} for client {data.client_id} with score {data.score}")
+    logger.info(f"Created NPS survey {survey.id} for address_book_id {data.address_book_id} with score {data.score}")
     return survey_to_response(survey)
 
 
@@ -559,6 +602,7 @@ async def update_nps_survey(
     # Reload with relationships
     survey = db.query(NPSSurvey).options(
         joinedload(NPSSurvey.client),
+        joinedload(NPSSurvey.address_book),
         joinedload(NPSSurvey.site),
         joinedload(NPSSurvey.work_order),
         joinedload(NPSSurvey.collector),
@@ -604,6 +648,7 @@ async def update_follow_up(
     # Reload with relationships
     survey = db.query(NPSSurvey).options(
         joinedload(NPSSurvey.client),
+        joinedload(NPSSurvey.address_book),
         joinedload(NPSSurvey.site),
         joinedload(NPSSurvey.work_order),
         joinedload(NPSSurvey.collector),
