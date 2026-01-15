@@ -340,6 +340,13 @@ async def create_contract(
     else:
         raise HTTPException(status_code=400, detail="Either client_id or address_book_id is required")
 
+    # Validate required fields
+    if not contract_data.start_date:
+        raise HTTPException(status_code=400, detail="Start date is required")
+
+    if not contract_data.end_date:
+        raise HTTPException(status_code=400, detail="End date is required")
+
     # Validate dates
     if contract_data.end_date <= contract_data.start_date:
         raise HTTPException(status_code=400, detail="End date must be after start date")
