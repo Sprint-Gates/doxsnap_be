@@ -17,7 +17,7 @@ from app.models import (
     User, WorkOrder, Equipment, Floor, Room, Project, Site, Building, Client,
     PMEquipmentClass, PMSystemCode, PMAssetType, PMChecklist, PMActivity,
     PMSchedule, Technician, work_order_technicians, HandHeldDevice,
-    WorkOrderChecklistItem, Unit, Block, Contract, contract_sites
+    WorkOrderChecklistItem, Unit, Block, Contract, contract_sites, AddressBook
 )
 from app.api.auth import verify_token
 
@@ -201,8 +201,17 @@ async def get_pm_frequencies(
     if not site:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Site not found")
 
-    client = db.query(Client).filter(Client.id == site.client_id).first()
-    if not client or client.company_id != user.company_id:
+    # Verify user has access to this site via client_id (legacy) or address_book_id
+    has_access = False
+    if site.client_id:
+        client = db.query(Client).filter(Client.id == site.client_id).first()
+        if client and client.company_id == user.company_id:
+            has_access = True
+    if not has_access and site.address_book_id:
+        ab_entry = db.query(AddressBook).filter(AddressBook.id == site.address_book_id).first()
+        if ab_entry and ab_entry.company_id == user.company_id:
+            has_access = True
+    if not has_access:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
 
     # Get all equipment in this site (through any hierarchy path) that has pm_asset_type_id set
@@ -272,8 +281,17 @@ async def preview_pm_work_orders(
     if not site:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Site not found")
 
-    client = db.query(Client).filter(Client.id == site.client_id).first()
-    if not client or client.company_id != user.company_id:
+    # Verify user has access to this site via client_id (legacy) or address_book_id
+    has_access = False
+    if site.client_id:
+        client = db.query(Client).filter(Client.id == site.client_id).first()
+        if client and client.company_id == user.company_id:
+            has_access = True
+    if not has_access and site.address_book_id:
+        ab_entry = db.query(AddressBook).filter(AddressBook.id == site.address_book_id).first()
+        if ab_entry and ab_entry.company_id == user.company_id:
+            has_access = True
+    if not has_access:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
 
     # Get equipment with PM asset types in this site (through any hierarchy path)
@@ -366,8 +384,17 @@ async def generate_pm_work_orders(
     if not site:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Site not found")
 
-    client = db.query(Client).filter(Client.id == site.client_id).first()
-    if not client or client.company_id != user.company_id:
+    # Verify user has access to this site via client_id (legacy) or address_book_id
+    has_access = False
+    if site.client_id:
+        client = db.query(Client).filter(Client.id == site.client_id).first()
+        if client and client.company_id == user.company_id:
+            has_access = True
+    if not has_access and site.address_book_id:
+        ab_entry = db.query(AddressBook).filter(AddressBook.id == site.address_book_id).first()
+        if ab_entry and ab_entry.company_id == user.company_id:
+            has_access = True
+    if not has_access:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
 
     # Validate contract - contract should be for the same client and cover this site
