@@ -2548,10 +2548,10 @@ class NPSSurvey(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
-    client_id = Column(Integer, ForeignKey("clients.id"), nullable=False)
+    client_id = Column(Integer, ForeignKey("clients.id"), nullable=True)  # Legacy - use address_book_id for new surveys
 
     # Address Book link (for transition to Address Book as master data)
-    address_book_id = Column(Integer, ForeignKey("address_book.id"), nullable=True)
+    address_book_id = Column(Integer, ForeignKey("address_book.id"), nullable=True)  # Required if client_id is null
 
     # Survey details
     survey_date = Column(Date, nullable=False)

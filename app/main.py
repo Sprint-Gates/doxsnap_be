@@ -144,20 +144,20 @@ class SubscriptionEnforcementMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
-        logger.info(f"[SubscriptionMiddleware] Request: {request.method} {path}")
+       # logger.info(f"[SubscriptionMiddleware] Request: {request.method} {path}")
 
         # Check exact matches first
         if path in self.EXEMPT_EXACT:
-            logger.info(f"[SubscriptionMiddleware] Exempt exact path, skipping: {path}")
+           # logger.info(f"[SubscriptionMiddleware] Exempt exact path, skipping: {path}")
             return await call_next(request)
 
         # Skip check for exempt path prefixes
         for exempt in self.EXEMPT_PATHS:
             if path.startswith(exempt):
-                logger.info(f"[SubscriptionMiddleware] Exempt path prefix, skipping: {path}")
+                #logger.info(f"[SubscriptionMiddleware] Exempt path prefix, skipping: {path}")
                 return await call_next(request)
 
-        logger.info(f"[SubscriptionMiddleware] Checking subscription for path: {path}")
+        #logger.info(f"[SubscriptionMiddleware] Checking subscription for path: {path}")
 
         # Skip check for non-API routes
         if not path.startswith("/api/"):
@@ -170,7 +170,7 @@ class SubscriptionEnforcementMiddleware(BaseHTTPMiddleware):
         # Get authorization header
         auth_header = request.headers.get("Authorization")
         if not auth_header or not auth_header.startswith("Bearer "):
-            logger.info(f"[SubscriptionMiddleware] No auth header, passing through")
+           # logger.info(f"[SubscriptionMiddleware] No auth header, passing through")
             # Let the route handler deal with missing auth
             return await call_next(request)
 
@@ -178,11 +178,11 @@ class SubscriptionEnforcementMiddleware(BaseHTTPMiddleware):
         email = verify_token(token)
 
         if not email:
-            logger.info(f"[SubscriptionMiddleware] Invalid token, passing through")
+           # logger.info(f"[SubscriptionMiddleware] Invalid token, passing through")
             # Invalid token - let route handler deal with it
             return await call_next(request)
 
-        logger.info(f"[SubscriptionMiddleware] Valid token for: {email}")
+        #logger.info(f"[SubscriptionMiddleware] Valid token for: {email}")
 
         # Check subscription status
         db = next(get_db())
@@ -207,7 +207,7 @@ class SubscriptionEnforcementMiddleware(BaseHTTPMiddleware):
 
             # Check if trial/subscription has expired
             if company.subscription_end and company.subscription_end < datetime.utcnow():
-                logger.info(f"[SubscriptionMiddleware] Blocking expired user: {email}, company: {company.name}, status: {company.subscription_status}")
+                #logger.info(f"[SubscriptionMiddleware] Blocking expired user: {email}, company: {company.name}, status: {company.subscription_status}")
                 if company.subscription_status == "trial":
                     return JSONResponse(
                         status_code=403,
