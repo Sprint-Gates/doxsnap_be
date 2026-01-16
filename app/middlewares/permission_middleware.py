@@ -109,7 +109,8 @@ PUBLIC_PATHS = (
     "/api/docs",
     "/api/health",
     "/api/plans",
-    "/api/companies/register"
+    "/api/companies/register",
+    "/api/client/",  # Client portal has its own auth system
 )
 
 
@@ -182,8 +183,9 @@ class PermissionMiddleware(BaseHTTPMiddleware):
             if not action:
                 action = METHOD_ACTION_MAP.get(request.method)
 
-            # Only check permissions if we have an action (skip if None)
-            if action:
+            # Only check permissions if we have an action and user has a role_id
+            # Skip permission check if role_id is not set (role system not configured)
+            if action and hasattr(user, 'role_id') and user.role_id is not None:
                 role_permissions = (
                     db.query(RolePermission)
                     .join(Permission)

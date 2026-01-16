@@ -259,7 +259,6 @@ class User(Base):
     # Link to Address Book employee record (search_type='E')
     # This allows users to have associated petty cash funds, attendance, etc.
     address_book_id = Column(Integer, ForeignKey("address_book.id"), nullable=True)
-    role_id = Column(Integer, ForeignKey("roles.id"), nullable=False) 
 
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
@@ -280,7 +279,6 @@ class User(Base):
     secondary=user_warehouses,
     back_populates="managers"
     )
-    role_obj = relationship("Role", back_populates="users")
 
 class Role(Base):
     __tablename__ = "roles"
@@ -294,7 +292,6 @@ class Role(Base):
 
     # Relationships
     company = relationship("Company", back_populates="roles")
-    users = relationship("User", back_populates="role_obj")
     permissions = relationship(
         "RolePermission",
         back_populates="role",
