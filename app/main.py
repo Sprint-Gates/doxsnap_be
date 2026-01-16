@@ -9,6 +9,8 @@ from datetime import datetime
 import os
 import logging
 import google.generativeai as genai
+from app.utils.permission_seed import seed_permissions
+from app.database import SessionLocal
 
 from app.api import auth, images, otp, admin, document_types, technician_site_shifts, plans, companies, projects, operators, handheld_devices, assets, attendance, work_orders, warehouses, pm_checklists, pm_work_orders, dashboard, item_master, cycle_count, hhd_auth, users, sites, contracts, tickets, ticket_timeline, calendar, condition_reports, technician_evaluations, nps, petty_cash, docs, allocations, accounting, exchange_rates, purchase_requests, purchase_orders, goods_receipts, crm_leads, crm_opportunities, crm_activities, crm_campaigns, tools, disposals, business_units, address_book, supplier_invoices, supplier_payments, technicians, import_export, fleet, client_portal, client_admin, platform_admin, upgrade_requests, rfq, hhd_rfq, roles
 from app.database import engine, get_db
@@ -70,6 +72,8 @@ def run_migrations():
         ("handheld_devices", "fcm_token_updated_at", "ALTER TABLE handheld_devices ADD COLUMN IF NOT EXISTS fcm_token_updated_at TIMESTAMP"),
         # Company code for mobile app login
         ("companies", "company_code", "ALTER TABLE companies ADD COLUMN IF NOT EXISTS company_code VARCHAR UNIQUE"),
+        # Role-based access control: Add role_id to users table
+        ("users", "role_id", "ALTER TABLE users ADD COLUMN role_id INTEGER"),
     ]
 
     with engine.connect() as conn:
@@ -86,6 +90,22 @@ try:
     run_migrations()
 except Exception as e:
     logger.warning(f"Migration runner error: {e}")
+
+# Seed permissions on startup (idempotent - only adds missing permissions)
+def run_permission_seed():
+    """Seed system permissions if they don't exist"""
+    db = SessionLocal()
+    try:
+        seed_permissions(db)
+    except Exception as e:
+        logger.warning(f"Permission seed error: {e}")
+    finally:
+        db.close()
+
+try:
+    run_permission_seed()
+except Exception as e:
+    logger.warning(f"Permission seed runner error: {e}")
 
 # Validate Google API Key on startup
 def validate_google_api_key():
