@@ -73,7 +73,7 @@ def run_migrations():
         # Company code for mobile app login
         ("companies", "company_code", "ALTER TABLE companies ADD COLUMN IF NOT EXISTS company_code VARCHAR UNIQUE"),
         # Role-based access control: Add role_id to users table
-        ("users", "role_id", "ALTER TABLE users ADD COLUMN role_id INTEGER"),
+        ("users", "role_id", "ALTER TABLE users ADD COLUMN IF NOT EXISTS role_id INTEGER"),
     ]
 
     with engine.connect() as conn:
