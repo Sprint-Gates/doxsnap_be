@@ -320,9 +320,6 @@ async def get_opportunities(
 
     if status:
         query = query.filter(Opportunity.status == status)
-    else:
-        # Default to open opportunities
-        query = query.filter(Opportunity.status == "open")
 
     if stage_id:
         query = query.filter(Opportunity.stage_id == stage_id)

@@ -156,6 +156,7 @@ def activity_to_response(act: CRMActivity, db: Session) -> dict:
 async def get_activities(
     activity_type: Optional[str] = None,
     status: Optional[str] = None,
+    entity_type: Optional[str] = None,
     lead_id: Optional[int] = None,
     opportunity_id: Optional[int] = None,
     client_id: Optional[int] = None,
@@ -176,6 +177,15 @@ async def get_activities(
 
     if status:
         query = query.filter(CRMActivity.status == status)
+
+    # Filter by entity type (show activities related to leads, opportunities, or clients)
+    if entity_type:
+        if entity_type == "lead":
+            query = query.filter(CRMActivity.lead_id != None)
+        elif entity_type == "opportunity":
+            query = query.filter(CRMActivity.opportunity_id != None)
+        elif entity_type == "client":
+            query = query.filter(CRMActivity.client_id != None)
 
     if lead_id:
         query = query.filter(CRMActivity.lead_id == lead_id)
