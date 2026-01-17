@@ -246,6 +246,7 @@ class User(Base):
     # Multi-tenant fields
     company_id = Column(Integer, ForeignKey("companies.id"), nullable=True)
     role = Column(String, default="admin")  # admin, operator, accounting, approver
+    role_id = Column(Integer, ForeignKey("roles.id"), nullable=True)  # Link to Role for permissions
     phone = Column(String, nullable=True)
 
     # PR Approval settings
@@ -279,6 +280,7 @@ class User(Base):
     secondary=user_warehouses,
     back_populates="managers"
     )
+    user_role = relationship("Role", foreign_keys=[role_id], backref="users")
 
 class Role(Base):
     __tablename__ = "roles"
